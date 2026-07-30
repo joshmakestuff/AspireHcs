@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Sdk Name="Aspire.AppHost.Sdk" Version="13.4.6" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.AppHost" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- IsAspireProjectResource=false: this is the hosting integration itself, not a service project. -->
+    <ProjectReference Include="..\..\src\AspireHcs\AspireHcs.csproj" IsAspireProjectResource="false" />
+  </ItemGroup>
+
+</Project>
