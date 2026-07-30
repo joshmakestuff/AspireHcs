@@ -12,6 +12,8 @@ string vhdx = Environment.GetEnvironmentVariable("HCS_TEST_VHDX")
 builder.AddHcsVm("appliance")
     .WithVhdx(vhdx, copyOnWrite: true)
     .WithMemory(gigabytes: 2)
-    .WithProcessorCount(2);
+    .WithProcessorCount(2)
+    .WithNatNetwork()
+    .WithEndpoint("ssh", targetPort: 22);
 
 builder.Build().Run();

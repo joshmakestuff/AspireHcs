@@ -69,4 +69,36 @@ public static class HcsVirtualMachineBuilderExtensions
         builder.Resource.ProcessorCount = count;
         return builder;
     }
+
+    /// <summary>
+    /// Attaches a NIC on the host's NAT network (the Hyper-V Default Switch). The switch's
+    /// built-in DHCP leases the guest an address, which AspireHcs discovers host-side and
+    /// uses to resolve the VM's endpoints. The guest image must configure its NIC for DHCP
+    /// (the default for stock Linux and Windows images).
+    /// </summary>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithNatNetwork(
+        this IResourceBuilder<HcsVirtualMachineResource> builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        builder.Resource.NetworkEnabled = true;
+        return builder;
+    }
+
+    /// <summary>
+    /// Declares a service the guest exposes on <paramref name="targetPort"/>. Registered as a
+    /// non-proxied Aspire endpoint (DCP cannot proxy into a VM) that resolves to the guest's
+    /// DHCP-leased IP once it boots. The first endpoint declared backs the resource's
+    /// connection string. Requires <see cref="WithNatNetwork"/>.
+    /// </summary>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithEndpoint(
+        this IResourceBuilder<HcsVirtualMachineResource> builder, string name, int targetPort)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(targetPort, 0);
+
+        builder.Resource.PrimaryEndpointName ??= name;
+        return builder.WithEndpoint(name: name, targetPort: targetPort, isProxied: false);
+    }
 }
