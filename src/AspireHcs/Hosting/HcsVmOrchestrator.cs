@@ -73,6 +73,11 @@ internal sealed class HcsVmInstance(
                     $"Resource '{resource.Name}' declares endpoints but no network; add WithNatNetwork().");
             }
 
+            // Nothing publishes BeforeResourceStartedEvent for resources Aspire does not own,
+            // and the orchestrator implements WaitFor in its handler for that event — so without
+            // this, WaitFor(...) on an HCS VM would never hold the boot back.
+            await eventing.PublishAsync(new BeforeResourceStartedEvent(resource, services), stopping).ConfigureAwait(false);
+
             string bootDisk = PrepareBootDisk();
             ComputeSystemDocument document = BuildDocument(bootDisk);
 
@@ -102,11 +107,6 @@ internal sealed class HcsVmInstance(
             await _vm.StartAsync(stopping).ConfigureAwait(false);
             _ = Task.Run(() => SerialConsolePump.RunAsync(resource.SerialPipeName, logger, stopping), CancellationToken.None);
 
-            await notifications.PublishUpdateAsync(resource, s => s with
-            {
-                State = KnownResourceStates.Running,
-            }).ConfigureAwait(false);
-
             logger.LogInformation("VM started; waiting for the guest OS to become ready...");
             await _vm.WaitForGuestReadyAsync(resource.MemoryMb, TimeSpan.FromMinutes(2), stopping).ConfigureAwait(false);
             logger.LogInformation("Guest OS is ready.");
@@ -116,7 +116,17 @@ internal sealed class HcsVmInstance(
                 await AllocateEndpointsAsync(endpoints, stopping).ConfigureAwait(false);
             }
 
-            await eventing.PublishAsync(new ResourceReadyEvent(resource, services), stopping).ConfigureAwait(false);
+            // Running is published last, once the guest is up and its endpoints resolve. Aspire's
+            // health monitor starts the moment a resource reports Running, and a resource with no
+            // health check annotations is declared ready right there — so publishing Running at
+            // HCS-start time would fire ResourceReadyEvent (and release WaitFor dependents) against
+            // a VM still sitting in its bootloader. Aspire raises ResourceReadyEvent itself; raising
+            // our own would be a duplicate that WaitFor cannot observe anyway, since only the
+            // health monitor records it in the resource snapshot.
+            await notifications.PublishUpdateAsync(resource, s => s with
+            {
+                State = KnownResourceStates.Running,
+            }).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {
@@ -146,17 +156,22 @@ internal sealed class HcsVmInstance(
         {
             int port = endpoint.TargetPort
                 ?? throw new InvalidOperationException($"Endpoint '{endpoint.Name}' has no target port.");
-            AllocatedEndpoint allocated = new(endpoint, ip, port);
-            // Both stores must be written: the legacy property feeds older consumers, while
-            // EndpointReference.IsAllocated (and the testing helpers) read the per-network list.
-            endpoint.AllocatedEndpoint = allocated;
-            endpoint.AllAllocatedEndpoints.AddOrUpdateAllocatedEndpoint(KnownNetworkIdentifiers.LocalhostNetwork, allocated);
+            // Setting the property is enough to make the endpoint resolve: EndpointAnnotation's
+            // constructor registers this same snapshot in AllAllocatedEndpoints under the endpoint's
+            // default network, which for WithEndpoint is the localhost network that
+            // EndpointReference.IsAllocated consults.
+            endpoint.AllocatedEndpoint = new AllocatedEndpoint(endpoint, ip, port);
         }
 
+        // Drives the orchestrator's URL processing — WithUrl callbacks and the dashboard's URL list
+        // both hang off this event, and nothing raises it for a non-DCP resource.
+        await eventing.PublishAsync(new ResourceEndpointsAllocatedEvent(resource, services), cancellationToken).ConfigureAwait(false);
+
+        // The orchestrator publishes endpoint-derived URLs as inactive (hidden), on the assumption
+        // that whoever allocated them activates them once they are really listening. That is us.
         await notifications.PublishUpdateAsync(resource, s => s with
         {
-            Urls = [.. endpoints.Select(e =>
-                new UrlSnapshot(e.Name, $"{e.UriScheme}://{ip}:{e.TargetPort}", IsInternal: false))],
+            Urls = [.. s.Urls.Select(u => u with { IsInactive = false })],
         }).ConfigureAwait(false);
     }
 
