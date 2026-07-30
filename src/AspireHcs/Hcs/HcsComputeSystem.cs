@@ -69,36 +69,66 @@ internal sealed class HcsComputeSystem : IDisposable
         => RunAsync("HcsModifyComputeSystem", op => PInvoke.HcsModifyComputeSystem(_handle, op.Handle, settingsDocument, null), 30_000, cancellationToken);
 
     /// <summary>
-    /// Waits until the guest OS has finished booting. Per the official HCS quick start,
-    /// HcsModifyComputeSystem only succeeds once guest integration services respond, so an
-    /// idempotent memory update (to the already-configured size) doubles as a readiness probe;
-    /// it fails with ERROR_NOT_READY (0x80070015) while the guest is still booting.
+    /// Waits until the guest OS has loaded its Hyper-V integration drivers, by asking for a
+    /// memory size the guest must actually honour: HCS refuses the request with ERROR_NOT_READY
+    /// (0x80070015) until the guest's balloon driver is up, then grants it.
     /// </summary>
+    /// <remarks>
+    /// The probe must request a size that <em>differs</em> from the configured one. Asking for the
+    /// size the VM already has is a no-op that the VM worker satisfies on its own: it returns in
+    /// ~40 ms having never consulted the guest, which is how this method previously claimed a
+    /// still-booting VM was ready. Measured on the reference image, the real transition lands at
+    /// ~9.3 s, ahead of the guest's first DHCP lease at ~14.4 s — see
+    /// <c>GuestReadinessProbeExperiment</c>, which asserts the distinction so it cannot silently
+    /// regress. The probe grows rather than shrinks: shrinking pushed the reference guest into
+    /// memory pressure it did not recover from.
+    /// <para>
+    /// This reports guest <em>kernel</em> readiness, not that a workload is listening. Use a
+    /// health check against the resource's endpoint for that.
+    /// </para>
+    /// </remarks>
     public async Task WaitForGuestReadyAsync(int memoryMb, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        string probeDocument = $$"""
-            {
-                "ResourcePath": "VirtualMachine/ComputeTopology/Memory/SizeInMB",
-                "RequestType": "Update",
-                "Settings": {{memoryMb}}
-            }
-            """;
+        const int ProbeDeltaMb = 256;
 
         DateTime deadline = DateTime.UtcNow + timeout;
         while (true)
         {
             try
             {
-                await ModifyAsync(probeDocument, cancellationToken).ConfigureAwait(false);
-                return;
+                await ModifyAsync(ResizeDocument(memoryMb + ProbeDeltaMb), cancellationToken).ConfigureAwait(false);
+                break;
             }
-            catch (HcsException ex) when (DateTime.UtcNow < deadline)
+            catch (HcsException ex)
             {
-                _ = ex; // still booting (typically 0x80070015); retry on the official sample's cadence
+                if (DateTime.UtcNow >= deadline)
+                {
+                    throw new TimeoutException(
+                        $"The guest did not report ready within {timeout}. The probe resizes memory, which " +
+                        "requires the guest's Hyper-V integration drivers (hv_balloon on Linux); an image " +
+                        $"without them will never satisfy it. Last HCS error: 0x{ex.HResult:X8}.", ex);
+                }
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
         }
+
+        try
+        {
+            await ModifyAsync(ResizeDocument(memoryMb), cancellationToken).ConfigureAwait(false);
+        }
+        catch (HcsException)
+        {
+            // Cosmetic only — the guest keeps the probe's extra headroom for this run.
+        }
+
+        static string ResizeDocument(int sizeMb) => $$"""
+            {
+                "ResourcePath": "VirtualMachine/ComputeTopology/Memory/SizeInMB",
+                "RequestType": "Update",
+                "Settings": {{sizeMb}}
+            }
+            """;
     }
 
     private async Task<string?> RunAsync(string step, Func<HcsOperation, HRESULT> invoke, uint timeoutMs, CancellationToken cancellationToken)
