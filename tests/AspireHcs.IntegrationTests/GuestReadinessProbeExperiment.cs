@@ -68,9 +68,21 @@ public sealed class GuestReadinessProbeExperiment(ITestOutputHelper output) : ID
                 Dictionary<string, string> lastDocument = [];
                 string? leasedIp = null;
                 bool tcpAnswered = false;
+                string? tcpOutcome = null;
 
+                // Run until every signal has answered, TCP included. An earlier version stopped as
+                // soon as the lease appeared, giving TCP exactly one attempt fired in the same
+                // iteration the lease landed.
+                //
+                // KNOWN DIVERGENCE, do not trust this harness's TCP result: even with ~47 attempts
+                // over 165 s, every connect here times out (dropped SYN), while the product path
+                // gets an instant ConnectionRefused from the same image at the same kind of
+                // address — see HealthCheckGatesReadinessTests, which reaches the guest and reads
+                // the refusal off the health report. Something about this harness's compute system
+                // or endpoint differs; the document omits ComPorts and the endpoint owner differs,
+                // neither yet bisected. The balloon measurements below are unaffected.
                 while (clock.Elapsed < TimeSpan.FromMinutes(3)
-                    && !(leasedIp is not null && firstSuccess.ContainsKey("modify:memory-grown")))
+                    && !(leasedIp is not null && tcpAnswered && firstSuccess.ContainsKey("modify:memory-grown")))
                 {
                     // Candidate 1: today's probe — an idempotent resize to the configured size.
                     await ProbeAsync("modify:memory-same", firstSuccess, clock, () =>
@@ -121,26 +133,41 @@ public sealed class GuestReadinessProbeExperiment(ITestOutputHelper output) : ID
                         }
                     }
 
-                    // Ground truth 2: the guest's TCP stack answered. A refused SYN counts.
+                    // Ground truth 2: the guest's TCP stack answered. A refused SYN counts as an
+                    // answer — it proves the stack is up — but the two outcomes are recorded
+                    // separately, because only "connected" means a health check that demands a
+                    // real listener can ever go healthy on this image.
                     if (leasedIp is not null && !tcpAnswered)
                     {
                         using TcpClient client = new();
                         try
                         {
                             await client.ConnectAsync(IPAddress.Parse(leasedIp), 22).WaitAsync(TimeSpan.FromSeconds(2));
+                            tcpOutcome = "connected (a listener accepted)";
                             tcpAnswered = true;
                         }
                         catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
                         {
+                            tcpOutcome = "refused (stack up, nothing listening)";
                             tcpAnswered = true;
                         }
-                        catch (Exception)
+                        catch (Exception ex)
                         {
+                            // Report the reason rather than swallowing it: the round-trip test gets
+                            // a clean refusal at the same kind of address via the same HCN path,
+                            // and a bare catch here is why that difference stayed unexplained.
+                            string reason = ex is SocketException se ? $"{se.SocketErrorCode} (native {se.NativeErrorCode})" : ex.GetType().Name;
+                            if (!lastDocument.TryGetValue("tcp:22", out string? previousTcp) || previousTcp != reason)
+                            {
+                                lastDocument["tcp:22"] = reason;
+                                output.WriteLine($"[{clock.ElapsedMilliseconds,7} ms] tcp:22 → {reason}");
+                            }
                         }
 
                         if (tcpAnswered)
                         {
-                            output.WriteLine($"[{clock.ElapsedMilliseconds,7} ms] GROUND TRUTH: TCP answered at {leasedIp}:22");
+                            firstSuccess["tcp:22"] = clock.ElapsedMilliseconds;
+                            output.WriteLine($"[{clock.ElapsedMilliseconds,7} ms] GROUND TRUTH: TCP {tcpOutcome} at {leasedIp}:22");
                         }
                     }
 
@@ -153,7 +180,7 @@ public sealed class GuestReadinessProbeExperiment(ITestOutputHelper output) : ID
                 {
                     output.WriteLine($"{ms,7} ms  {name}");
                 }
-                output.WriteLine($"TCP answered during the probe window: {tcpAnswered}");
+                output.WriteLine($"TCP on 22: {tcpOutcome ?? "never answered within the window"}");
 
                 // The finding this exists to protect. A probe that answers instantly is measuring
                 // the VM worker, not the guest: the idempotent resize AspireHcs shipped returns in
