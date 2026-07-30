@@ -1,0 +1,67 @@
+using System.Runtime.Versioning;
+using Aspire.Hosting;
+using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Testing;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace AspireHcs.IntegrationTests;
+
+// Issue #5 acceptance: the dashboard's Start/Stop/Restart actually drive a real VM. Aspire wires
+// those commands only for resources DCP owns, so nothing here is exercised by the framework's own
+// machinery — the orchestrator has to stop and re-boot the compute system itself, releasing and
+// recreating the HCN endpoint each time.
+[SupportedOSPlatform("windows10.0.17763")]
+public sealed class LifecycleCommandRoundTripTests(ITestOutputHelper output)
+{
+    [SkippableFact]
+    public async Task Stop_then_start_then_restart_drive_the_vm()
+    {
+        Skip.If(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HCS_TEST_VHDX")),
+            "Set HCS_TEST_VHDX to a bootable Gen2/UEFI VHDX to run HCS integration tests.");
+
+        using CancellationTokenSource cts = new(TimeSpan.FromMinutes(10));
+
+        IDistributedApplicationTestingBuilder appHost =
+            await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
+
+        await using DistributedApplication app = await appHost.BuildAsync(cts.Token);
+        await app.StartAsync(cts.Token);
+
+        await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
+        output.WriteLine($"booted at {app.GetEndpoint("appliance", "ssh")}");
+
+        await ExecuteAsync(app, KnownResourceCommands.StopCommand, cts.Token);
+        await WaitForStateAsync(app, KnownResourceStates.Exited, cts.Token);
+
+        // That this succeeds is itself the proof that Stop really tore the compute system down
+        // rather than just publishing a state: the VM id is stable for the resource's lifetime, so
+        // HcsCreateComputeSystem would be rejected outright if the previous one still existed.
+        await ExecuteAsync(app, KnownResourceCommands.StartCommand, cts.Token);
+        await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
+
+        // A second boot has to have re-created the HCN endpoint and re-resolved the endpoint from
+        // a fresh lease; the stale allocation from the first boot would not survive teardown.
+        Uri restarted = app.GetEndpoint("appliance", "ssh");
+        output.WriteLine($"restarted at {restarted}");
+        Assert.Equal(22, restarted.Port);
+
+        await ExecuteAsync(app, KnownResourceCommands.RestartCommand, cts.Token);
+        await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
+        output.WriteLine($"after restart at {app.GetEndpoint("appliance", "ssh")}");
+
+        await app.StopAsync(cts.Token);
+    }
+
+    private async Task ExecuteAsync(DistributedApplication app, string command, CancellationToken cancellationToken)
+    {
+        ExecuteCommandResult result = await app.ResourceCommands
+            .ExecuteCommandAsync("appliance", command, cancellationToken);
+
+        output.WriteLine($"{command}: success={result.Success} {result.Message}");
+        Assert.True(result.Success, $"{command} failed: {result.Message}");
+    }
+
+    private static Task WaitForStateAsync(DistributedApplication app, string state, CancellationToken cancellationToken)
+        => app.ResourceNotifications.WaitForResourceAsync("appliance", state, cancellationToken);
+}
