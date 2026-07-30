@@ -3,6 +3,7 @@ using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
@@ -10,7 +11,7 @@ namespace AspireHcs.IntegrationTests;
 // resource reaches Running, and ResourceReadyEvent fires once the guest OS is up
 // (which is what makes WaitFor(vm) release dependents).
 [SupportedOSPlatform("windows10.0.17763")]
-public sealed class AspireResourceRoundTripTests
+public sealed class AspireResourceRoundTripTests(ITestOutputHelper output)
 {
     [SkippableFact]
     public async Task Sample_apphost_boots_vm_to_running_and_ready()
@@ -49,14 +50,20 @@ public sealed class AspireResourceRoundTripTests
         Assert.Equal($"{endpoint.Host}:{endpoint.Port}", connectionString);
         Assert.Equal(22, endpoint.Port);
 
+        // Which of the two acceptable outcomes occurred is reported, not just swallowed: a
+        // connection means the image runs a listener, a refusal means it does not. The probe
+        // experiment sees neither at this address, so the distinction is what tells the two
+        // code paths apart.
         using System.Net.Sockets.TcpClient client = new();
         try
         {
             await client.ConnectAsync(endpoint.Host, endpoint.Port).WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+            output.WriteLine($"TCP {endpoint.Host}:{endpoint.Port} -> connected (a listener accepted)");
         }
         catch (System.Net.Sockets.SocketException ex) when (ex.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused)
         {
             // Reachable, nothing listening on 22 in the stock image — acceptable.
+            output.WriteLine($"TCP {endpoint.Host}:{endpoint.Port} -> refused (stack up, nothing listening)");
         }
 
         await app.StopAsync(cts.Token);
