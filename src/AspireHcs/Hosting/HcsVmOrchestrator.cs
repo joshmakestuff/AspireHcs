@@ -1,6 +1,8 @@
+using System.Text.Json.Nodes;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Eventing;
+using AspireHcs.Hcn;
 using AspireHcs.Hcs;
 using AspireHcs.Hcs.Schema;
 using AspireHcs.Storage;
@@ -19,6 +21,8 @@ namespace AspireHcs.Hosting;
 /// </summary>
 internal static class HcsVmOrchestrator
 {
+    internal const string HcnOwner = "AspireHcs";
+
     public static void Register(IDistributedApplicationBuilder builder, HcsVirtualMachineResource resource)
     {
         builder.Eventing.Subscribe<InitializeResourceEvent>(resource, (@event, cancellationToken) =>
@@ -47,6 +51,7 @@ internal sealed class HcsVmInstance(
 {
     private HcsComputeSystem? _vm;
     private string? _workDir;
+    private int _hcnEndpointCreated;
 
     public async Task RunAsync()
     {
@@ -61,8 +66,25 @@ internal sealed class HcsVmInstance(
                 StartTimeStamp = DateTime.Now,
             }).ConfigureAwait(false);
 
+            List<EndpointAnnotation> endpoints = [.. resource.Annotations.OfType<EndpointAnnotation>()];
+            if (endpoints.Count > 0 && !resource.NetworkEnabled)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNatNetwork().");
+            }
+
             string bootDisk = PrepareBootDisk();
             ComputeSystemDocument document = BuildDocument(bootDisk);
+
+            if (resource.NetworkEnabled)
+            {
+                await ScavengeStaleEndpointsAsync().ConfigureAwait(false);
+                Guid networkId = HcnClient.FindIcsNetworkId();
+                HcnClient.CreateDhcpEndpoint(networkId, resource.HcnEndpointId, resource.MacAddress, HcsVmOrchestrator.HcnOwner);
+                Volatile.Write(ref _hcnEndpointCreated, 1);
+                logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on network {NetworkId}",
+                    resource.MacAddress, resource.HcnEndpointId, networkId);
+            }
 
             HcsClient.GrantVmAccess(resource.VmId, bootDisk);
             if (resource.CopyOnWrite)
@@ -87,8 +109,13 @@ internal sealed class HcsVmInstance(
 
             logger.LogInformation("VM started; waiting for the guest OS to become ready...");
             await _vm.WaitForGuestReadyAsync(resource.MemoryMb, TimeSpan.FromMinutes(2), stopping).ConfigureAwait(false);
-
             logger.LogInformation("Guest OS is ready.");
+
+            if (resource.NetworkEnabled)
+            {
+                await AllocateEndpointsAsync(endpoints, stopping).ConfigureAwait(false);
+            }
+
             await eventing.PublishAsync(new ResourceReadyEvent(resource, services), stopping).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
@@ -102,6 +129,100 @@ internal sealed class HcsVmInstance(
             {
                 State = KnownResourceStates.FailedToStart,
             }).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Waits for the guest's DHCP lease to surface in the HCN endpoint properties (HNS learns
+    /// it against our MAC — verified empirically; typically seconds after guest-ready), then
+    /// resolves every declared endpoint at that address.
+    /// </summary>
+    private async Task AllocateEndpointsAsync(List<EndpointAnnotation> endpoints, CancellationToken cancellationToken)
+    {
+        string ip = await WaitForLeasedIpAsync(TimeSpan.FromSeconds(90), cancellationToken).ConfigureAwait(false);
+        logger.LogInformation("Guest leased {Ip}; publishing {Count} endpoint(s).", ip, endpoints.Count);
+
+        foreach (EndpointAnnotation endpoint in endpoints)
+        {
+            int port = endpoint.TargetPort
+                ?? throw new InvalidOperationException($"Endpoint '{endpoint.Name}' has no target port.");
+            AllocatedEndpoint allocated = new(endpoint, ip, port);
+            // Both stores must be written: the legacy property feeds older consumers, while
+            // EndpointReference.IsAllocated (and the testing helpers) read the per-network list.
+            endpoint.AllocatedEndpoint = allocated;
+            endpoint.AllAllocatedEndpoints.AddOrUpdateAllocatedEndpoint(KnownNetworkIdentifiers.LocalhostNetwork, allocated);
+        }
+
+        await notifications.PublishUpdateAsync(resource, s => s with
+        {
+            Urls = [.. endpoints.Select(e =>
+                new UrlSnapshot(e.Name, $"{e.UriScheme}://{ip}:{e.TargetPort}", IsInternal: false))],
+        }).ConfigureAwait(false);
+    }
+
+    private async Task<string> WaitForLeasedIpAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            string? properties = HcnClient.QueryEndpointProperties(resource.HcnEndpointId);
+            string? ip = properties is null ? null : JsonNode.Parse(properties)?["IPAddress"]?.GetValue<string>();
+            if (ip is not null)
+            {
+                return ip;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    $"The guest of '{resource.Name}' did not obtain a DHCP lease within {timeout}. " +
+                    "Ensure the guest image configures its NIC for DHCP.");
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Deletes AspireHcs-owned HCN endpoints whose VM no longer exists — leftovers of crashed
+    /// AppHosts (endpoints persist independently of the ephemeral compute systems). Endpoints
+    /// of concurrently running AspireHcs VMs are recognized by their live VM attachment and
+    /// left alone.
+    /// </summary>
+    private async Task ScavengeStaleEndpointsAsync()
+    {
+        try
+        {
+            List<Guid> owned = HcnClient.EnumerateEndpointIds(HcsVmOrchestrator.HcnOwner);
+            if (owned.Count == 0)
+            {
+                return;
+            }
+
+            string running = await HcsClient.EnumerateComputeSystemsAsync().ConfigureAwait(false) ?? "[]";
+            HashSet<string> runtimeIds = new(StringComparer.OrdinalIgnoreCase);
+            foreach (JsonNode? system in JsonNode.Parse(running) as JsonArray ?? [])
+            {
+                if (system?["RuntimeId"]?.GetValue<string>() is { } runtimeId)
+                {
+                    runtimeIds.Add(runtimeId);
+                }
+            }
+
+            foreach (Guid endpointId in owned)
+            {
+                string? properties = HcnClient.QueryEndpointProperties(endpointId);
+                string? vmRuntimeId = properties is null ? null : JsonNode.Parse(properties)?["VirtualMachine"]?.GetValue<string>();
+                if (vmRuntimeId is null || !runtimeIds.Contains(vmRuntimeId))
+                {
+                    logger.LogInformation("Scavenging stale HCN endpoint {EndpointId} from a previous run.", endpointId);
+                    HcnClient.DeleteEndpoint(endpointId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Scavenging stale HCN endpoints failed; continuing.");
         }
     }
 
@@ -120,37 +241,48 @@ internal sealed class HcsVmInstance(
 
     /// <summary>
     /// Best-effort graceful teardown on AppHost shutdown: try a clean guest shutdown briefly,
-    /// then terminate. Even if this never runs (crash, kill), HCS's
-    /// ShouldTerminateOnLastHandleClosed reaps the VM when the process dies.
+    /// then terminate, then release the HCN endpoint. Even if this never runs (crash, kill),
+    /// ShouldTerminateOnLastHandleClosed reaps the VM and the next run's scavenger reaps the
+    /// endpoint.
     /// </summary>
     private void TearDown()
     {
         HcsComputeSystem? vm = Interlocked.Exchange(ref _vm, null);
-        if (vm is null)
+        if (vm is not null)
         {
-            return;
-        }
-
-        try
-        {
-            using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
             try
             {
-                vm.ShutdownAsync(readyTimeout: TimeSpan.FromSeconds(10), cts.Token).GetAwaiter().GetResult();
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+                try
+                {
+                    vm.ShutdownAsync(readyTimeout: TimeSpan.FromSeconds(10), cts.Token).GetAwaiter().GetResult();
+                }
+                catch (Exception)
+                {
+                    vm.TerminateAsync(CancellationToken.None).GetAwaiter().GetResult();
+                }
             }
             catch (Exception)
             {
-                vm.TerminateAsync(CancellationToken.None).GetAwaiter().GetResult();
+                // Handle close below still guarantees termination.
+            }
+            finally
+            {
+                vm.Dispose();
+                CleanUpWorkDir();
             }
         }
-        catch (Exception)
+
+        if (Interlocked.Exchange(ref _hcnEndpointCreated, 0) == 1)
         {
-            // Handle close below still guarantees termination.
-        }
-        finally
-        {
-            vm.Dispose();
-            CleanUpWorkDir();
+            try
+            {
+                HcnClient.DeleteEndpoint(resource.HcnEndpointId);
+            }
+            catch (Exception)
+            {
+                // The next run's scavenger will get it.
+            }
         }
     }
 
@@ -218,6 +350,9 @@ internal sealed class HcsVmInstance(
                 {
                     ["0"] = new() { NamedPipe = @"\\.\pipe\" + resource.SerialPipeName },
                 },
+                NetworkAdapters = resource.NetworkEnabled
+                    ? new() { ["ext"] = new() { EndpointId = resource.HcnEndpointId.ToString(), MacAddress = resource.MacAddress } }
+                    : null,
             },
             Services = new() { Shutdown = new() },
         },
