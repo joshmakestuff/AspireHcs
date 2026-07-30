@@ -30,6 +30,13 @@ It is opt-in because it is strict on purpose. A refused connection is reported u
 healthy, even though a refusal does prove the guest's network stack is up. Images that ship a
 daemon disabled (Kali's `sshd`, for example) stay unhealthy until something actually listens.
 
+## Dashboard commands
+
+Start, Stop and Restart are available on the resource. Aspire wires those up only for resources
+DCP owns, so AspireHcs registers its own: Stop attempts a graceful guest shutdown before
+terminating and releases the VM's HCN endpoint, and Start boots a fresh differencing disk, so a
+restart discards the previous run's writes the way a container restart does.
+
 ## Requirements
 
 - Windows 10 1809 / Windows Server 2019 or later with the Hyper-V feature enabled. The package throws `PlatformNotSupportedException` on other platforms.
