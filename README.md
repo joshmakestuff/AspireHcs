@@ -1,11 +1,11 @@
-# AspireHyperV
+# AspireHcs
 
-An experimental [Aspire](https://aspire.dev) hosting integration that models **Hyper-V virtual machines as Aspire resources**, built on the Windows [Host Compute System (HCS) API](https://learn.microsoft.com/virtualization/api/hcs/overview).
+An experimental [Aspire](https://aspire.dev) hosting integration built on the Windows [Host Compute System (HCS) API](https://learn.microsoft.com/virtualization/api/hcs/overview), starting with **Hyper-V virtual machines as Aspire resources**.
 
 The goal is a normal "Aspire feel" for VMs in the local dev loop:
 
 ```csharp
-var vm = builder.AddHyperVVm("appliance")
+var vm = builder.AddHcsVm("appliance")
     .WithVhdx(@"d:\images\appliance.vhdx", copyOnWrite: true)
     .WithMemory(gigabytes: 4)
     .WithProcessorCount(2)
@@ -20,7 +20,7 @@ builder.AddProject<Projects.Web>("web")
 ## Design
 
 - **HCS, not WMI**: HCS compute systems are ephemeral — created on `aspire run`, destroyed on exit — which matches Aspire's container-like dev-loop semantics. `ShouldTerminateOnLastHandleClosed` gives crash-safe teardown (no orphaned VMs after a killed debug session).
-- **Custom resource, not `ExecutableResource`**: a `HyperVVirtualMachineResource` (`IResource` + `IResourceWithEndpoints`) driven by Aspire's eventing pipeline (`InitializeResourceEvent` → `ResourceReadyEvent`), publishing state via `ResourceNotificationService` and streaming the VM serial console to the dashboard via `ResourceLoggerService`.
+- **Custom resource, not `ExecutableResource`**: an `HcsVirtualMachineResource` (`IResource` + `IResourceWithEndpoints`) driven by Aspire's eventing pipeline (`InitializeResourceEvent` → `ResourceReadyEvent`), publishing state via `ResourceNotificationService` and streaming the VM serial console to the dashboard via `ResourceLoggerService`.
 - **Networking via HCN**: NAT network + endpoint from the Host Compute Network API, surfaced as non-proxied Aspire endpoints.
 - **Interop**: CsWin32-generated P/Invoke for `ComputeCore.dll` / `ComputeNetwork.dll`; HCS JSON schema (v2.x) config documents.
 
