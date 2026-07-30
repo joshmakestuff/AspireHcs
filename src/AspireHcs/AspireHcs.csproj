@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <PackageId>AspireHcs</PackageId>
+    <Description>Experimental Aspire hosting integration that runs Hyper-V virtual machines as Aspire resources via the Windows Host Compute System (HCS) API. Windows-only by design; fails fast elsewhere.</Description>
+    <PackageTags>aspire;hosting;hyper-v;hcs;virtual-machine;windows</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <InternalsVisibleTo Include="AspireHcs.Tests" />
+  </ItemGroup>
+
+</Project>
