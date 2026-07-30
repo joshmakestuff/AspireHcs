@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run-hcs-integration:
+        description: >-
+          Run the HCS boot integration lane (requires a self-hosted Windows runner
+          labeled 'hyperv' with the HCS_TEST_VHDX repository variable pointing at a
+          bootable Gen2/UEFI VHDX on that machine).
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build
+        run: dotnet build -c Release
+      - name: Test
+        run: dotnet test -c Release --no-build
+      - name: Pack
+        run: dotnet pack src/AspireHcs -c Release --no-build -o artifacts/packages
+      - name: Verify package claims
+        shell: pwsh
+        run: ./eng/Verify-Package.ps1 -PackageDirectory artifacts/packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifacts/packages
+
+  # Hosted runners are believed unable to run HCS (nested virtualization is not
+  # available on hosted Windows runners, and enabling the Hyper-V feature needs a
+  # reboot mid-job). This dispatch-only job records the actual state of a hosted
+  # runner so that claim stays empirically checkable instead of folklore.
+  probe-hosted-hcs:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - name: Report Hyper-V / HCS availability on this hosted runner
+        shell: pwsh
+        run: |
+          Get-WindowsOptionalFeature -Online |
+            Where-Object FeatureName -like '*Hyper-V*' |
+            Format-Table FeatureName, State
+          Get-Service vmcompute, hns -ErrorAction SilentlyContinue | Format-Table Name, Status
+          $hypervisor = (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
+          Write-Host "HypervisorPresent=$hypervisor"
+
+  # The real "advertised claims" gate for HCS: boots an actual VM and requires the
+  # guest-ready probe to succeed (spike exit code 0). Manual + self-hosted until a
+  # runner with Hyper-V exists.
+  hcs-integration:
+    if: github.event_name == 'workflow_dispatch' && inputs.run-hcs-integration
+    runs-on: [self-hosted, windows, hyperv]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Boot a VM via HCS and require guest-ready
+        shell: pwsh
+        run: |
+          if (-not $env:HCS_TEST_VHDX) { throw 'Set the HCS_TEST_VHDX repository variable on this repo.' }
+          dotnet run --project spikes/HcsBootSpike -c Release -- run --base $env:HCS_TEST_VHDX
+          if ($LASTEXITCODE -ne 0) { throw "HCS boot spike failed with exit code $LASTEXITCODE" }
+        env:
+          HCS_TEST_VHDX: ${{ vars.HCS_TEST_VHDX }}
