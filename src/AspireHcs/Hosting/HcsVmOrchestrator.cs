@@ -1,6 +1,8 @@
+using System.Text.Json.Nodes;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Eventing;
+using AspireHcs.Hcn;
 using AspireHcs.Hcs;
 using AspireHcs.Hcs.Schema;
 using AspireHcs.Storage;
@@ -14,27 +16,141 @@ namespace AspireHcs.Hosting;
 /// <summary>
 /// Drives the lifecycle of an <see cref="HcsVirtualMachineResource"/> through Aspire's
 /// eventing pipeline: boot on <see cref="InitializeResourceEvent"/>, publish state to the
-/// dashboard, raise <see cref="ResourceReadyEvent"/> once the guest OS is up (so
-/// <c>WaitFor(vm)</c> works), and tear down on AppHost shutdown.
+/// dashboard, and tear down on AppHost shutdown. Also registers the dashboard's
+/// Start/Stop/Restart commands, which Aspire wires up only for resources DCP owns.
 /// </summary>
 internal static class HcsVmOrchestrator
 {
-    public static void Register(IDistributedApplicationBuilder builder, HcsVirtualMachineResource resource)
+    internal const string HcnOwner = "AspireHcs";
+
+    public static void Register(IResourceBuilder<HcsVirtualMachineResource> builder)
     {
-        builder.Eventing.Subscribe<InitializeResourceEvent>(resource, (@event, cancellationToken) =>
+        // The commands need the instance that the InitializeResourceEvent handler creates, which
+        // does not exist yet at model-build time. The holder is the handoff.
+        InstanceHolder holder = new();
+
+        builder.ApplicationBuilder.Eventing.Subscribe<InitializeResourceEvent>(builder.Resource, (@event, cancellationToken) =>
         {
-            var instance = new HcsVmInstance(
+            HcsVmInstance instance = new(
                 (HcsVirtualMachineResource)@event.Resource,
                 @event.Services,
                 @event.Eventing,
                 @event.Notifications,
                 @event.Logger);
 
+            holder.Instance = instance;
+
             // The event handler must not block orchestration; the boot runs in the background
             // and reports through ResourceNotificationService.
             _ = Task.Run(() => instance.RunAsync(), CancellationToken.None);
             return Task.CompletedTask;
         });
+
+        builder.WithCommand(
+            KnownResourceCommands.StartCommand,
+            "Start",
+            context => ExecuteAsync(holder, i => i.StartAsync(), "started"),
+            new CommandOptions
+            {
+                Description = "Boot the virtual machine.",
+                IconName = "Play",
+                IconVariant = IconVariant.Filled,
+                IsHighlighted = true,
+                UpdateState = context =>
+                {
+                    string? state = State(context);
+                    if (IsStopped(state))
+                    {
+                        return ResourceCommandState.Enabled;
+                    }
+                    return IsInFlight(state) ? ResourceCommandState.Disabled : ResourceCommandState.Hidden;
+                },
+            });
+
+        builder.WithCommand(
+            KnownResourceCommands.StopCommand,
+            "Stop",
+            context => ExecuteAsync(holder, i => i.StopAsync(), "stopped"),
+            new CommandOptions
+            {
+                Description = "Shut the virtual machine down gracefully, then terminate it.",
+                IconName = "Stop",
+                IconVariant = IconVariant.Filled,
+                IsHighlighted = true,
+                UpdateState = context =>
+                {
+                    string? state = State(context);
+                    if (state == KnownResourceStates.Stopping)
+                    {
+                        return ResourceCommandState.Disabled;
+                    }
+                    return IsStopped(state) || state == KnownResourceStates.Starting
+                        ? ResourceCommandState.Hidden
+                        : ResourceCommandState.Enabled;
+                },
+            });
+
+        builder.WithCommand(
+            KnownResourceCommands.RestartCommand,
+            "Restart",
+            context => ExecuteAsync(holder, i => i.RestartAsync(), "restarted"),
+            new CommandOptions
+            {
+                Description = "Shut the virtual machine down and boot it again from a fresh disk.",
+                IconName = "ArrowCounterclockwise",
+                IconVariant = IconVariant.Regular,
+                UpdateState = context => State(context) == KnownResourceStates.Running
+                    ? ResourceCommandState.Enabled
+                    : ResourceCommandState.Disabled,
+            });
+
+        static string? State(UpdateCommandStateContext context) => context.ResourceSnapshot.State?.Text;
+
+        static bool IsInFlight(string? state) =>
+            state == KnownResourceStates.Starting || state == KnownResourceStates.Stopping;
+
+        // "Unknown" is treated as stopped for the same reason Aspire does it: it is the state a
+        // resource can be left in with nothing running.
+        static bool IsStopped(string? state) =>
+            KnownResourceStates.TerminalStates.Contains(state)
+            || state == KnownResourceStates.NotStarted
+            || state == "Unknown"
+            || string.IsNullOrEmpty(state);
+    }
+
+    /// <summary>
+    /// Runs a command against the instance, turning failures into a reported result rather than
+    /// an unhandled exception. The instance drives resource state itself, so there is nothing to
+    /// publish here beyond the command's own outcome.
+    /// </summary>
+    private static async Task<ExecuteCommandResult> ExecuteAsync(
+        InstanceHolder holder, Func<HcsVmInstance, Task> action, string pastTense)
+    {
+        if (holder.Instance is not { } instance)
+        {
+            return new ExecuteCommandResult { Success = false, Message = "The virtual machine has not been initialized yet." };
+        }
+
+        try
+        {
+            await action(instance).ConfigureAwait(false);
+            return new ExecuteCommandResult { Success = true, Message = $"Virtual machine {pastTense}." };
+        }
+        catch (Exception ex)
+        {
+            return new ExecuteCommandResult { Success = false, Message = ex.Message };
+        }
+    }
+
+    private sealed class InstanceHolder
+    {
+        private HcsVmInstance? _instance;
+
+        public HcsVmInstance? Instance
+        {
+            get => Volatile.Read(ref _instance);
+            set => Volatile.Write(ref _instance, value);
+        }
     }
 }
 
@@ -45,13 +161,90 @@ internal sealed class HcsVmInstance(
     ResourceNotificationService notifications,
     ILogger logger)
 {
+    // Serializes boot and teardown so a Restart, a dashboard Stop and the shutdown hook cannot
+    // interleave over the same compute system and HCN endpoint.
+    private readonly SemaphoreSlim _gate = new(1, 1);
+
     private HcsComputeSystem? _vm;
     private string? _workDir;
+    private int _hcnEndpointCreated;
+
+    // Incremented per boot. A terminated VM can still deliver its exit notification while the
+    // next boot is already underway; without this the stale event would publish Exited over the
+    // new VM's Running.
+    private int _epoch;
+
+    private CancellationToken _appStopping;
 
     public async Task RunAsync()
     {
         IHostApplicationLifetime lifetime = services.GetRequiredService<IHostApplicationLifetime>();
-        CancellationToken stopping = lifetime.ApplicationStopping;
+        _appStopping = lifetime.ApplicationStopping;
+
+        // Registered once for the resource's whole life rather than per boot, so repeated
+        // Start/Stop cycles do not stack up shutdown callbacks.
+        lifetime.ApplicationStopping.Register(() => TearDown());
+
+        await StartAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Boots the VM if it is not already running. Deliberately runs against the AppHost's
+    /// lifetime rather than an invoking command's cancellation token: a boot takes tens of
+    /// seconds and must not be abandoned half-built because a dashboard request completed.
+    /// </summary>
+    public async Task StartAsync()
+    {
+        await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
+        try
+        {
+            if (_vm is not null)
+            {
+                return;
+            }
+
+            await BootAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task StopAsync()
+    {
+        await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
+        try
+        {
+            await ShutDownAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Stop then start, under one lock so nothing can slip in between and observe (or act on)
+    /// the resource while it is momentarily down.
+    /// </summary>
+    public async Task RestartAsync()
+    {
+        await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
+        try
+        {
+            await ShutDownAsync().ConfigureAwait(false);
+            await BootAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task BootAsync()
+    {
+        CancellationToken stopping = _appStopping;
 
         try
         {
@@ -59,10 +252,33 @@ internal sealed class HcsVmInstance(
             {
                 State = KnownResourceStates.Starting,
                 StartTimeStamp = DateTime.Now,
+                StopTimeStamp = null,
             }).ConfigureAwait(false);
+
+            List<EndpointAnnotation> endpoints = [.. resource.Annotations.OfType<EndpointAnnotation>()];
+            if (endpoints.Count > 0 && !resource.NetworkEnabled)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNatNetwork().");
+            }
+
+            // Nothing publishes BeforeResourceStartedEvent for resources Aspire does not own,
+            // and the orchestrator implements WaitFor in its handler for that event — so without
+            // this, WaitFor(...) on an HCS VM would never hold the boot back.
+            await eventing.PublishAsync(new BeforeResourceStartedEvent(resource, services), stopping).ConfigureAwait(false);
 
             string bootDisk = PrepareBootDisk();
             ComputeSystemDocument document = BuildDocument(bootDisk);
+
+            if (resource.NetworkEnabled)
+            {
+                await ScavengeStaleEndpointsAsync().ConfigureAwait(false);
+                Guid networkId = HcnClient.FindIcsNetworkId();
+                HcnClient.CreateDhcpEndpoint(networkId, resource.HcnEndpointId, resource.MacAddress, HcsVmOrchestrator.HcnOwner);
+                Volatile.Write(ref _hcnEndpointCreated, 1);
+                logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on network {NetworkId}",
+                    resource.MacAddress, resource.HcnEndpointId, networkId);
+            }
 
             HcsClient.GrantVmAccess(resource.VmId, bootDisk);
             if (resource.CopyOnWrite)
@@ -73,23 +289,34 @@ internal sealed class HcsVmInstance(
             logger.LogInformation("Creating HCS compute system {VmId} from {Disk} ({MemoryMb} MB, {Processors} vCPU)",
                 resource.VmId, bootDisk, resource.MemoryMb, resource.ProcessorCount);
 
-            _vm = await HcsClient.CreateComputeSystemAsync(resource.VmId, document, stopping).ConfigureAwait(false);
-            _vm.Notification += OnVmNotification;
-            lifetime.ApplicationStopping.Register(TearDown);
+            HcsComputeSystem vm = await HcsClient.CreateComputeSystemAsync(resource.VmId, document, stopping).ConfigureAwait(false);
+            int epoch = Interlocked.Increment(ref _epoch);
+            vm.Notification += (_, notification) => OnVmNotification(epoch, notification);
+            _vm = vm;
 
-            await _vm.StartAsync(stopping).ConfigureAwait(false);
+            await vm.StartAsync(stopping).ConfigureAwait(false);
             _ = Task.Run(() => SerialConsolePump.RunAsync(resource.SerialPipeName, logger, stopping), CancellationToken.None);
 
+            logger.LogInformation("VM started; waiting for the guest OS to become ready...");
+            await vm.WaitForGuestReadyAsync(resource.MemoryMb, TimeSpan.FromMinutes(2), stopping).ConfigureAwait(false);
+            logger.LogInformation("Guest OS is ready.");
+
+            if (resource.NetworkEnabled)
+            {
+                await AllocateEndpointsAsync(endpoints, stopping).ConfigureAwait(false);
+            }
+
+            // Running is published last, once the guest is up and its endpoints resolve. Aspire's
+            // health monitor starts the moment a resource reports Running, and a resource with no
+            // health check annotations is declared ready right there — so publishing Running at
+            // HCS-start time would fire ResourceReadyEvent (and release WaitFor dependents) against
+            // a VM still sitting in its bootloader. Aspire raises ResourceReadyEvent itself; raising
+            // our own would be a duplicate that WaitFor cannot observe anyway, since only the
+            // health monitor records it in the resource snapshot.
             await notifications.PublishUpdateAsync(resource, s => s with
             {
                 State = KnownResourceStates.Running,
             }).ConfigureAwait(false);
-
-            logger.LogInformation("VM started; waiting for the guest OS to become ready...");
-            await _vm.WaitForGuestReadyAsync(resource.MemoryMb, TimeSpan.FromMinutes(2), stopping).ConfigureAwait(false);
-
-            logger.LogInformation("Guest OS is ready.");
-            await eventing.PublishAsync(new ResourceReadyEvent(resource, services), stopping).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {
@@ -98,59 +325,220 @@ internal sealed class HcsVmInstance(
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to start HCS virtual machine '{Name}'.", resource.Name);
+
+            // Release whatever the failed boot did claim, so Start can be retried from the
+            // dashboard without leaking a compute system or an HCN endpoint.
+            TearDown();
+
             await notifications.PublishUpdateAsync(resource, s => s with
             {
                 State = KnownResourceStates.FailedToStart,
             }).ConfigureAwait(false);
+
+            throw;
         }
     }
 
-    private void OnVmNotification(object? sender, HcsNotification notification)
+    private async Task ShutDownAsync()
     {
-        if (notification.Type == HCS_EVENT_TYPE.HcsEventSystemExited)
-        {
-            logger.LogInformation("VM exited: {Detail}", notification.EventData ?? "(no detail)");
-            _ = notifications.PublishUpdateAsync(resource, s => s with
-            {
-                State = KnownResourceStates.Exited,
-                StopTimeStamp = DateTime.Now,
-            });
-        }
-    }
-
-    /// <summary>
-    /// Best-effort graceful teardown on AppHost shutdown: try a clean guest shutdown briefly,
-    /// then terminate. Even if this never runs (crash, kill), HCS's
-    /// ShouldTerminateOnLastHandleClosed reaps the VM when the process dies.
-    /// </summary>
-    private void TearDown()
-    {
-        HcsComputeSystem? vm = Interlocked.Exchange(ref _vm, null);
-        if (vm is null)
+        if (_vm is null)
         {
             return;
         }
 
+        await notifications.PublishUpdateAsync(resource, s => s with
+        {
+            State = KnownResourceStates.Stopping,
+        }).ConfigureAwait(false);
+
+        logger.LogInformation("Stopping virtual machine '{Name}'...", resource.Name);
+        await Task.Run(TearDown).ConfigureAwait(false);
+
+        await notifications.PublishUpdateAsync(resource, s => s with
+        {
+            State = KnownResourceStates.Exited,
+            StopTimeStamp = DateTime.Now,
+            // The guest's address is gone; leaving its URLs lit would invite clicks into nothing.
+            Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Waits for the guest's DHCP lease to surface in the HCN endpoint properties (HNS learns
+    /// it against our MAC — verified empirically; typically seconds after guest-ready), then
+    /// resolves every declared endpoint at that address.
+    /// </summary>
+    private async Task AllocateEndpointsAsync(List<EndpointAnnotation> endpoints, CancellationToken cancellationToken)
+    {
+        string ip = await WaitForLeasedIpAsync(TimeSpan.FromSeconds(90), cancellationToken).ConfigureAwait(false);
+        logger.LogInformation("Guest leased {Ip}; publishing {Count} endpoint(s).", ip, endpoints.Count);
+
+        foreach (EndpointAnnotation endpoint in endpoints)
+        {
+            int port = endpoint.TargetPort
+                ?? throw new InvalidOperationException($"Endpoint '{endpoint.Name}' has no target port.");
+            // Setting the property is enough to make the endpoint resolve: EndpointAnnotation's
+            // constructor registers this same snapshot in AllAllocatedEndpoints under the endpoint's
+            // default network, which for WithEndpoint is the localhost network that
+            // EndpointReference.IsAllocated consults.
+            endpoint.AllocatedEndpoint = new AllocatedEndpoint(endpoint, ip, port);
+        }
+
+        // Drives the orchestrator's URL processing — WithUrl callbacks and the dashboard's URL list
+        // both hang off this event, and nothing raises it for a non-DCP resource.
+        await eventing.PublishAsync(new ResourceEndpointsAllocatedEvent(resource, services), cancellationToken).ConfigureAwait(false);
+
+        // The orchestrator publishes endpoint-derived URLs as inactive (hidden), on the assumption
+        // that whoever allocated them activates them once they are really listening. That is us.
+        await notifications.PublishUpdateAsync(resource, s => s with
+        {
+            Urls = [.. s.Urls.Select(u => u with { IsInactive = false })],
+        }).ConfigureAwait(false);
+    }
+
+    private async Task<string> WaitForLeasedIpAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            string? properties = HcnClient.QueryEndpointProperties(resource.HcnEndpointId);
+            string? ip = properties is null ? null : JsonNode.Parse(properties)?["IPAddress"]?.GetValue<string>();
+            if (ip is not null)
+            {
+                return ip;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    $"The guest of '{resource.Name}' did not obtain a DHCP lease within {timeout}. " +
+                    "Ensure the guest image configures its NIC for DHCP.");
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Deletes AspireHcs-owned HCN endpoints whose VM no longer exists — leftovers of crashed
+    /// AppHosts (endpoints persist independently of the ephemeral compute systems). Endpoints
+    /// of concurrently running AspireHcs VMs are recognized by their live VM attachment and
+    /// left alone.
+    /// </summary>
+    private async Task ScavengeStaleEndpointsAsync()
+    {
         try
         {
-            using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+            List<Guid> owned = HcnClient.EnumerateEndpointIds(HcsVmOrchestrator.HcnOwner);
+            if (owned.Count == 0)
+            {
+                return;
+            }
+
+            string running = await HcsClient.EnumerateComputeSystemsAsync().ConfigureAwait(false) ?? "[]";
+            HashSet<string> runtimeIds = new(StringComparer.OrdinalIgnoreCase);
+            foreach (JsonNode? system in JsonNode.Parse(running) as JsonArray ?? [])
+            {
+                if (system?["RuntimeId"]?.GetValue<string>() is { } runtimeId)
+                {
+                    runtimeIds.Add(runtimeId);
+                }
+            }
+
+            foreach (Guid endpointId in owned)
+            {
+                // Never scavenge our own endpoint: on a Restart it is recreated under the same id,
+                // and between the delete and the new compute system it looks exactly like a
+                // leftover. (The same window across *processes* is issue #12.)
+                if (endpointId == resource.HcnEndpointId)
+                {
+                    continue;
+                }
+
+                string? properties = HcnClient.QueryEndpointProperties(endpointId);
+                string? vmRuntimeId = properties is null ? null : JsonNode.Parse(properties)?["VirtualMachine"]?.GetValue<string>();
+                if (vmRuntimeId is null || !runtimeIds.Contains(vmRuntimeId))
+                {
+                    logger.LogInformation("Scavenging stale HCN endpoint {EndpointId} from a previous run.", endpointId);
+                    HcnClient.DeleteEndpoint(endpointId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Scavenging stale HCN endpoints failed; continuing.");
+        }
+    }
+
+    private void OnVmNotification(int epoch, HcsNotification notification)
+    {
+        if (notification.Type != HCS_EVENT_TYPE.HcsEventSystemExited)
+        {
+            return;
+        }
+
+        // A VM we already replaced has no business reporting the resource's state.
+        if (Volatile.Read(ref _epoch) != epoch)
+        {
+            return;
+        }
+
+        logger.LogInformation("VM exited: {Detail}", notification.EventData ?? "(no detail)");
+        _ = notifications.PublishUpdateAsync(resource, s => s with
+        {
+            State = KnownResourceStates.Exited,
+            StopTimeStamp = DateTime.Now,
+        });
+    }
+
+    /// <summary>
+    /// Best-effort graceful teardown: try a clean guest shutdown briefly, then terminate, then
+    /// release the HCN endpoint. Even if this never runs (crash, kill),
+    /// ShouldTerminateOnLastHandleClosed reaps the VM and the next run's scavenger reaps the
+    /// endpoint. Safe to call when nothing is running.
+    /// </summary>
+    private void TearDown()
+    {
+        HcsComputeSystem? vm = Interlocked.Exchange(ref _vm, null);
+        if (vm is not null)
+        {
+            // Retires the epoch first: the termination below raises an exit notification that
+            // would otherwise fight whatever state the caller is about to publish.
+            Interlocked.Increment(ref _epoch);
+
             try
             {
-                vm.ShutdownAsync(readyTimeout: TimeSpan.FromSeconds(10), cts.Token).GetAwaiter().GetResult();
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+                try
+                {
+                    vm.ShutdownAsync(readyTimeout: TimeSpan.FromSeconds(10), cts.Token).GetAwaiter().GetResult();
+                }
+                catch (Exception)
+                {
+                    vm.TerminateAsync(CancellationToken.None).GetAwaiter().GetResult();
+                }
             }
             catch (Exception)
             {
-                vm.TerminateAsync(CancellationToken.None).GetAwaiter().GetResult();
+                // Handle close below still guarantees termination.
+            }
+            finally
+            {
+                vm.Dispose();
+                CleanUpWorkDir();
             }
         }
-        catch (Exception)
+
+        if (Interlocked.Exchange(ref _hcnEndpointCreated, 0) == 1)
         {
-            // Handle close below still guarantees termination.
-        }
-        finally
-        {
-            vm.Dispose();
-            CleanUpWorkDir();
+            try
+            {
+                HcnClient.DeleteEndpoint(resource.HcnEndpointId);
+            }
+            catch (Exception)
+            {
+                // The next run's scavenger will get it.
+            }
         }
     }
 
@@ -175,6 +563,14 @@ internal sealed class HcsVmInstance(
         _workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", resource.VmId);
         Directory.CreateDirectory(_workDir);
         string diffPath = Path.Combine(_workDir, "boot-diff.vhdx");
+
+        // A restart boots from a fresh differencing disk, discarding the previous run's writes —
+        // the same contract as a container restart, and the reason the base image is never touched.
+        if (File.Exists(diffPath))
+        {
+            File.Delete(diffPath);
+        }
+
         VirtualDisk.CreateDifferencing(basePath, diffPath);
         return diffPath;
     }
@@ -218,6 +614,9 @@ internal sealed class HcsVmInstance(
                 {
                     ["0"] = new() { NamedPipe = @"\\.\pipe\" + resource.SerialPipeName },
                 },
+                NetworkAdapters = resource.NetworkEnabled
+                    ? new() { ["ext"] = new() { EndpointId = resource.HcnEndpointId.ToString(), MacAddress = resource.MacAddress } }
+                    : null,
             },
             Services = new() { Shutdown = new() },
         },
