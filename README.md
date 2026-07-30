@@ -26,7 +26,7 @@ builder.AddProject<Projects.Web>("web")
 
 ## Status / roadmap
 
-1. [ ] **Spike**: minimal console app that boots a VHDX via `HcsCreateComputeSystem`/`HcsStartComputeSystem`; verify whether Hyper-V Administrators membership suffices or full elevation is required.
+1. [x] **Spike**: minimal console app that boots a VHDX via `HcsCreateComputeSystem`/`HcsStartComputeSystem`; verify whether Hyper-V Administrators membership suffices or full elevation is required. *(Result: it does — see [#1](https://github.com/joshmakestuff/AspireHcs/issues/1); elevation is not needed.)*
 2. [ ] Internal `HcsClient` (schema POCOs + CsWin32 bindings).
 3. [ ] Custom resource: lifecycle events, dashboard state, serial-console logs.
 4. [ ] HCN NAT networking + endpoint publishing.

@@ -1,4 +1,10 @@
 <Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AspireHcs/AspireHcs.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AspireHcs.Tests/AspireHcs.Tests.csproj" />
+  </Folder>
   <Folder Name="/spikes/">
     <Project Path="spikes/HcsBootSpike/HcsBootSpike.csproj" />
   </Folder>
