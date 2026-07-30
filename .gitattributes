@@ -1,0 +1,13 @@
+# Normalize line endings: store LF in the repo, let git decide working-copy endings
+* text=auto
+
+# Windows-specific files that tooling expects as CRLF
+*.sln text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary assets
+*.vhdx binary
+*.png binary
+*.snk binary
