@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AspireHcs.Tests/AspireHcs.Tests.csproj" />
+    <Project Path="tests/AspireHcs.IntegrationTests/AspireHcs.IntegrationTests.csproj" />
   </Folder>
   <Folder Name="/spikes/">
     <Project Path="spikes/HcsBootSpike/HcsBootSpike.csproj" />
