@@ -58,6 +58,12 @@ public sealed class GuestReadinessProbeExperiment(ITestOutputHelper output) : ID
                 await vm.StartAsync();
                 output.WriteLine($"[{clock.ElapsedMilliseconds,7} ms] HcsStartComputeSystem returned");
 
+                // The VmId half of SOCKADDR_HV is the compute system's runtime id, which HCS
+                // hands us without any guest involvement.
+                string? runtime = await vm.GetPropertiesAsync("{}");
+                Guid vmRuntimeId = Guid.Parse(JsonNode.Parse(runtime!)!["RuntimeId"]!.GetValue<string>());
+                output.WriteLine($"[{clock.ElapsedMilliseconds,7} ms] RuntimeId {vmRuntimeId} (hvsocket VmId)");
+
                 Dictionary<string, long> firstSuccess = [];
                 Dictionary<string, string> lastDocument = [];
                 string? leasedIp = null;
@@ -92,6 +98,17 @@ public sealed class GuestReadinessProbeExperiment(ITestOutputHelper output) : ID
                     await SampleAsync("properties:all", vm, "{}", lastDocument, clock);
                     await SampleAsync("properties:memory", vm, """{"PropertyTypes":["Memory"]}""", lastDocument, clock);
                     await SampleAsync("properties:guestconnection", vm, """{"PropertyTypes":["GuestConnection"]}""", lastDocument, clock);
+
+                    // Candidate 5: host-side hvsocket connect to a port nothing listens on. If the
+                    // failure mode changes as the guest's VMBus/hvsocket transport comes up — say
+                    // unreachable while booting, then refused once it is up — that is a read-only
+                    // guest-readiness signal, with no memory ballooning side effect.
+                    string hv = await HvSocketProbe.TryConnectAsync(vmRuntimeId, port: 2761, TimeSpan.FromSeconds(1));
+                    if (!lastDocument.TryGetValue("hvsocket:2761", out string? previousHv) || previousHv != hv)
+                    {
+                        lastDocument["hvsocket:2761"] = hv;
+                        output.WriteLine($"[{clock.ElapsedMilliseconds,7} ms] hvsocket:2761 → {hv}");
+                    }
 
                     // Ground truth 1: the guest completed a DHCP handshake.
                     if (leasedIp is null)
