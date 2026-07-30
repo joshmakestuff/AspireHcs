@@ -10,7 +10,7 @@ namespace AspireHcs.IntegrationTests;
 // resource reaches Running, and ResourceReadyEvent fires once the guest OS is up
 // (which is what makes WaitFor(vm) release dependents).
 [SupportedOSPlatform("windows10.0.17763")]
-public sealed class AspireResourceRoundTripTests(Xunit.Abstractions.ITestOutputHelper output)
+public sealed class AspireResourceRoundTripTests
 {
     [SkippableFact]
     public async Task Sample_apphost_boots_vm_to_running_and_ready()
@@ -40,24 +40,6 @@ public sealed class AspireResourceRoundTripTests(Xunit.Abstractions.ITestOutputH
             "appliance", KnownResourceStates.Running, cts.Token);
 
         await ready.Task.WaitAsync(cts.Token);
-
-        // Diagnostic introspection while chasing endpoint allocation visibility.
-        {
-            var model = app.Services.GetService(typeof(DistributedApplicationModel)) as DistributedApplicationModel;
-            var appliance = model!.Resources.OfType<HcsVirtualMachineResource>().Single();
-            output.WriteLine($"LocalhostNetwork identifier: '{KnownNetworkIdentifiers.LocalhostNetwork}'");
-            foreach (EndpointAnnotation a in appliance.Annotations.OfType<EndpointAnnotation>())
-            {
-                output.WriteLine($"annotation '{a.Name}': defaultNet='{a.DefaultNetworkID}' legacy={a.AllocatedEndpoint?.Address}:{a.AllocatedEndpoint?.Port}");
-                foreach (object snap in a.AllAllocatedEndpoints)
-                {
-                    string detail = string.Join(", ", snap.GetType().GetProperties().Select(p => $"{p.Name}={p.GetValue(snap)}"));
-                    output.WriteLine($"  list entry: {detail}");
-                }
-                EndpointReference reference = appliance.GetEndpoint(a.Name);
-                output.WriteLine($"  GetEndpoint('{a.Name}').IsAllocated={reference.IsAllocated}");
-            }
-        }
 
         // Issue #4 acceptance: the endpoint and connection string resolve to the guest's
         // DHCP-leased address, and the guest is reachable there from the host. A refused
