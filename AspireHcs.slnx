@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/spikes/">
+    <Project Path="spikes/HcsBootSpike/HcsBootSpike.csproj" />
+  </Folder>
+</Solution>
