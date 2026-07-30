@@ -69,7 +69,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not $env:HCS_TEST_VHDX) { throw 'Set the HCS_TEST_VHDX repository variable on this repo.' }
-          dotnet run --project spikes/HcsBootSpike -c Release -- run --base $env:HCS_TEST_VHDX
-          if ($LASTEXITCODE -ne 0) { throw "HCS boot spike failed with exit code $LASTEXITCODE" }
+          dotnet test tests/AspireHcs.IntegrationTests -c Release
+          if ($LASTEXITCODE -ne 0) { throw "HCS integration tests failed with exit code $LASTEXITCODE" }
         env:
           HCS_TEST_VHDX: ${{ vars.HCS_TEST_VHDX }}
