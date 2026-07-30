@@ -44,6 +44,39 @@ public class HcsVirtualMachineBuilderTests
     }
 
     [Fact]
+    public void WithNatNetwork_and_WithEndpoint_configure_networking()
+    {
+        IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
+
+        IResourceBuilder<HcsVirtualMachineResource> vm = builder.AddHcsVm("vm")
+            .WithNatNetwork()
+            .WithEndpoint("ssh", targetPort: 22)
+            .WithEndpoint("api", targetPort: 8080);
+
+        Assert.True(vm.Resource.NetworkEnabled);
+        Assert.Equal("ssh", vm.Resource.PrimaryEndpointName);
+        Assert.Matches("^02-15-5D(-[0-9A-F]{2}){3}$", vm.Resource.MacAddress);
+
+        List<EndpointAnnotation> endpoints = [.. vm.Resource.Annotations.OfType<EndpointAnnotation>()];
+        Assert.Equal(2, endpoints.Count);
+        Assert.All(endpoints, e => Assert.False(e.IsProxied));
+        Assert.Equal(22, endpoints[0].TargetPort);
+
+        // Connection string resolves the primary endpoint lazily via its host:port.
+        Assert.Equal("{vm.bindings.ssh.host}:{vm.bindings.ssh.port}",
+            vm.Resource.ConnectionStringExpression.ValueExpression);
+    }
+
+    [Fact]
+    public void ConnectionString_requires_a_declared_endpoint()
+    {
+        IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
+        IResourceBuilder<HcsVirtualMachineResource> vm = builder.AddHcsVm("vm");
+
+        Assert.Throws<InvalidOperationException>(() => vm.Resource.ConnectionStringExpression);
+    }
+
+    [Fact]
     public void Builder_methods_reject_invalid_arguments()
     {
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
