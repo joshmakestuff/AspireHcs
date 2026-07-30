@@ -28,9 +28,8 @@ public static class HcsVirtualMachineBuilderExtensions
         }
 
         HcsVirtualMachineResource resource = new(name);
-        HcsVmOrchestrator.Register(builder, resource);
 
-        return builder.AddResource(resource)
+        IResourceBuilder<HcsVirtualMachineResource> vm = builder.AddResource(resource)
             .WithInitialState(new CustomResourceSnapshot
             {
                 ResourceType = "HcsVirtualMachine",
@@ -38,6 +37,9 @@ public static class HcsVirtualMachineBuilderExtensions
                 Properties = [],
             })
             .ExcludeFromManifest();
+
+        HcsVmOrchestrator.Register(vm);
+        return vm;
     }
 
     /// <summary>Sets the boot disk. <paramref name="copyOnWrite"/> (default) boots a differencing child, leaving the base VHDX untouched.</summary>
