@@ -1,0 +1,17 @@
+HcsCreateOperation
+HcsCloseOperation
+HcsWaitForOperationResult
+HcsCreateComputeSystem
+HcsStartComputeSystem
+HcsTerminateComputeSystem
+HcsCloseComputeSystem
+HcsGetComputeSystemProperties
+HcsModifyComputeSystem
+HcsEnumerateComputeSystems
+HcsOpenComputeSystem
+HcsGrantVmAccess
+CreateVirtualDisk
+VIRTUAL_STORAGE_TYPE_DEVICE_VHDX
+VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT
+CloseHandle
+LocalFree
