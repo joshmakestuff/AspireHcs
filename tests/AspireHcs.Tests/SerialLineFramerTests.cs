@@ -7,8 +7,9 @@ namespace AspireHcs.Tests;
 
 // Issue #18 acceptance: the serial console is guest-controlled input crossing a trust
 // boundary, so the framer — not the guest — decides how much the host buffers. These pin the
-// bound, the truncation visibility, the stateful UTF-8 decode across reads, and the terminal
-// semantics of carriage returns.
+// bound, the truncation visibility, the stateful UTF-8 decode across reads, and the overwrite
+// semantics of carriage returns (deliberately whole-frame, not a real terminal's
+// character-level splice).
 [SupportedOSPlatform("windows10.0.17763")]
 public class SerialLineFramerTests
 {
@@ -126,6 +127,35 @@ public class SerialLineFramerTests
         framer.Append(Bytes("progress: 45%\rprogress: 67%\rprogress: 100%\n"));
 
         Assert.Equal(["progress: 100%"], _emitted);
+    }
+
+    [Fact]
+    public void A_shrinking_repaint_keeps_only_the_final_frame()
+    {
+        SerialLineFramer framer = Framer();
+
+        // Deliberate overwrite semantics, pinned: a real terminal would splice to "X2345";
+        // this framer keeps the last frame whole because for a log record the final repaint
+        // is the meaningful one.
+        framer.Append(Bytes("12345\rX\n"));
+
+        Assert.Equal(["X"], _emitted);
+    }
+
+    [Fact]
+    public void Flush_resets_all_framing_state_for_reuse()
+    {
+        SerialLineFramer framer = Framer(maxLineLength: 8);
+
+        // End a stream mid-discard with a dangling CR, then reuse the framer: the swallowed-LF
+        // arming must not leak across Flush and eat the next stream's first blank line.
+        framer.Append(Bytes("AAAAAAAAAAAAAAAA\r"));
+        framer.Flush();
+        _emitted.Clear();
+
+        framer.Append(Bytes("\n"));
+
+        Assert.Equal([""], _emitted);
     }
 
     [Fact]
