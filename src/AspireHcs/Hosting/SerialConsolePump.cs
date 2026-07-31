@@ -1,5 +1,4 @@
 using System.IO.Pipes;
-using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace AspireHcs.Hosting;
@@ -8,6 +7,8 @@ namespace AspireHcs.Hosting;
 /// Streams the guest's COM1 serial console (exposed by HCS as a named pipe) to the resource's
 /// dashboard logs, line by line. Guests without a serial console configured (no
 /// <c>console=ttyS0</c> on Linux) simply produce nothing — the pipe connects but stays silent.
+/// The stream is guest-controlled input; <see cref="SerialLineFramer"/> bounds what it can
+/// make the host buffer.
 /// </summary>
 internal static class SerialConsolePump
 {
@@ -35,7 +36,9 @@ internal static class SerialConsolePump
             }
 
             byte[] buffer = new byte[4096];
-            StringBuilder line = new();
+            SerialLineFramer framer = new(
+                SerialLineFramer.DefaultMaxLineLength,
+                line => logger.LogInformation("{SerialLine}", line));
             while (!cancellationToken.IsCancellationRequested)
             {
                 int read = await pipe.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
@@ -44,24 +47,10 @@ internal static class SerialConsolePump
                     break;
                 }
 
-                foreach (char c in Encoding.UTF8.GetString(buffer, 0, read))
-                {
-                    if (c == '\n')
-                    {
-                        logger.LogInformation("{SerialLine}", line.ToString().TrimEnd('\r'));
-                        line.Clear();
-                    }
-                    else
-                    {
-                        line.Append(c);
-                    }
-                }
+                framer.Append(buffer.AsSpan(0, read));
             }
 
-            if (line.Length > 0)
-            {
-                logger.LogInformation("{SerialLine}", line.ToString().TrimEnd('\r'));
-            }
+            framer.Flush();
         }
         catch (OperationCanceledException)
         {
