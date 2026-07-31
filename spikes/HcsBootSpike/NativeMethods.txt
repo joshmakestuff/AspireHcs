@@ -10,6 +10,7 @@ HcsModifyComputeSystem
 HcsEnumerateComputeSystems
 HcsOpenComputeSystem
 HcsGrantVmAccess
+HcsRevokeVmAccess
 CreateVirtualDisk
 VIRTUAL_STORAGE_TYPE_DEVICE_VHDX
 VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT
