@@ -72,12 +72,16 @@ public sealed class ShutdownDuringStartupTests(ITestOutputHelper output)
             await app.StopAsync(cts.Token);
 
             watchCts.Cancel();
-            await Task.WhenAny(watcher, Task.Delay(TimeSpan.FromSeconds(5), cts.Token));
+            await watcher.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
         }
 
         lock (statesSeen)
         {
             output.WriteLine($"states observed: {string.Join(" -> ", statesSeen)}");
+            // Starting must have been observed for DoesNotContain to mean anything — WatchAsync
+            // replays each resource's current snapshot on subscribe, so an empty or Starting-less
+            // list means the watcher never really ran, not that the states never happened.
+            Assert.Contains(KnownResourceStates.Starting, statesSeen);
             Assert.DoesNotContain(KnownResourceStates.Running, statesSeen);
         }
 

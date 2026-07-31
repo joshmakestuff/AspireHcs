@@ -68,11 +68,12 @@ internal static class Program
         }
 
         Step("CreateVirtualDisk(differencing)", CreateDifferencingDisk(basePath, diffPath), diffPath);
-        Step("HcsGrantVmAccess(diff)", PInvoke.HcsGrantVmAccess(vmId, diffPath), diffPath);
-        Step("HcsGrantVmAccess(base)", PInvoke.HcsGrantVmAccess(vmId, basePath), basePath);
 
         try
         {
+            Step("HcsGrantVmAccess(diff)", PInvoke.HcsGrantVmAccess(vmId, diffPath), diffPath);
+            Step("HcsGrantVmAccess(base)", PInvoke.HcsGrantVmAccess(vmId, basePath), basePath);
+
             string config = BuildVmConfig(diffPath, memoryMb);
             Console.WriteLine($"--- VM configuration document ---\n{config}\n---------------------------------");
 
