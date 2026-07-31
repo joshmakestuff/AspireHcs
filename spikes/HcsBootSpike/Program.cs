@@ -68,100 +68,112 @@ internal static class Program
         }
 
         Step("CreateVirtualDisk(differencing)", CreateDifferencingDisk(basePath, diffPath), diffPath);
-        Step("HcsGrantVmAccess(diff)", PInvoke.HcsGrantVmAccess(vmId, diffPath), diffPath);
-        Step("HcsGrantVmAccess(base)", PInvoke.HcsGrantVmAccess(vmId, basePath), basePath);
 
-        string config = BuildVmConfig(diffPath, memoryMb);
-        Console.WriteLine($"--- VM configuration document ---\n{config}\n---------------------------------");
-
-        using var op = new HcsOperation();
-
-        HRESULT hr = PInvoke.HcsCreateComputeSystem(vmId, config, op.Handle, null, out HcsCloseComputeSystemSafeHandle system);
-        string? doc = null;
-        if (hr.Succeeded)
+        try
         {
-            (hr, doc) = op.Wait();
-        }
-        Step("HcsCreateComputeSystem", hr, doc ?? "");
-        if (hr.Failed)
-        {
-            return 2;
-        }
+            Step("HcsGrantVmAccess(diff)", PInvoke.HcsGrantVmAccess(vmId, diffPath), diffPath);
+            Step("HcsGrantVmAccess(base)", PInvoke.HcsGrantVmAccess(vmId, basePath), basePath);
 
-        using (system)
-        {
-            using var serialCts = new CancellationTokenSource();
-            Task<long> serialTask = Task.Run(() => ReadSerialAsync(serialCts.Token));
+            string config = BuildVmConfig(diffPath, memoryMb);
+            Console.WriteLine($"--- VM configuration document ---\n{config}\n---------------------------------");
 
-            hr = PInvoke.HcsStartComputeSystem(system, op.Handle, null);
+            using var op = new HcsOperation();
+
+            HRESULT hr = PInvoke.HcsCreateComputeSystem(vmId, config, op.Handle, null, out HcsCloseComputeSystemSafeHandle system);
+            string? doc = null;
             if (hr.Succeeded)
             {
-                (hr, doc) = op.Wait(60_000);
+                (hr, doc) = op.Wait();
             }
-            Step("HcsStartComputeSystem", hr, doc ?? "");
+            Step("HcsCreateComputeSystem", hr, doc ?? "");
             if (hr.Failed)
             {
                 return 2;
             }
 
-            hr = PInvoke.HcsGetComputeSystemProperties(system, op.Handle, """{"PropertyTypes":["Memory"]}""");
-            if (hr.Succeeded)
+            using (system)
             {
-                (hr, doc) = op.Wait();
-            }
-            Step("HcsGetComputeSystemProperties", hr, doc ?? "");
+                using var serialCts = new CancellationTokenSource();
+                Task<long> serialTask = Task.Run(() => ReadSerialAsync(serialCts.Token));
 
-            if (orphan)
-            {
-                Console.WriteLine();
-                Console.WriteLine($"VM '{vmId}' is running. Exiting abruptly WITHOUT terminate/close " +
-                                  "(ShouldTerminateOnLastHandleClosed test). Run 'list' next to verify the VM died.");
-                PrintSummary();
-                Environment.Exit(99);
-            }
-
-            // Guest-boot probe: per the official HCS Quick Start, HcsModifyComputeSystem
-            // only succeeds once the guest OS has finished booting.
-            string modifyDoc = $$"""
+                hr = PInvoke.HcsStartComputeSystem(system, op.Handle, null);
+                if (hr.Succeeded)
                 {
-                    "ResourcePath": "VirtualMachine/ComputeTopology/Memory/SizeInMB",
-                    "RequestType": "Update",
-                    "Settings": {{memoryMb + 512}}
+                    (hr, doc) = op.Wait(60_000);
                 }
-                """;
-            HRESULT probeHr = default;
-            int attempts = 0;
-            DateTime deadline = DateTime.UtcNow.AddSeconds(probeSeconds);
-            while (DateTime.UtcNow < deadline)
-            {
-                attempts++;
-                using var modifyOp = new HcsOperation();
-                probeHr = PInvoke.HcsModifyComputeSystem(system, modifyOp.Handle, modifyDoc, null);
-                if (probeHr.Succeeded)
+                Step("HcsStartComputeSystem", hr, doc ?? "");
+                if (hr.Failed)
                 {
-                    (probeHr, doc) = modifyOp.Wait();
+                    return 2;
                 }
-                Console.WriteLine($"[probe] attempt {attempts}: 0x{(uint)probeHr.Value:X8} {Truncate(doc)}");
-                if (probeHr.Succeeded)
+
+                hr = PInvoke.HcsGetComputeSystemProperties(system, op.Handle, """{"PropertyTypes":["Memory"]}""");
+                if (hr.Succeeded)
                 {
-                    break;
+                    (hr, doc) = op.Wait();
                 }
-                Thread.Sleep(5000);
+                Step("HcsGetComputeSystemProperties", hr, doc ?? "");
+
+                if (orphan)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"VM '{vmId}' is running. Exiting abruptly WITHOUT terminate/close " +
+                                      "(ShouldTerminateOnLastHandleClosed test). Run 'list' next to verify the VM died.");
+                    PrintSummary();
+                    Environment.Exit(99);
+                }
+
+                // Guest-boot probe: per the official HCS Quick Start, HcsModifyComputeSystem
+                // only succeeds once the guest OS has finished booting.
+                string modifyDoc = $$"""
+                    {
+                        "ResourcePath": "VirtualMachine/ComputeTopology/Memory/SizeInMB",
+                        "RequestType": "Update",
+                        "Settings": {{memoryMb + 512}}
+                    }
+                    """;
+                HRESULT probeHr = default;
+                int attempts = 0;
+                DateTime deadline = DateTime.UtcNow.AddSeconds(probeSeconds);
+                while (DateTime.UtcNow < deadline)
+                {
+                    attempts++;
+                    using var modifyOp = new HcsOperation();
+                    probeHr = PInvoke.HcsModifyComputeSystem(system, modifyOp.Handle, modifyDoc, null);
+                    if (probeHr.Succeeded)
+                    {
+                        (probeHr, doc) = modifyOp.Wait();
+                    }
+                    Console.WriteLine($"[probe] attempt {attempts}: 0x{(uint)probeHr.Value:X8} {Truncate(doc)}");
+                    if (probeHr.Succeeded)
+                    {
+                        break;
+                    }
+                    Thread.Sleep(5000);
+                }
+                Step("BootProbe(HcsModifyComputeSystem)", probeHr, $"{attempts} attempt(s)");
+
+                serialCts.CancelAfter(2000);
+                long serialBytes = serialTask.GetAwaiter().GetResult();
+                Console.WriteLine($"[serial] {serialBytes} byte(s) received on COM1");
+
+                hr = PInvoke.HcsTerminateComputeSystem(system, op.Handle, null);
+                if (hr.Succeeded)
+                {
+                    (hr, doc) = op.Wait();
+                }
+                Step("HcsTerminateComputeSystem", hr, doc ?? "");
+
+                return probeHr.Succeeded ? 0 : 3;
             }
-            Step("BootProbe(HcsModifyComputeSystem)", probeHr, $"{attempts} attempt(s)");
-
-            serialCts.CancelAfter(2000);
-            long serialBytes = serialTask.GetAwaiter().GetResult();
-            Console.WriteLine($"[serial] {serialBytes} byte(s) received on COM1");
-
-            hr = PInvoke.HcsTerminateComputeSystem(system, op.Handle, null);
-            if (hr.Succeeded)
-            {
-                (hr, doc) = op.Wait();
-            }
-            Step("HcsTerminateComputeSystem", hr, doc ?? "");
-
-            return probeHr.Succeeded ? 0 : 3;
+        }
+        finally
+        {
+            // The grants are persistent ACEs on the files (issue #16); a spike run must not
+            // permanently mutate the operator's base image. Orphan mode never reaches this —
+            // Environment.Exit simulates a crash, leaked grants included.
+            Step("HcsRevokeVmAccess(diff)", PInvoke.HcsRevokeVmAccess(vmId, diffPath), diffPath);
+            Step("HcsRevokeVmAccess(base)", PInvoke.HcsRevokeVmAccess(vmId, basePath), basePath);
         }
     }
 

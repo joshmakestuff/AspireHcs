@@ -67,7 +67,12 @@ internal static class HcsClient
         return await op.WaitForResultAsync("HcsEnumerateComputeSystems", cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Grants the VM's virtual identity read access to a backing file (VHDX, ISO, ...).</summary>
+    /// <summary>
+    /// Grants the VM's virtual identity access to a backing file (VHDX, ISO, ...). The grant is
+    /// a persistent ACE on the file — FullControl, empirically, not read-only — so every grant
+    /// must be paired with <see cref="RevokeVmAccess"/> at teardown or the file's ACL grows by
+    /// one dead VM identity per run.
+    /// </summary>
     public static void GrantVmAccess(string id, string filePath)
     {
         HcsPlatform.ThrowIfUnsupported();
@@ -78,11 +83,19 @@ internal static class HcsClient
         }
     }
 
-    /// <summary>Best-effort revocation of a grant made via <see cref="GrantVmAccess"/>.</summary>
+    /// <summary>
+    /// Revokes a grant made via <see cref="GrantVmAccess"/>. Throws on failure like every other
+    /// call here — whether a failed revocation is fatal is the caller's decision (the teardown
+    /// ledger logs it and continues; a silently swallowed HRESULT would leave the ACL entry in
+    /// place with no trace that it survived).
+    /// </summary>
     public static void RevokeVmAccess(string id, string filePath)
     {
         HcsPlatform.ThrowIfUnsupported();
-        // Failures here are non-fatal by design: teardown paths call this after the VM is gone.
-        _ = PInvoke.HcsRevokeVmAccess(id, filePath);
+        HRESULT hr = PInvoke.HcsRevokeVmAccess(id, filePath);
+        if (hr.Failed)
+        {
+            throw HcsException.Create("HcsRevokeVmAccess", hr, resultDocument: null);
+        }
     }
 }
