@@ -203,6 +203,10 @@ public sealed class GuestReadinessProbeExperiment(ITestOutputHelper output) : ID
         finally
         {
             HcnClient.DeleteEndpoint(endpointId);
+            // The grants are persistent ACEs on the files; without these the runner's base image
+            // accumulates one dead VM identity per test run (#16).
+            HcsClient.RevokeVmAccess(vmId, Path.Combine(_workDir, "boot-diff.vhdx"));
+            HcsClient.RevokeVmAccess(vmId, BaseVhdx!);
         }
     }
 

@@ -17,40 +17,58 @@ public sealed class LifecycleCommandRoundTripTests(ITestOutputHelper output)
     [SkippableFact]
     public async Task Stop_then_start_then_restart_drive_the_vm()
     {
-        Skip.If(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("HCS_TEST_VHDX")),
+        string? vhdx = Environment.GetEnvironmentVariable("HCS_TEST_VHDX");
+        Skip.If(string.IsNullOrEmpty(vhdx),
             "Set HCS_TEST_VHDX to a bootable Gen2/UEFI VHDX to run HCS integration tests.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(10));
 
+        // Three boots run below; each grants VM access to the base image, and before #16 every
+        // one of them left its ACE behind permanently.
+        string aclBefore = TeardownProbes.ReadAcl(vhdx!);
+
         IDistributedApplicationTestingBuilder appHost =
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
+        HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
+        string workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", vm.VmId);
 
-        await using DistributedApplication app = await appHost.BuildAsync(cts.Token);
-        await app.StartAsync(cts.Token);
+        await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
+        {
+            await app.StartAsync(cts.Token);
 
-        await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
-        output.WriteLine($"booted at {app.GetEndpoint("appliance", "ssh")}");
+            await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
+            output.WriteLine($"booted at {app.GetEndpoint("appliance", "ssh")}");
 
-        await ExecuteAsync(app, KnownResourceCommands.StopCommand, cts.Token);
-        await WaitForStateAsync(app, KnownResourceStates.Exited, cts.Token);
+            await ExecuteAsync(app, KnownResourceCommands.StopCommand, cts.Token);
+            await WaitForStateAsync(app, KnownResourceStates.Exited, cts.Token);
 
-        // That this succeeds is itself the proof that Stop really tore the compute system down
-        // rather than just publishing a state: the VM id is stable for the resource's lifetime, so
-        // HcsCreateComputeSystem would be rejected outright if the previous one still existed.
-        await ExecuteAsync(app, KnownResourceCommands.StartCommand, cts.Token);
-        await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
+            // A dashboard Stop is a complete teardown, not just a dead VM: the grants and the
+            // copy-on-write directory must already be gone while the AppHost keeps running.
+            Assert.False(Directory.Exists(workDir), $"Stop left the work directory behind: {workDir}");
+            Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
 
-        // A second boot has to have re-created the HCN endpoint and re-resolved the endpoint from
-        // a fresh lease; the stale allocation from the first boot would not survive teardown.
-        Uri restarted = app.GetEndpoint("appliance", "ssh");
-        output.WriteLine($"restarted at {restarted}");
-        Assert.Equal(22, restarted.Port);
+            // That this succeeds is itself the proof that Stop really tore the compute system down
+            // rather than just publishing a state: the VM id is stable for the resource's lifetime, so
+            // HcsCreateComputeSystem would be rejected outright if the previous one still existed.
+            await ExecuteAsync(app, KnownResourceCommands.StartCommand, cts.Token);
+            await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
 
-        await ExecuteAsync(app, KnownResourceCommands.RestartCommand, cts.Token);
-        await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
-        output.WriteLine($"after restart at {app.GetEndpoint("appliance", "ssh")}");
+            // A second boot has to have re-created the HCN endpoint and re-resolved the endpoint from
+            // a fresh lease; the stale allocation from the first boot would not survive teardown.
+            Uri restarted = app.GetEndpoint("appliance", "ssh");
+            output.WriteLine($"restarted at {restarted}");
+            Assert.Equal(22, restarted.Port);
 
-        await app.StopAsync(cts.Token);
+            await ExecuteAsync(app, KnownResourceCommands.RestartCommand, cts.Token);
+            await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
+            output.WriteLine($"after restart at {app.GetEndpoint("appliance", "ssh")}");
+
+            await app.StopAsync(cts.Token);
+        }
+
+        // Whole-run residue check: three boots, three teardowns, zero net host mutation.
+        Assert.False(Directory.Exists(workDir), $"work directory survived the run: {workDir}");
+        Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
     }
 
     private async Task ExecuteAsync(DistributedApplication app, string command, CancellationToken cancellationToken)
