@@ -83,11 +83,19 @@ internal static class HcsClient
         }
     }
 
-    /// <summary>Best-effort revocation of a grant made via <see cref="GrantVmAccess"/>.</summary>
+    /// <summary>
+    /// Revokes a grant made via <see cref="GrantVmAccess"/>. Throws on failure like every other
+    /// call here — whether a failed revocation is fatal is the caller's decision (the teardown
+    /// ledger logs it and continues; a silently swallowed HRESULT would leave the ACL entry in
+    /// place with no trace that it survived).
+    /// </summary>
     public static void RevokeVmAccess(string id, string filePath)
     {
         HcsPlatform.ThrowIfUnsupported();
-        // Failures here are non-fatal by design: teardown paths call this after the VM is gone.
-        _ = PInvoke.HcsRevokeVmAccess(id, filePath);
+        HRESULT hr = PInvoke.HcsRevokeVmAccess(id, filePath);
+        if (hr.Failed)
+        {
+            throw HcsException.Create("HcsRevokeVmAccess", hr, resultDocument: null);
+        }
     }
 }

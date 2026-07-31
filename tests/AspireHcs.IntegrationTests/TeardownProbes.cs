@@ -25,11 +25,22 @@ internal static class TeardownProbes
         string text = process.StandardOutput.ReadToEnd();
         process.WaitForExit();
 
-        return string.Join('\n', text
+        // A failed probe must fail the test, not return a value: two identical error outputs
+        // would otherwise compare equal and pass the residue assertion vacuously.
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"icacls '{path}' failed with exit code {process.ExitCode}: {text}");
+        }
+
+        string acl = string.Join('\n', text
             .Replace(path, "", StringComparison.OrdinalIgnoreCase)
             .Split('\n')
             .Select(line => line.Trim())
             .Where(line => line.Length > 0 && !line.StartsWith("Successfully", StringComparison.Ordinal))
             .Order(StringComparer.Ordinal));
+
+        return acl.Length > 0
+            ? acl
+            : throw new InvalidOperationException($"icacls '{path}' returned no ACL entries; the probe is not measuring anything.");
     }
 }

@@ -186,11 +186,12 @@ internal sealed class HcsVmInstance(
         // Registered once for the resource's whole life rather than per boot, so repeated
         // Start/Stop cycles do not stack up shutdown callbacks. This hook OWNS teardown at
         // shutdown: a boot cancelled by the stopping token unwinds without draining, precisely
-        // so the drain runs here, synchronously, and host shutdown stays blocked until cleanup
-        // has actually finished. The wait is bounded because a boot stuck in a non-cancellable
-        // native HCS call must not stall shutdown indefinitely — and draining without the gate
-        // after the timeout is still safe: Drain seals the ledger, and anything a still-live
-        // boot acquires afterwards releases itself (see BootLedger.Add).
+        // so the drain runs here, synchronously, keeping host shutdown blocked until cleanup
+        // finishes in every path where the gate is acquired within the bound. The wait is
+        // bounded because a boot stuck in a non-cancellable native HCS call must not stall
+        // shutdown indefinitely; past the bound the drain proceeds without the gate — Drain
+        // seals the ledger, and anything the straggling boot acquires afterwards releases
+        // itself (see BootLedger.Add), possibly after shutdown has already returned.
         lifetime.ApplicationStopping.Register(() =>
         {
             bool acquired = _gate.Wait(TimeSpan.FromSeconds(15));
@@ -348,11 +349,15 @@ internal sealed class HcsVmInstance(
             logger.LogInformation("VM started; waiting for the guest OS to become ready...");
             await vm.WaitForGuestReadyAsync(resource.MemoryMb, TimeSpan.FromMinutes(2), stopping).ConfigureAwait(false);
             logger.LogInformation("Guest OS is ready.");
+            ThrowIfExitedMidBoot(boot);
 
             if (resource.NetworkEnabled)
             {
                 await AllocateEndpointsAsync(endpoints, stopping).ConfigureAwait(false);
+                ThrowIfExitedMidBoot(boot);
             }
+
+            ThrowIfExitedMidBoot(boot);
 
             // Running is published last, once the guest is up and its endpoints resolve. Aspire's
             // health monitor starts the moment a resource reports Running, and a resource with no
@@ -388,9 +393,26 @@ internal sealed class HcsVmInstance(
             await notifications.PublishUpdateAsync(resource, s => s with
             {
                 State = KnownResourceStates.FailedToStart,
+                // The boot may have activated endpoint URLs before failing; a FailedToStart
+                // resource with live-looking links would invite clicks into nothing.
+                Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
             }).ConfigureAwait(false);
 
             throw;
+        }
+    }
+
+    /// <summary>
+    /// A guest can exit at any moment of the boot — including between the last phase and the
+    /// Running publish. Failing the boot here (rather than racing on) is what keeps a dead VM
+    /// from being announced as Running; the window this check cannot see is closed by
+    /// <see cref="CleanUpAfterUnexpectedExitAsync"/> republishing Exited after its drain.
+    /// </summary>
+    private static void ThrowIfExitedMidBoot(BootRecord boot)
+    {
+        if (boot.Exited)
+        {
+            throw new InvalidOperationException("The guest exited while the boot was still in progress.");
         }
     }
 
@@ -521,6 +543,18 @@ internal sealed class HcsVmInstance(
             if (ReferenceEquals(_current, boot))
             {
                 await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
+
+                // Republished after the drain because the exit notification can lose a race
+                // with an almost-complete boot: the notification's Exited lands first, then
+                // BootAsync — past its last liveness check — publishes Running for a VM that is
+                // already dead. Settling the state here, under the gate, makes Exited the final
+                // word no matter how that race went.
+                await notifications.PublishUpdateAsync(resource, s => s with
+                {
+                    State = KnownResourceStates.Exited,
+                    StopTimeStamp = DateTime.Now,
+                    Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
+                }).ConfigureAwait(false);
             }
         }
         finally

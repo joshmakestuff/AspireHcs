@@ -36,13 +36,49 @@ public sealed class ShutdownDuringStartupTests(ITestOutputHelper output)
         HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
         string workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", vm.VmId);
 
+        List<string> statesSeen = [];
         await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
         {
             await app.StartAsync(cts.Token);
+
+            // Watching the state stream is what proves the shutdown really landed mid-boot: if
+            // the resource ever reached Running before StopAsync, these cases would be quietly
+            // exercising an ordinary post-start shutdown instead of the race they claim to.
+            using CancellationTokenSource watchCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+            Task watcher = Task.Run(async () =>
+            {
+                try
+                {
+                    await foreach (ResourceEvent resourceEvent in app.ResourceNotifications.WatchAsync(watchCts.Token))
+                    {
+                        if (resourceEvent.Resource.Name == "appliance" && resourceEvent.Snapshot.State?.Text is { Length: > 0 } state)
+                        {
+                            lock (statesSeen)
+                            {
+                                statesSeen.Add(state);
+                            }
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // The watch is cancelled once StopAsync returns; everything relevant is recorded.
+                }
+            }, cts.Token);
+
             await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Starting, cts.Token);
             await Task.Delay(delayMs, cts.Token);
             output.WriteLine($"stopping the AppHost {delayMs} ms into the boot");
             await app.StopAsync(cts.Token);
+
+            watchCts.Cancel();
+            await Task.WhenAny(watcher, Task.Delay(TimeSpan.FromSeconds(5), cts.Token));
+        }
+
+        lock (statesSeen)
+        {
+            output.WriteLine($"states observed: {string.Join(" -> ", statesSeen)}");
+            Assert.DoesNotContain(KnownResourceStates.Running, statesSeen);
         }
 
         Assert.False(Directory.Exists(workDir), $"copy-on-write work directory leaked: {workDir}");
