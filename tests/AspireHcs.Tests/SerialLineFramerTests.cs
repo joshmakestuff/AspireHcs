@@ -80,6 +80,45 @@ public class SerialLineFramerTests
     }
 
     [Fact]
+    public void A_line_of_exactly_the_cap_is_complete_not_truncated()
+    {
+        SerialLineFramer framer = Framer(maxLineLength: 8);
+
+        framer.Append(Bytes("12345678\n123456789\n"));
+
+        Assert.Equal(2, _emitted.Count);
+        Assert.Equal("12345678", _emitted[0]);
+        Assert.Equal("12345678 …[truncated]", _emitted[1]);
+    }
+
+    [Fact]
+    public void An_overlong_crlf_terminated_line_leaves_no_blank_record_behind()
+    {
+        SerialLineFramer framer = Framer(maxLineLength: 8);
+
+        // The CR ends the discard and the LF must go down with the truncated line — split
+        // across reads too, since that is how a pipe delivers it.
+        framer.Append(Bytes("AAAAAAAAAAAAAAAA\r"));
+        framer.Append(Bytes("\nnext\r\n"));
+
+        Assert.Equal(2, _emitted.Count);
+        Assert.EndsWith("…[truncated]", _emitted[0]);
+        Assert.Equal("next", _emitted[1]);
+    }
+
+    [Fact]
+    public void A_cr_repaint_after_an_overlong_frame_still_emits_the_new_frame()
+    {
+        SerialLineFramer framer = Framer(maxLineLength: 8);
+
+        framer.Append(Bytes("AAAAAAAAAAAAAAAA\rok\n"));
+
+        Assert.Equal(2, _emitted.Count);
+        Assert.EndsWith("…[truncated]", _emitted[0]);
+        Assert.Equal("ok", _emitted[1]);
+    }
+
+    [Fact]
     public void Carriage_return_rewrites_emit_only_the_final_frame()
     {
         SerialLineFramer framer = Framer();

@@ -8,8 +8,8 @@ namespace AspireHcs.Hosting;
 /// without limit, so a line longer than <paramref name="maxLineLength"/> is emitted once,
 /// truncated and visibly marked, and the rest of that line is discarded. Decoding is stateful
 /// so UTF-8 sequences split across pipe reads survive intact, and carriage returns get
-/// terminal semantics — a CR-rewritten progress line emits its final frame, not one record
-/// per repaint.
+/// overwrite semantics — a CR-rewritten progress line emits its final frame, not one record
+/// per repaint (and not the character-level splice a real terminal would show).
 /// </summary>
 internal sealed class SerialLineFramer(int maxLineLength, Action<string> emit)
 {
@@ -21,6 +21,7 @@ internal sealed class SerialLineFramer(int maxLineLength, Action<string> emit)
     private readonly StringBuilder _line = new();
     private char[] _chars = new char[1024];
     private bool _discardingOverlongLine;
+    private bool _swallowNextLineFeed;
     private bool _pendingCarriageReturn;
 
     public void Append(ReadOnlySpan<byte> bytes)
@@ -66,10 +67,17 @@ internal sealed class SerialLineFramer(int maxLineLength, Action<string> emit)
         if (_discardingOverlongLine)
         {
             // The truncated record is already out; swallow the rest of the line. A CR ends the
-            // discard too — what follows repaints from column 0, which is a fresh record here.
-            if (c is '\n' or '\r')
+            // discard too — what follows repaints from column 0, which is a fresh record here —
+            // but the LF of a CRLF terminator must go down with the line it terminated, or
+            // every overlong CRLF line would be followed by a spurious blank record.
+            if (c is '\n')
             {
                 _discardingOverlongLine = false;
+            }
+            else if (c is '\r')
+            {
+                _discardingOverlongLine = false;
+                _swallowNextLineFeed = true;
             }
 
             return;
@@ -78,6 +86,12 @@ internal sealed class SerialLineFramer(int maxLineLength, Action<string> emit)
         switch (c)
         {
             case '\n':
+                if (_swallowNextLineFeed)
+                {
+                    _swallowNextLineFeed = false;
+                    break;
+                }
+
                 emit(_line.ToString());
                 _line.Clear();
                 _pendingCarriageReturn = false;
@@ -85,27 +99,33 @@ internal sealed class SerialLineFramer(int maxLineLength, Action<string> emit)
 
             case '\r':
                 // Not a record boundary by itself — "\r\n" must not emit twice. It arms an
-                // overwrite: the next printable character repaints the line from column 0,
-                // which is how "45%\r67%\r100%\n" becomes one "100%" record instead of a
-                // record per repaint (or one record with embedded returns).
+                // overwrite: the next printable character starts a fresh frame, which is how
+                // "45%\r67%\r100%\n" becomes one "100%" record instead of a record per repaint.
+                // Unlike a real terminal, characters the new frame does not reach are dropped
+                // rather than kept — for a log record, the last frame is the meaningful one.
+                _swallowNextLineFeed = false;
                 _pendingCarriageReturn = true;
                 break;
 
             default:
+                _swallowNextLineFeed = false;
                 if (_pendingCarriageReturn)
                 {
                     _line.Clear();
                     _pendingCarriageReturn = false;
                 }
 
-                _line.Append(c);
+                // The marker goes out only when a character is actually dropped: a line of
+                // exactly the cap followed by its newline is complete, not truncated.
                 if (_line.Length >= maxLineLength)
                 {
                     emit(_line.Append(TruncationMarker).ToString());
                     _line.Clear();
                     _discardingOverlongLine = true;
+                    break;
                 }
 
+                _line.Append(c);
                 break;
         }
     }
