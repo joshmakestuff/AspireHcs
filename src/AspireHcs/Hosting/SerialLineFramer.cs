@@ -59,6 +59,7 @@ internal sealed class SerialLineFramer(int maxLineLength, Action<string> emit)
 
         _line.Clear();
         _discardingOverlongLine = false;
+        _swallowNextLineFeed = false;
         _pendingCarriageReturn = false;
     }
 
