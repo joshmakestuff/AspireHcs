@@ -161,17 +161,19 @@ internal sealed class HcsVmInstance(
     ResourceNotificationService notifications,
     ILogger logger)
 {
-    // Serializes boot and teardown so a Restart, a dashboard Stop and the shutdown hook cannot
-    // interleave over the same compute system and HCN endpoint.
+    // Serializes boot and teardown so a Restart, a dashboard Stop, the exit-notification
+    // cleanup and the AppHost shutdown hook cannot interleave over the same compute system
+    // and HCN endpoint. The shutdown hook is the one caller that may proceed without it —
+    // bounded wait first, and the ledger's seal semantics keep the unguarded drain safe.
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    private HcsComputeSystem? _vm;
-    private string? _workDir;
-    private int _hcnEndpointCreated;
+    // The live boot, if any. Assigned only by BootAsync (under the gate); cleared only by
+    // DrainCurrentBoot, which is safe to call without the gate.
+    private BootRecord? _current;
 
-    // Incremented per boot. A terminated VM can still deliver its exit notification while the
-    // next boot is already underway; without this the stale event would publish Exited over the
-    // new VM's Running.
+    // Incremented when a boot starts and again when its VM is retired. A terminated VM can
+    // still deliver its exit notification while the next boot is already underway; without
+    // this the stale event would publish Exited over the new VM's Running.
     private int _epoch;
 
     private CancellationToken _appStopping;
@@ -182,8 +184,28 @@ internal sealed class HcsVmInstance(
         _appStopping = lifetime.ApplicationStopping;
 
         // Registered once for the resource's whole life rather than per boot, so repeated
-        // Start/Stop cycles do not stack up shutdown callbacks.
-        lifetime.ApplicationStopping.Register(() => TearDown());
+        // Start/Stop cycles do not stack up shutdown callbacks. This hook OWNS teardown at
+        // shutdown: a boot cancelled by the stopping token unwinds without draining, precisely
+        // so the drain runs here, synchronously, and host shutdown stays blocked until cleanup
+        // has actually finished. The wait is bounded because a boot stuck in a non-cancellable
+        // native HCS call must not stall shutdown indefinitely — and draining without the gate
+        // after the timeout is still safe: Drain seals the ledger, and anything a still-live
+        // boot acquires afterwards releases itself (see BootLedger.Add).
+        lifetime.ApplicationStopping.Register(() =>
+        {
+            bool acquired = _gate.Wait(TimeSpan.FromSeconds(15));
+            try
+            {
+                DrainCurrentBoot();
+            }
+            finally
+            {
+                if (acquired)
+                {
+                    _gate.Release();
+                }
+            }
+        });
 
         await StartAsync().ConfigureAwait(false);
     }
@@ -198,11 +220,15 @@ internal sealed class HcsVmInstance(
         await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
         try
         {
-            if (_vm is not null)
+            if (_current is { Exited: false })
             {
                 return;
             }
 
+            // Either nothing is running, or the guest exited on its own and its background
+            // cleanup has not reached the gate yet — collect the remains first so the boot
+            // below starts from nothing.
+            await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
             await BootAsync().ConfigureAwait(false);
         }
         finally
@@ -246,6 +272,11 @@ internal sealed class HcsVmInstance(
     {
         CancellationToken stopping = _appStopping;
 
+        // Assigned before anything is acquired so the shutdown hook always has a ledger to
+        // drain, no matter where this boot is when the AppHost starts stopping.
+        BootRecord boot = new(Interlocked.Increment(ref _epoch), new BootLedger(logger));
+        _current = boot;
+
         try
         {
             await notifications.PublishUpdateAsync(resource, s => s with
@@ -267,7 +298,7 @@ internal sealed class HcsVmInstance(
             // this, WaitFor(...) on an HCS VM would never hold the boot back.
             await eventing.PublishAsync(new BeforeResourceStartedEvent(resource, services), stopping).ConfigureAwait(false);
 
-            string bootDisk = PrepareBootDisk();
+            string bootDisk = PrepareBootDisk(boot.Ledger);
             ComputeSystemDocument document = BuildDocument(bootDisk);
 
             if (resource.NetworkEnabled)
@@ -275,27 +306,44 @@ internal sealed class HcsVmInstance(
                 await ScavengeStaleEndpointsAsync().ConfigureAwait(false);
                 Guid networkId = HcnClient.FindIcsNetworkId();
                 HcnClient.CreateDhcpEndpoint(networkId, resource.HcnEndpointId, resource.MacAddress, HcsVmOrchestrator.HcnOwner);
-                Volatile.Write(ref _hcnEndpointCreated, 1);
+                boot.Ledger.Add($"HCN endpoint {resource.HcnEndpointId}",
+                    () => HcnClient.DeleteEndpoint(resource.HcnEndpointId));
                 logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on network {NetworkId}",
                     resource.MacAddress, resource.HcnEndpointId, networkId);
             }
 
             HcsClient.GrantVmAccess(resource.VmId, bootDisk);
+            boot.Ledger.Add($"VM access grant on '{bootDisk}'",
+                () => HcsClient.RevokeVmAccess(resource.VmId, bootDisk));
             if (resource.CopyOnWrite)
             {
-                HcsClient.GrantVmAccess(resource.VmId, resource.VhdxPath!);
+                string basePath = resource.VhdxPath!;
+                HcsClient.GrantVmAccess(resource.VmId, basePath);
+                boot.Ledger.Add($"VM access grant on '{basePath}'",
+                    () => HcsClient.RevokeVmAccess(resource.VmId, basePath));
             }
 
             logger.LogInformation("Creating HCS compute system {VmId} from {Disk} ({MemoryMb} MB, {Processors} vCPU)",
                 resource.VmId, bootDisk, resource.MemoryMb, resource.ProcessorCount);
 
+            // Entered ahead of the compute system so the reverse-order drain stops the pump only
+            // after the VM is gone — the guest's own shutdown output still reaches the logs. The
+            // pump is boot-scoped on purpose: the pipe name is stable across boots, and a pump
+            // left over from a previous boot would attach to the next VM's pipe alongside the
+            // new one.
+            CancellationTokenSource pumpCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+            boot.Ledger.Add("serial console pump", () =>
+            {
+                pumpCts.Cancel();
+                pumpCts.Dispose();
+            });
+
             HcsComputeSystem vm = await HcsClient.CreateComputeSystemAsync(resource.VmId, document, stopping).ConfigureAwait(false);
-            int epoch = Interlocked.Increment(ref _epoch);
-            vm.Notification += (_, notification) => OnVmNotification(epoch, notification);
-            _vm = vm;
+            boot.Ledger.Add($"compute system {resource.VmId}", () => ReleaseVm(boot, vm));
+            vm.Notification += (_, notification) => OnVmNotification(boot, notification);
 
             await vm.StartAsync(stopping).ConfigureAwait(false);
-            _ = Task.Run(() => SerialConsolePump.RunAsync(resource.SerialPipeName, logger, stopping), CancellationToken.None);
+            _ = Task.Run(() => SerialConsolePump.RunAsync(resource.SerialPipeName, logger, pumpCts.Token), CancellationToken.None);
 
             logger.LogInformation("VM started; waiting for the guest OS to become ready...");
             await vm.WaitForGuestReadyAsync(resource.MemoryMb, TimeSpan.FromMinutes(2), stopping).ConfigureAwait(false);
@@ -318,17 +366,24 @@ internal sealed class HcsVmInstance(
                 State = KnownResourceStates.Running,
             }).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+        catch (Exception) when (stopping.IsCancellationRequested)
         {
-            // AppHost is shutting down mid-boot; teardown handles the rest.
+            // AppHost is shutting down mid-boot: either an await observed the cancellation, or
+            // the shutdown hook's drain yanked the VM out from under an in-flight HCS call and
+            // that call failed — both are shutdown noise, not boot failures. Deliberately no
+            // drain here: unwinding quickly is what releases the gate to the shutdown hook,
+            // which always runs on ApplicationStopping and does the full drain itself — that
+            // keeps host shutdown blocked until cleanup has actually finished, instead of
+            // letting it race a drain running on a thread-pool thread.
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to start HCS virtual machine '{Name}'.", resource.Name);
 
-            // Release whatever the failed boot did claim, so Start can be retried from the
-            // dashboard without leaking a compute system or an HCN endpoint.
-            TearDown();
+            // Release whatever the failed boot did claim — however far it got — so Start can be
+            // retried from the dashboard without leaking a compute system, an HCN endpoint, an
+            // ACL grant, or the copy-on-write work directory.
+            await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
 
             await notifications.PublishUpdateAsync(resource, s => s with
             {
@@ -341,8 +396,16 @@ internal sealed class HcsVmInstance(
 
     private async Task ShutDownAsync()
     {
-        if (_vm is null)
+        if (_current is not { } boot)
         {
+            return;
+        }
+
+        if (boot.Exited)
+        {
+            // The guest already exited on its own; the dashboard already shows Exited and only
+            // the cleanup is left.
+            await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
             return;
         }
 
@@ -352,7 +415,7 @@ internal sealed class HcsVmInstance(
         }).ConfigureAwait(false);
 
         logger.LogInformation("Stopping virtual machine '{Name}'...", resource.Name);
-        await Task.Run(TearDown).ConfigureAwait(false);
+        await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
 
         await notifications.PublishUpdateAsync(resource, s => s with
         {
@@ -361,6 +424,109 @@ internal sealed class HcsVmInstance(
             // The guest's address is gone; leaving its URLs lit would invite clicks into nothing.
             Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
         }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Retires the current boot, if any, and releases everything it acquired, most recent
+    /// first. Idempotent and thread-safe: the AppHost shutdown hook may run this concurrently
+    /// with a cancelled boot's own cleanup, and each resource is still released exactly once.
+    /// </summary>
+    private void DrainCurrentBoot() => Interlocked.Exchange(ref _current, null)?.Ledger.Drain();
+
+    /// <summary>
+    /// Best-effort graceful release of the compute system: try a clean guest shutdown briefly,
+    /// then terminate, then close the handle. Even if this never runs (crash, kill),
+    /// ShouldTerminateOnLastHandleClosed reaps the VM and the next run's scavenger reaps the
+    /// endpoint.
+    /// </summary>
+    private void ReleaseVm(BootRecord boot, HcsComputeSystem vm)
+    {
+        // Retires the epoch first: the termination below raises an exit notification that
+        // would otherwise fight whatever state the caller is about to publish.
+        Interlocked.Increment(ref _epoch);
+
+        try
+        {
+            // A guest that already exited on its own has nothing left to shut down.
+            if (!boot.Exited)
+            {
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+                try
+                {
+                    vm.ShutdownAsync(readyTimeout: TimeSpan.FromSeconds(10), cts.Token).GetAwaiter().GetResult();
+                }
+                catch (Exception)
+                {
+                    vm.TerminateAsync(CancellationToken.None).GetAwaiter().GetResult();
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Handle close below still guarantees termination.
+        }
+        finally
+        {
+            vm.Dispose();
+        }
+    }
+
+    private void OnVmNotification(BootRecord boot, HcsNotification notification)
+    {
+        if (notification.Type != HCS_EVENT_TYPE.HcsEventSystemExited)
+        {
+            return;
+        }
+
+        // A VM we already replaced or are already tearing down has no business reporting the
+        // resource's state — ReleaseVm retires the epoch before it terminates anything.
+        if (Volatile.Read(ref _epoch) != boot.Epoch)
+        {
+            return;
+        }
+
+        // Marked before Exited is published: the moment the dashboard shows Exited it offers
+        // Start, and Start must be able to tell a live boot from a corpse awaiting cleanup.
+        boot.Exited = true;
+
+        logger.LogInformation("VM exited: {Detail}", notification.EventData ?? "(no detail)");
+        _ = notifications.PublishUpdateAsync(resource, s => s with
+        {
+            State = KnownResourceStates.Exited,
+            StopTimeStamp = DateTime.Now,
+            Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
+        });
+
+        // The exited compute system's handle, endpoint, grants and work directory are all still
+        // held; release them without racing a lifecycle command over the same resources. This
+        // runs on a native callback thread and must not block on the gate itself.
+        _ = Task.Run(() => CleanUpAfterUnexpectedExitAsync(boot));
+    }
+
+    private async Task CleanUpAfterUnexpectedExitAsync(BootRecord boot)
+    {
+        try
+        {
+            await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return; // AppHost shutdown owns cleanup from here.
+        }
+
+        try
+        {
+            // Only drain if the exited boot is still the current one; a Stop or Start that got
+            // the gate first has already collected it.
+            if (ReferenceEquals(_current, boot))
+            {
+                await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     /// <summary>
@@ -470,79 +636,7 @@ internal sealed class HcsVmInstance(
         }
     }
 
-    private void OnVmNotification(int epoch, HcsNotification notification)
-    {
-        if (notification.Type != HCS_EVENT_TYPE.HcsEventSystemExited)
-        {
-            return;
-        }
-
-        // A VM we already replaced has no business reporting the resource's state.
-        if (Volatile.Read(ref _epoch) != epoch)
-        {
-            return;
-        }
-
-        logger.LogInformation("VM exited: {Detail}", notification.EventData ?? "(no detail)");
-        _ = notifications.PublishUpdateAsync(resource, s => s with
-        {
-            State = KnownResourceStates.Exited,
-            StopTimeStamp = DateTime.Now,
-        });
-    }
-
-    /// <summary>
-    /// Best-effort graceful teardown: try a clean guest shutdown briefly, then terminate, then
-    /// release the HCN endpoint. Even if this never runs (crash, kill),
-    /// ShouldTerminateOnLastHandleClosed reaps the VM and the next run's scavenger reaps the
-    /// endpoint. Safe to call when nothing is running.
-    /// </summary>
-    private void TearDown()
-    {
-        HcsComputeSystem? vm = Interlocked.Exchange(ref _vm, null);
-        if (vm is not null)
-        {
-            // Retires the epoch first: the termination below raises an exit notification that
-            // would otherwise fight whatever state the caller is about to publish.
-            Interlocked.Increment(ref _epoch);
-
-            try
-            {
-                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
-                try
-                {
-                    vm.ShutdownAsync(readyTimeout: TimeSpan.FromSeconds(10), cts.Token).GetAwaiter().GetResult();
-                }
-                catch (Exception)
-                {
-                    vm.TerminateAsync(CancellationToken.None).GetAwaiter().GetResult();
-                }
-            }
-            catch (Exception)
-            {
-                // Handle close below still guarantees termination.
-            }
-            finally
-            {
-                vm.Dispose();
-                CleanUpWorkDir();
-            }
-        }
-
-        if (Interlocked.Exchange(ref _hcnEndpointCreated, 0) == 1)
-        {
-            try
-            {
-                HcnClient.DeleteEndpoint(resource.HcnEndpointId);
-            }
-            catch (Exception)
-            {
-                // The next run's scavenger will get it.
-            }
-        }
-    }
-
-    private string PrepareBootDisk()
+    private string PrepareBootDisk(BootLedger ledger)
     {
         string? basePath = resource.VhdxPath;
         if (string.IsNullOrEmpty(basePath))
@@ -560,9 +654,19 @@ internal sealed class HcsVmInstance(
             return basePath;
         }
 
-        _workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", resource.VmId);
-        Directory.CreateDirectory(_workDir);
-        string diffPath = Path.Combine(_workDir, "boot-diff.vhdx");
+        string workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", resource.VmId);
+        Directory.CreateDirectory(workDir);
+        // Entered before the differencing disk is created so even a failure inside
+        // CreateDifferencing leaves nothing behind.
+        ledger.Add($"work directory '{workDir}'", () =>
+        {
+            if (Directory.Exists(workDir))
+            {
+                Directory.Delete(workDir, recursive: true);
+            }
+        });
+
+        string diffPath = Path.Combine(workDir, "boot-diff.vhdx");
 
         // A restart boots from a fresh differencing disk, discarding the previous run's writes —
         // the same contract as a container restart, and the reason the base image is never touched.
@@ -573,21 +677,6 @@ internal sealed class HcsVmInstance(
 
         VirtualDisk.CreateDifferencing(basePath, diffPath);
         return diffPath;
-    }
-
-    private void CleanUpWorkDir()
-    {
-        try
-        {
-            if (_workDir is not null && Directory.Exists(_workDir))
-            {
-                Directory.Delete(_workDir, recursive: true);
-            }
-        }
-        catch (IOException)
-        {
-            // A leaked diff disk in %TEMP% is harmless.
-        }
     }
 
     private ComputeSystemDocument BuildDocument(string bootDisk) => new()
@@ -621,4 +710,16 @@ internal sealed class HcsVmInstance(
             Services = new() { Shutdown = new() },
         },
     };
+
+    /// <summary>
+    /// One boot's identity and holdings. The epoch stamps notifications so a replaced VM cannot
+    /// speak for its successor; <see cref="Exited"/> flips when the guest exits on its own,
+    /// which is what lets Start tell a live boot from one awaiting cleanup.
+    /// </summary>
+    private sealed class BootRecord(int epoch, BootLedger ledger)
+    {
+        public int Epoch { get; } = epoch;
+        public BootLedger Ledger { get; } = ledger;
+        public volatile bool Exited;
+    }
 }
