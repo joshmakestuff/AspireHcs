@@ -32,45 +32,55 @@ public sealed class HcsClientRoundTripTests : IDisposable
         string diffPath = Path.Combine(_workDir, "boot-diff.vhdx");
 
         VirtualDisk.CreateDifferencing(BaseVhdx!, diffPath);
-        HcsClient.GrantVmAccess(vmId, diffPath);
-        HcsClient.GrantVmAccess(vmId, BaseVhdx!);
-
-        List<HcsNotification> notifications = [];
-        using HcsComputeSystem vm = await HcsClient.CreateComputeSystemAsync(vmId, BuildDocument(diffPath));
-        vm.Notification += (_, notification) =>
+        try
         {
-            lock (notifications)
+            HcsClient.GrantVmAccess(vmId, diffPath);
+            HcsClient.GrantVmAccess(vmId, BaseVhdx!);
+
+            List<HcsNotification> notifications = [];
+            using HcsComputeSystem vm = await HcsClient.CreateComputeSystemAsync(vmId, BuildDocument(diffPath));
+            vm.Notification += (_, notification) =>
             {
-                notifications.Add(notification);
-            }
-        };
+                lock (notifications)
+                {
+                    notifications.Add(notification);
+                }
+            };
 
-        await vm.StartAsync();
-        await vm.WaitForGuestReadyAsync(MemoryMb, TimeSpan.FromMinutes(2));
+            await vm.StartAsync();
+            await vm.WaitForGuestReadyAsync(MemoryMb, TimeSpan.FromMinutes(2));
 
-        string? properties = await vm.GetPropertiesAsync();
-        Assert.NotNull(properties);
-        Assert.Equal("Running", JsonNode.Parse(properties)?["State"]?.GetValue<string>());
+            string? properties = await vm.GetPropertiesAsync();
+            Assert.NotNull(properties);
+            Assert.Equal("Running", JsonNode.Parse(properties)?["State"]?.GetValue<string>());
 
-        await vm.ShutdownAsync();
+            await vm.ShutdownAsync();
 
-        // The callback contract: a graceful shutdown must surface a SystemExited notification.
-        DateTime deadline = DateTime.UtcNow.AddSeconds(60);
-        bool exited = false;
-        while (!exited && DateTime.UtcNow < deadline)
-        {
-            lock (notifications)
+            // The callback contract: a graceful shutdown must surface a SystemExited notification.
+            DateTime deadline = DateTime.UtcNow.AddSeconds(60);
+            bool exited = false;
+            while (!exited && DateTime.UtcNow < deadline)
             {
-                exited = notifications.Any(n => n.Type == HCS_EVENT_TYPE.HcsEventSystemExited);
+                lock (notifications)
+                {
+                    exited = notifications.Any(n => n.Type == HCS_EVENT_TYPE.HcsEventSystemExited);
+                }
+
+                if (!exited)
+                {
+                    await Task.Delay(500);
+                }
             }
 
-            if (!exited)
-            {
-                await Task.Delay(500);
-            }
+            Assert.True(exited, "expected an HcsEventSystemExited notification after graceful shutdown");
         }
-
-        Assert.True(exited, "expected an HcsEventSystemExited notification after graceful shutdown");
+        finally
+        {
+            // The grants are persistent ACEs on the files, not handle-scoped permissions; without
+            // this the runner's base image accumulates one dead VM identity per test run (#16).
+            HcsClient.RevokeVmAccess(vmId, diffPath);
+            HcsClient.RevokeVmAccess(vmId, BaseVhdx!);
+        }
     }
 
     [SkippableFact]

@@ -67,7 +67,12 @@ internal static class HcsClient
         return await op.WaitForResultAsync("HcsEnumerateComputeSystems", cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Grants the VM's virtual identity read access to a backing file (VHDX, ISO, ...).</summary>
+    /// <summary>
+    /// Grants the VM's virtual identity access to a backing file (VHDX, ISO, ...). The grant is
+    /// a persistent ACE on the file — FullControl, empirically, not read-only — so every grant
+    /// must be paired with <see cref="RevokeVmAccess"/> at teardown or the file's ACL grows by
+    /// one dead VM identity per run.
+    /// </summary>
     public static void GrantVmAccess(string id, string filePath)
     {
         HcsPlatform.ThrowIfUnsupported();
