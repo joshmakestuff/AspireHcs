@@ -404,9 +404,10 @@ internal sealed class HcsVmInstance(
 
     /// <summary>
     /// A guest can exit at any moment of the boot — including between the last phase and the
-    /// Running publish. Failing the boot here (rather than racing on) is what keeps a dead VM
-    /// from being announced as Running; the window this check cannot see is closed by
-    /// <see cref="CleanUpAfterUnexpectedExitAsync"/> republishing Exited after its drain.
+    /// Running publish. The guarantee is that a dead VM always ends in a terminal state, never
+    /// Running: an exit this check observes aborts the boot into FailedToStart (via the catch
+    /// in <see cref="BootAsync"/>, which also drains); an exit that slips past the last check
+    /// is settled to Exited by <see cref="CleanUpAfterUnexpectedExitAsync"/> after its drain.
     /// </summary>
     private static void ThrowIfExitedMidBoot(BootRecord boot)
     {
@@ -547,8 +548,9 @@ internal sealed class HcsVmInstance(
                 // Republished after the drain because the exit notification can lose a race
                 // with an almost-complete boot: the notification's Exited lands first, then
                 // BootAsync — past its last liveness check — publishes Running for a VM that is
-                // already dead. Settling the state here, under the gate, makes Exited the final
-                // word no matter how that race went.
+                // already dead. Settling the state here, under the gate, corrects that Running.
+                // (This branch is not reached when the exit aborted the boot instead — the boot's
+                // own catch drained _current and published FailedToStart, also terminal.)
                 await notifications.PublishUpdateAsync(resource, s => s with
                 {
                     State = KnownResourceStates.Exited,
