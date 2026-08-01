@@ -1,10 +1,8 @@
 using Xunit;
 
-// Every test in this assembly boots a real VM on the host's single Default Switch. Running two
-// at once is not just heavy, it is incorrect: the orchestrator creates its HCN endpoint before
-// its compute system exists, so a concurrently starting AppHost sees an endpoint with no live VM
-// and scavenges it out from under the first — observed as two AppHosts deleting the same endpoint
-// id in the same microsecond, leaving one VM with no NIC. That race is a product defect in its own
-// right (concurrent AppHosts on one machine hit it too) and is tracked separately; serializing here
-// keeps this suite from being flaky in the meantime.
+// Most tests in this assembly boot a real VM on the host's single Default Switch; two at once
+// contend for the same DHCP pool, host memory, and (in the assertion windows) the global HCN
+// endpoint list. The scavenging race that once made concurrency actively incorrect is fixed —
+// endpoints are pid-owned and scavenged only when their owning process is dead (#12) — but
+// serial execution keeps the suite deterministic and the boot timings honest.
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
