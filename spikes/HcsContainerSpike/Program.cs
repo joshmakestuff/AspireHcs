@@ -13,6 +13,9 @@
 //   terminate [--id <id>]  open + terminate a leftover spike container
 //
 // Options: --id <containerId> --command <cmdline> --seconds <io/exit budget> --work <dir>
+// Exit codes: 0 success; 2 layer/create/start failure; 3 exec failure; 4 a step
+// after an otherwise-successful run failed (teardown or post-teardown probe);
+// 5 list --absent found the id still enumerable; 64 usage.
 //
 // The layer directory is expected in windowsfilter (wclayer) format — e.g. a
 // base image materialized by a one-time `docker pull` under
@@ -33,6 +36,7 @@ namespace HcsContainerSpike;
 internal static class Program
 {
     private const string DefaultContainerId = "AspireHcsContainerSpike";
+    private static readonly HRESULT ProbeFailed = new(unchecked((int)0x80004005)); // E_FAIL for locally-judged proof steps
 
     private static readonly List<(string Step, HRESULT Hr, string Detail)> Results = [];
 
@@ -45,15 +49,31 @@ internal static class Program
 
         try
         {
-            return mode switch
+            int code;
+            try
             {
-                "run" => Run(args, containerId, orphan: false),
-                "orphan" => Run(args, containerId, orphan: true),
-                "cleanup" => Cleanup(args, containerId),
-                "list" => List(),
-                "terminate" => Terminate(containerId),
-                _ => Usage(),
-            };
+                code = mode switch
+                {
+                    "run" => Run(args, containerId, orphan: false),
+                    "orphan" => Run(args, containerId, orphan: true),
+                    "cleanup" => Cleanup(args, containerId),
+                    "list" => List(args),
+                    "terminate" => Terminate(containerId),
+                    _ => Usage(),
+                };
+            }
+            catch (ArgumentException ex)
+            {
+                Console.WriteLine($"error: {ex.Message}");
+                return Usage();
+            }
+            // Single sink for the exit verdict: a "successful" run whose teardown
+            // or post-teardown probes failed must not report success.
+            if (code == 0 && Results.Any(r => r.Hr.Failed))
+            {
+                code = 4;
+            }
+            return code;
         }
         finally
         {
@@ -66,7 +86,7 @@ internal static class Program
         string layerPath = Path.TrimEndingDirectorySeparator(Opt(args, "--layer")
             ?? throw new ArgumentException("--layer <materialized base layer dir> is required"));
         string command = Opt(args, "--command") ?? "cmd /c ver & whoami";
-        int budgetSeconds = int.TryParse(Opt(args, "--seconds"), out int s) ? s : 60;
+        int budgetSeconds = OptInt(args, "--seconds", 60);
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
 
@@ -112,6 +132,7 @@ internal static class Program
         Directory.CreateDirectory(sandboxPath);
 
         bool prepared = false;
+        bool created = false;
         try
         {
             Step("CreateSandboxLayer", WcLayer.CreateScratchLayer(sandboxPath, chain), sandboxPath);
@@ -143,6 +164,7 @@ internal static class Program
             {
                 return 2;
             }
+            created = true;
 
             using (system)
             {
@@ -164,12 +186,18 @@ internal static class Program
                 }
                 Step("HcsGetComputeSystemProperties", hr, doc ?? "");
 
+                // Runtime witness for "process-isolated container": the properties
+                // must report SystemType Container AND a host-silo object root.
+                // A Hyper-V-isolated container lives in a utility VM and cannot
+                // have an ObRoot under \Silos\ on the host.
+                ProveProcessIsolation(hr, doc);
+
                 if (orphan)
                 {
                     Console.WriteLine();
                     Console.WriteLine($"Container '{containerId}' is running. Exiting abruptly WITHOUT terminate/close " +
-                                      "(ShouldTerminateOnLastHandleClosed test). Run 'list' next to verify the container died, " +
-                                      $"then 'cleanup --work {workDir}' to release the sandbox layer.");
+                                      $"(ShouldTerminateOnLastHandleClosed test). Run 'list --absent {containerId}' next to " +
+                                      $"verify the container died, then 'cleanup --work {workDir}' to release the sandbox layer.");
                     PrintSummary();
                     Environment.Exit(99);
                 }
@@ -194,6 +222,76 @@ internal static class Program
             }
             Step("DeactivateLayer", WcLayer.Deactivate(sandboxPath), "");
             Step("DestroyLayer", WcLayer.Destroy(sandboxPath), sandboxPath);
+
+            // Probes that encode the teardown claims as runtime assertions.
+            Step("SandboxRemovedProbe", Directory.Exists(sandboxPath) ? ProbeFailed : default,
+                Directory.Exists(sandboxPath) ? $"{sandboxPath} still exists" : "sandbox directory removed");
+            if (created)
+            {
+                using var probeOp = new HcsOperation();
+                HRESULT probeHr = PInvoke.HcsEnumerateComputeSystems("{}", probeOp.Handle);
+                string? enumDoc = null;
+                if (probeHr.Succeeded)
+                {
+                    (probeHr, enumDoc) = probeOp.Wait();
+                }
+                bool? present = ContainsComputeSystemId(enumDoc, containerId);
+                Step("ComputeSystemGoneProbe",
+                    probeHr.Failed ? probeHr : present is null or true ? ProbeFailed : default,
+                    present switch
+                    {
+                        null => "enumeration document missing or unparseable — cannot judge",
+                        true => $"'{containerId}' still enumerable",
+                        false => $"'{containerId}' absent from enumeration",
+                    });
+            }
+        }
+    }
+
+    private static void ProveProcessIsolation(HRESULT propertiesHr, string? propertiesDoc)
+    {
+        string detail;
+        bool proved = false;
+        if (propertiesHr.Failed || propertiesDoc is null)
+        {
+            detail = "no properties document to judge";
+        }
+        else
+        {
+            try
+            {
+                JsonNode? props = JsonNode.Parse(propertiesDoc);
+                string? systemType = (string?)props?["SystemType"];
+                string? obRoot = (string?)props?["ObRoot"];
+                proved = string.Equals(systemType, "Container", StringComparison.OrdinalIgnoreCase)
+                    && obRoot?.Contains(@"\Silos\", StringComparison.OrdinalIgnoreCase) == true;
+                detail = $"SystemType={systemType ?? "(null)"} ObRoot={obRoot ?? "(null)"}";
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                detail = $"unparseable properties document: {ex.Message}";
+            }
+        }
+        Step("ProcessIsolationProof(properties)", proved ? default : ProbeFailed, detail);
+    }
+
+    /// <summary>Null means "cannot judge" (missing/unparseable doc) — callers must
+    /// treat that as a failed probe, never as absence.</summary>
+    private static bool? ContainsComputeSystemId(string? enumerationDoc, string id)
+    {
+        if (enumerationDoc is null)
+        {
+            return null;
+        }
+        try
+        {
+            return JsonNode.Parse(enumerationDoc) is JsonArray systems
+                ? systems.Any(s => string.Equals((string?)s?["Id"], id, StringComparison.OrdinalIgnoreCase))
+                : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
         }
     }
 
@@ -245,9 +343,17 @@ internal static class Program
             }
             Step("HcsGetProcessProperties", hr, doc ?? "");
 
-            bool proved = ioDone && outText.Contains("Microsoft Windows", StringComparison.OrdinalIgnoreCase);
-            Step("GuestExecProof(stdout)", proved ? default : new HRESULT(unchecked((int)0x80004005)),
-                proved ? "guest ver banner captured" : "expected 'Microsoft Windows' banner not captured");
+            // The `ver` banner carries the build of the OS binaries the guest is
+            // actually running — i.e. the image's build, not necessarily the
+            // host's. Report both so cross-build runs are visible in the record.
+            System.Text.RegularExpressions.Match banner = System.Text.RegularExpressions.Regex.Match(
+                outText, @"Microsoft Windows \[Version (?<build>10\.\d+\.\d+\.\d+)\]");
+            string hostBuild = $"{Environment.OSVersion.Version}";
+            bool proved = ioDone && banner.Success;
+            Step("GuestExecProof(stdout)", proved ? default : ProbeFailed,
+                proved
+                    ? $"guest build={banner.Groups["build"].Value} host build={hostBuild}"
+                    : $"expected 'Microsoft Windows [Version ...]' banner not captured (host build={hostBuild})");
             return proved ? 0 : 3;
         }
     }
@@ -270,10 +376,13 @@ internal static class Program
         {
             return;
         }
-        Console.WriteLine($"[preclean] leftover sandbox at {sandboxPath}; attempting unprepare/deactivate/destroy");
-        _ = WcLayer.Unprepare(sandboxPath);
-        _ = WcLayer.Deactivate(sandboxPath);
-        _ = WcLayer.Destroy(sandboxPath);
+        // Best-effort by design: these HRESULTs are printed but deliberately kept
+        // out of the summary, so a no-op preclean cannot fail the run's verdict.
+        HRESULT unprepare = WcLayer.Unprepare(sandboxPath);
+        HRESULT deactivate = WcLayer.Deactivate(sandboxPath);
+        HRESULT destroy = WcLayer.Destroy(sandboxPath);
+        Console.WriteLine($"[preclean] leftover sandbox at {sandboxPath}: " +
+                          $"unprepare=0x{(uint)unprepare.Value:X8} deactivate=0x{(uint)deactivate.Value:X8} destroy=0x{(uint)destroy.Value:X8}");
         if (Directory.Exists(sandboxPath))
         {
             Directory.Delete(sandboxPath, recursive: true);
@@ -290,7 +399,7 @@ internal static class Program
         return Results.Any(r => r.Hr.Failed) ? 2 : 0;
     }
 
-    private static int List()
+    private static int List(string[] args)
     {
         using var op = new HcsOperation();
         HRESULT hr = PInvoke.HcsEnumerateComputeSystems("{}", op.Handle);
@@ -301,7 +410,27 @@ internal static class Program
         }
         Step("HcsEnumerateComputeSystems", hr, "");
         Console.WriteLine(doc ?? "(no result document)");
-        return hr.Succeeded ? 0 : 2;
+        if (hr.Failed)
+        {
+            return 2;
+        }
+
+        // list --absent <id>: a verifier that can actually fail — used after an
+        // orphan run to prove ShouldTerminateOnLastHandleClosed reaped the container.
+        string? absentId = Opt(args, "--absent");
+        if (absentId is not null)
+        {
+            bool? present = ContainsComputeSystemId(doc, absentId);
+            Step("AbsenceProbe", present is null or true ? ProbeFailed : default,
+                present switch
+                {
+                    null => "enumeration document missing or unparseable — cannot judge",
+                    true => $"'{absentId}' is still enumerable",
+                    false => $"'{absentId}' absent from enumeration",
+                });
+            return present is false ? 0 : 5;
+        }
+        return 0;
     }
 
     private static int Terminate(string containerId)
@@ -400,6 +529,18 @@ internal static class Program
         return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
     }
 
+    private static int OptInt(string[] args, string name, int fallback)
+    {
+        string? raw = Opt(args, name);
+        if (raw is null)
+        {
+            return fallback;
+        }
+        return int.TryParse(raw, out int value) && value > 0
+            ? value
+            : throw new ArgumentException($"{name} must be a positive integer, got '{raw}'");
+    }
+
     private static int Usage()
     {
         Console.WriteLine("""
@@ -407,7 +548,8 @@ internal static class Program
               run       --layer <dir> [--id <containerId>] [--command <cmdline>] [--seconds <n>] [--work <dir>]
               orphan    --layer <dir> ...   create+start then exit without terminating
               cleanup   [--work <dir>] [--id <containerId>]   release a leftover sandbox layer
-              list                          enumerate HCS compute systems
+              list      [--absent <id>]      enumerate HCS compute systems; with --absent,
+                                             fail (exit 5) if <id> is still enumerable
               terminate [--id <containerId>]   terminate a leftover spike container
             """);
         return 64;
