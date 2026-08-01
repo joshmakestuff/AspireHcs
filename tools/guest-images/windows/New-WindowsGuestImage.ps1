@@ -158,26 +158,41 @@ try {
     Copy-Item (Join-Path $PSScriptRoot 'Initialize-AspireHcsGuest.ps1') "$scriptsDir\Initialize-AspireHcsGuest.ps1"
 
     # OpenSSH: reportedly in-box on Server 2025 — verified against the applied image, not
-    # trusted. Only reach for the LOF ISO if the capability is genuinely absent.
-    Write-Step "Checking OpenSSH.Server capability state..."
-    $cap = Get-WindowsCapability -Path "${winLetter}:\" -Name 'OpenSSH.Server*'
-    if (-not $cap) { throw "OpenSSH.Server capability not recognized by the applied image." }
-    Write-Step "OpenSSH.Server state: $($cap.State)"
-    if ($cap.State -ne 'Installed') {
+    # trusted. Only reach for the LOF ISO if the capability is genuinely absent. dism.exe,
+    # not the DISM cmdlets: offline -Path servicing throws 'Class not registered' under
+    # PowerShell 7 (the same wall SCED's builder shells out to dism.exe for).
+    $openSshCapability = 'OpenSSH.Server~~~~0.0.1.0'
+    function Get-OfflineCapabilityState([string]$ImageRoot, [string]$CapabilityName) {
+        $out = & dism.exe /English /Image:$ImageRoot /Get-CapabilityInfo /CapabilityName:$CapabilityName
+        if ($LASTEXITCODE -ne 0) {
+            throw "dism /Get-CapabilityInfo failed (exit $LASTEXITCODE):`n$($out -join "`n")"
+        }
+        $stateLine = @($out | Where-Object { $_ -match '^State : ' })
+        if (-not $stateLine) { throw "Could not parse capability state from dism output:`n$($out -join "`n")" }
+        ($stateLine[0] -replace '^State : ', '').Trim()
+    }
+
+    Write-Step "Checking $openSshCapability state..."
+    $capState = Get-OfflineCapabilityState "${winLetter}:\" $openSshCapability
+    Write-Step "OpenSSH.Server state: $capState"
+    if ($capState -ne 'Installed') {
         if (-not $FodIsoPath) {
-            throw "OpenSSH.Server is '$($cap.State)' in this image and no -FodIsoPath was provided to install it from."
+            throw "OpenSSH.Server is '$capState' in this image and no -FodIsoPath was provided to install it from."
         }
         Write-Step "Mounting LOF ISO and installing OpenSSH.Server offline..."
         $fodMount = Mount-DiskImage -ImagePath (Resolve-Path $FodIsoPath).Path -PassThru
         $fodDrive = ($fodMount | Get-Volume).DriveLetter
         $fodSource = "${fodDrive}:\LanguagesAndOptionalFeatures"
         if (-not (Test-Path $fodSource)) { throw "LanguagesAndOptionalFeatures not found on the FOD ISO." }
-        Add-WindowsCapability -Path "${winLetter}:\" -Name $cap.Name -Source $fodSource -LimitAccess | Out-Null
+        $dismOut = & dism.exe /English /Image:"${winLetter}:\" /Add-Capability /CapabilityName:$openSshCapability /Source:$fodSource /LimitAccess
+        if ($LASTEXITCODE -ne 0) {
+            throw "dism /Add-Capability failed (exit $LASTEXITCODE):`n$($dismOut -join "`n")"
+        }
         $capabilityAdded = $true
     }
-    $cap = Get-WindowsCapability -Path "${winLetter}:\" -Name 'OpenSSH.Server*'
-    if ($cap.State -ne 'Installed') {
-        throw "OpenSSH.Server is still '$($cap.State)' after provisioning — the image cannot serve as the TCP fixture."
+    $capState = Get-OfflineCapabilityState "${winLetter}:\" $openSshCapability
+    if ($capState -ne 'Installed') {
+        throw "OpenSSH.Server is still '$capState' after provisioning — the image cannot serve as the TCP fixture."
     }
     Write-Step "OpenSSH.Server verified Installed."
 
