@@ -48,8 +48,10 @@ public sealed class NoNetworkTeardownTests(ITestOutputHelper output)
         await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
         output.WriteLine("booted to Running without a network");
 
-        // A network-less boot must not have created an HCN endpoint under our owner.
-        Assert.DoesNotContain(vm.HcnEndpointId, HcnClient.EnumerateEndpointIds(HcsVmOrchestrator.HcnOwner));
+        // A network-less boot must not have created an HCN endpoint at all. Enumerated without
+        // an owner filter: owners are run-scoped now, and a filtered query that names the wrong
+        // owner would make this assertion pass vacuously.
+        Assert.DoesNotContain(vm.HcnEndpointId, HcnClient.EnumerateEndpointIds());
 
         ExecuteCommandResult stopped = await app.ResourceCommands
             .ExecuteCommandAsync("appliance", KnownResourceCommands.StopCommand, cts.Token);
