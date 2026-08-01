@@ -23,7 +23,7 @@ variants from it reproducibly.
 | Variant | What it is | What it proved / probes |
 |---|---|---|
 | `Serial` | `console=ttyS0,115200n8` on the kernel cmdline, `quiet splash` removed | First guest-side readiness reference: the full kernel+systemd log streams to COM1 (58 KB/boot observed vs 0 for the base). Validated the balloon probe — balloon `S_OK` lands at the ttyS0 login prompt (~9.2 s guest time), i.e. at full userland, not merely kernel-up. |
-| `StaticNoDhcp` | Serial + NetworkManager masked + static `eth0` (ifupdown) | The never-leases path: a guest that boots healthy with a visible NIC but never DHCPs, exercising `WaitForLeasedIpAsync`'s 90 s timeout and its error reporting. |
+| `StaticNoDhcp` | Serial + NetworkManager masked + static `eth0` (ifupdown) | The never-leases path: a guest that boots healthy with a visible NIC but never DHCPs. Witnessed manually 2026-08-01 — `WaitForLeasedIpAsync` timed out at 90 s with an actionable `TimeoutException` naming DHCP, the resource ended `FailedToStart`, and the guest's `networking.service` finished OK (eth0 raised static). Not yet wired into the suite; that lands with the Windows fixture wiring (issue #11 phase 3). |
 
 Requirements: WSL 2 with a default Linux distro (edits run via `wsl --mount` against the
 copy's ext4 root — the Kali root filesystem is not mountable from Windows directly).

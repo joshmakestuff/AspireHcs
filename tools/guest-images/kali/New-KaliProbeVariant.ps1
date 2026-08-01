@@ -44,25 +44,29 @@ if (Test-Path $OutputVhdx) {
     throw "Output already exists: $OutputVhdx. Delete it first; this script never overwrites."
 }
 
-# The edits run inside WSL against the mounted ext4 root, located by its 'root' label with a
-# retry loop (a cold-started distro can need a moment before block devices are queryable).
+# The edits run inside WSL against the mounted ext4 root of OUR attached disk. The disk is
+# identified by diffing the device list before/after wsl --mount — never by filesystem label
+# alone, which could match an unrelated disk (another attached image, a distro's own volume)
+# and would let every post-edit check pass against the wrong filesystem. __TARGET_DISK__ is
+# substituted by the PowerShell driver; the payload still verifies the partition looks right.
 $mountPreamble = @'
 set -eu
-dev=''
+disk="__TARGET_DISK__"
+part=''
 i=0
 while [ "$i" -lt 15 ]; do
-  name=$(lsblk -o NAME,LABEL -nr | awk '$2=="root"{print $1}' | head -1)
+  name=$(lsblk "/dev/$disk" -nr -o NAME,LABEL,FSTYPE | awk '$2=="root" && $3=="ext4"{print $1}' | head -1)
   if [ -n "$name" ] && [ -b "/dev/$name" ]; then
-    dev="/dev/$name"
+    part="/dev/$name"
     break
   fi
   i=$((i+1))
   sleep 1
 done
-echo "root partition: $dev"
-[ -b "$dev" ]
+echo "root partition: $part (on /dev/$disk)"
+[ -b "$part" ] || { echo "FAIL: no ext4 partition labeled 'root' on /dev/$disk" >&2; exit 1; }
 mkdir -p /mnt/aspirehcs-probe
-mount "$dev" /mnt/aspirehcs-probe
+mount "$part" /mnt/aspirehcs-probe
 trap 'umount /mnt/aspirehcs-probe 2>/dev/null || true' EXIT
 R=/mnt/aspirehcs-probe
 '@
@@ -70,12 +74,25 @@ R=/mnt/aspirehcs-probe
 $serialEdit = @'
 sed -i 's|ro  quiet splash|ro console=tty0 console=ttyS0,115200n8|' "$R/boot/grub/grub.cfg"
 sed -i 's|GRUB_CMDLINE_LINUX_DEFAULT="quiet"|GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8"|' "$R/etc/default/grub"
-# Assert the RESULT, not that sed matched: a silently no-oping sed must fail here.
-grep -q 'console=ttyS0' "$R/boot/grub/grub.cfg" || { echo 'FAIL: console=ttyS0 not present in grub.cfg' >&2; exit 1; }
+# Assert the RESULT, not that sed matched: a silently no-oping sed must fail here. The
+# DEFAULT entry (first linux line) must carry the console, and no bootable entry may
+# retain 'quiet splash' — console=ttyS0 merely appearing somewhere is not enough.
+firstlinux=$(grep -m1 '^\s*linux\s*/boot' "$R/boot/grub/grub.cfg" || true)
+case "$firstlinux" in
+  *console=ttyS0*) : ;;
+  *) echo 'FAIL: default boot entry lacks console=ttyS0' >&2; exit 1 ;;
+esac
+if grep -q 'quiet splash' "$R/boot/grub/grub.cfg"; then
+  echo 'FAIL: an entry still carries quiet splash' >&2; exit 1
+fi
 echo 'serial edit verified'
 '@
 
 $staticEdit = @'
+# The static config is only consumed if the image's ifupdown actually sources the
+# drop-in directory — verify against the consumer, not our assumption of it.
+grep -q 'source /etc/network/interfaces.d' "$R/etc/network/interfaces" \
+  || { echo 'FAIL: image does not source interfaces.d; static config would be ignored' >&2; exit 1; }
 ln -sf /dev/null "$R/etc/systemd/system/NetworkManager.service"
 ln -sf /dev/null "$R/etc/systemd/system/NetworkManager-dispatcher.service"
 ln -sf /dev/null "$R/etc/systemd/system/NetworkManager-wait-online.service"
@@ -113,16 +130,33 @@ if ($outputDir -and -not (Test-Path $outputDir)) {
 }
 Copy-Item -Path $BaseVhdx -Destination $OutputVhdx
 
+function Get-WslDiskNames {
+    $names = wsl -u root -- lsblk -dnr -o NAME 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "lsblk inside WSL failed (exit $LASTEXITCODE)." }
+    @($names | Where-Object { $_ })
+}
+
 $mounted = $false
 try {
+    $disksBefore = Get-WslDiskNames
+
     Write-Host "Attaching to WSL..."
     wsl --mount --vhd $OutputVhdx --bare
     if ($LASTEXITCODE -ne 0) { throw "wsl --mount failed (exit $LASTEXITCODE)." }
     $mounted = $true
 
+    # Identify OUR disk by set difference, never by filesystem label — a label match could
+    # target an unrelated attached disk and every downstream check would pass against it.
+    $newDisks = @(Get-WslDiskNames | Where-Object { $_ -notin $disksBefore })
+    if ($newDisks.Count -ne 1) {
+        throw "Expected exactly one new WSL block device after attach, found $($newDisks.Count) ($($newDisks -join ', '))."
+    }
+    $targetDisk = $newDisks[0]
+    Write-Host "Attached as /dev/$targetDisk"
+
     Write-Host "Applying '$Variant' edits..."
     # LF-only: sh chokes on CRLF.
-    $payloadLf = $payload -replace "`r`n", "`n"
+    $payloadLf = ($payload -replace '__TARGET_DISK__', $targetDisk) -replace "`r`n", "`n"
     $payloadLf | wsl -u root -- sh -s
     if ($LASTEXITCODE -ne 0) { throw "in-guest edits failed (exit $LASTEXITCODE)." }
 }
@@ -135,13 +169,23 @@ finally {
     }
 }
 
+# Provenance is the contract this tooling exists for — a build that cannot record it fails
+# rather than silently writing nulls.
+$scriptCommit = git -C $PSScriptRoot rev-parse HEAD
+if ($LASTEXITCODE -ne 0 -or -not $scriptCommit) {
+    throw "Cannot record provenance: 'git rev-parse HEAD' failed in $PSScriptRoot."
+}
+$dirty = git -C $PSScriptRoot status --porcelain
+if ($LASTEXITCODE -ne 0) { throw "Cannot record provenance: 'git status' failed in $PSScriptRoot." }
+
 $provenance = [ordered]@{
     variant       = $Variant
     baseVhdx      = (Resolve-Path $BaseVhdx).Path
     baseSha256    = $baseHash
     builtUtc      = (Get-Date).ToUniversalTime().ToString('o')
     builtBy       = "$env:USERDOMAIN\$env:USERNAME"
-    scriptCommit  = (git -C $PSScriptRoot rev-parse HEAD 2>$null)
+    scriptCommit  = $scriptCommit
+    worktreeDirty = [bool]$dirty
     edits         = switch ($Variant) {
         'Serial' { @('kernel cmdline: +console=tty0 +console=ttyS0,115200n8 -quiet -splash') }
         'StaticNoDhcp' {
