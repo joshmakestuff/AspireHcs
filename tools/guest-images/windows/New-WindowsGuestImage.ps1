@@ -118,6 +118,13 @@ try {
     $wimInfo = Get-WindowsImage -ImagePath $wimPath -Index $ImageIndex
     Write-Step "WIM index ${ImageIndex}: $($wimInfo.ImageName), version $($wimInfo.Version)"
 
+    # The image this tool advertises is Server 2025 CORE; a pinned hash does not prove the
+    # caller pinned the right ISO or picked a Core index, so the claim is asserted against
+    # what the WIM says about itself (Desktop indexes carry a '(Desktop Experience)' suffix).
+    if ($wimInfo.ImageName -notmatch 'Server 2025' -or $wimInfo.ImageName -match 'Desktop Experience') {
+        throw "WIM index $ImageIndex is '$($wimInfo.ImageName)', not a Server 2025 Core edition — refusing to label the output as one."
+    }
+
     Write-Step "Creating VHDX ($SizeGB GB dynamic)..."
     New-VHD -Path $OutputVhdx -SizeBytes ($SizeGB * 1GB) -Dynamic | Out-Null
     $disk = Mount-VHD -Path $OutputVhdx -Passthru | Get-Disk
@@ -147,8 +154,10 @@ try {
         -ApplyPath "${winLetter}:\" -CheckIntegrity | Out-Null
 
     Write-Step "Placing unattend.xml and bootstrap script..."
+    # String.Replace, not -replace: regex substitution would silently transform '$$'/'$&'
+    # sequences inside the password before it ever reaches the answer file.
     $template = Get-Content (Join-Path $PSScriptRoot 'unattend.template.xml') -Raw
-    $unattend = $template -replace '__ADMIN_PASSWORD__', [System.Security.SecurityElement]::Escape($plainPwd)
+    $unattend = $template.Replace('__ADMIN_PASSWORD__', [System.Security.SecurityElement]::Escape($plainPwd))
     $pantherDir = "${winLetter}:\Windows\Panther"
     New-Item -ItemType Directory -Path $pantherDir -Force | Out-Null
     Set-Content -Path "$pantherDir\unattend.xml" -Value $unattend -Encoding UTF8
@@ -179,7 +188,11 @@ try {
         if (-not $FodIsoPath) {
             throw "OpenSSH.Server is '$capState' in this image and no -FodIsoPath was provided to install it from."
         }
+        # UNVERIFIED BRANCH: Server 2025 ships OpenSSH in-box, so no build on the reference
+        # machine has ever taken this path. First exercised when an ISO without the capability
+        # appears; until then treat it as best-effort and read the build log closely.
         Write-Step "Mounting LOF ISO and installing OpenSSH.Server offline..."
+        $fodIsoHash = (Get-FileHash -Algorithm SHA256 -Path $FodIsoPath).Hash
         $fodMount = Mount-DiskImage -ImagePath (Resolve-Path $FodIsoPath).Path -PassThru
         $fodDrive = ($fodMount | Get-Volume).DriveLetter
         $fodSource = "${fodDrive}:\LanguagesAndOptionalFeatures"
@@ -272,6 +285,9 @@ try {
     if (-not $sentinel.ok) {
         throw "Bootstrap recorded failure: $($sentinel.error). See bootstrap-transcript.log inside the image."
     }
+    if ($sentinel.sshd -ne 'Running') {
+        throw "Bootstrap completed but recorded sshd='$($sentinel.sshd)' — the image's advertised SSH fixture was not serving at burn-in."
+    }
     Write-Step "Sentinel ok: sshd=$($sentinel.sshd), completed $($sentinel.completedUtc)"
 }
 finally {
@@ -287,13 +303,18 @@ $outputHash = (Get-FileHash -Algorithm SHA256 -Path $OutputVhdx).Hash
 Set-ItemProperty -Path $OutputVhdx -Name IsReadOnly -Value $true
 
 $provenance = [ordered]@{
-    image          = 'Windows Server 2025 Core (AspireHcs guest base)'
+    # Derived from the WIM's own metadata (asserted Server 2025 Core at provisioning time),
+    # never an independent claim that could drift from the input.
+    image          = "$($wimInfo.ImageName) (AspireHcs guest base)"
     isoPath        = (Resolve-Path $IsoPath).Path
     isoSha256      = $actualIsoHash
     wimIndex       = $ImageIndex
     wimImageName   = $wimInfo.ImageName
     wimVersion     = $wimInfo.Version.ToString()
     openSshSource  = if ($capabilityAdded) { 'LOF ISO (offline DISM)' } else { 'in-box' }
+    fodIso         = if ($capabilityAdded) {
+        @{ path = (Resolve-Path $FodIsoPath).Path; sha256 = $fodIsoHash }
+    } else { $null }
     builtUtc       = (Get-Date).ToUniversalTime().ToString('o')
     builtBy        = "$env:USERDOMAIN\$env:USERNAME"
     scriptCommit   = $scriptCommit

@@ -156,7 +156,9 @@ try {
 
     Write-Host "Applying '$Variant' edits..."
     # LF-only: sh chokes on CRLF.
-    $payloadLf = ($payload -replace '__TARGET_DISK__', $targetDisk) -replace "`r`n", "`n"
+    # String.Replace for the substitution: -replace is regex and would interpret '$' tokens
+    # in the value (the disk name cannot contain any today, but the pattern shouldn't rely on that).
+    $payloadLf = $payload.Replace('__TARGET_DISK__', $targetDisk) -replace "`r`n", "`n"
     $payloadLf | wsl -u root -- sh -s
     if ($LASTEXITCODE -ne 0) { throw "in-guest edits failed (exit $LASTEXITCODE)." }
 }
