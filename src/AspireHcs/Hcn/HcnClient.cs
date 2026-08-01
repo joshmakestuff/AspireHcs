@@ -87,16 +87,16 @@ internal static unsafe class HcnClient
     {
         // Flags is EndpointFlags.EnableDhcp (bit 32). The HCN schema docs say enum variants
         // "should be used as string", but HNS empirically rejects string flags with
-        // 0x803B001B InvalidJson — only the numeric form is accepted.
-        string settings = $$"""
-            {
-                "SchemaVersion": { "Major": 2, "Minor": 0 },
-                "Owner": "{{owner}}",
-                "HostComputeNetwork": "{{networkId}}",
-                "MacAddress": "{{macAddress}}",
-                "Flags": 32
-            }
-            """;
+        // 0x803B001B InvalidJson — only the numeric form is accepted. Built via JsonObject so
+        // caller-supplied strings are encoded rather than interpolated into JSON syntax.
+        string settings = new JsonObject
+        {
+            ["SchemaVersion"] = new JsonObject { ["Major"] = 2, ["Minor"] = 0 },
+            ["Owner"] = owner,
+            ["HostComputeNetwork"] = networkId.ToString(),
+            ["MacAddress"] = macAddress,
+            ["Flags"] = 32,
+        }.ToJsonString();
 
         void* network = OpenNetwork(networkId);
         try
@@ -139,7 +139,7 @@ internal static unsafe class HcnClient
     /// </summary>
     public static List<Guid> EnumerateEndpointIds(string? owner = null)
     {
-        string query = owner is null ? "{}" : $$"""{ "Owner": "{{owner}}" }""";
+        string query = owner is null ? "{}" : new JsonObject { ["Owner"] = owner }.ToJsonString();
         HRESULT hr = PInvoke.HcnEnumerateEndpoints(query, out PWSTR endpointsDoc, out PWSTR error);
         string json = Consume("HcnEnumerateEndpoints", hr, endpointsDoc, error) ?? "[]";
 

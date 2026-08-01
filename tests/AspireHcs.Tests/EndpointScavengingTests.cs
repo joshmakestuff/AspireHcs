@@ -37,9 +37,22 @@ public class EndpointScavengingTests
     }
 
     [Fact]
+    public void Run_scoped_owner_with_dead_pid_and_a_defunct_vm_attachment_is_stale()
+    {
+        // Attached-but-not-running: the endpoint still records a VM that no longer exists.
+        Assert.True(IsStale("AspireHcs:1234", attachedVmRuntimeId: "defunct-runtime-id", pidAlive: false, vmRunning: false));
+    }
+
+    [Fact]
     public void Legacy_bare_owner_without_a_running_vm_is_stale()
     {
         Assert.True(IsStale("AspireHcs", attachedVmRuntimeId: null));
+    }
+
+    [Fact]
+    public void Legacy_bare_owner_with_a_defunct_vm_attachment_is_stale()
+    {
+        Assert.True(IsStale("AspireHcs", attachedVmRuntimeId: "defunct-runtime-id", vmRunning: false));
     }
 
     [Fact]
