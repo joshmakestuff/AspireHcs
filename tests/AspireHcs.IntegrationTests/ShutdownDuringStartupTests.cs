@@ -86,7 +86,9 @@ public sealed class ShutdownDuringStartupTests(ITestOutputHelper output)
         }
 
         Assert.False(Directory.Exists(workDir), $"copy-on-write work directory leaked: {workDir}");
-        Assert.DoesNotContain(vm.HcnEndpointId, HcnClient.EnumerateEndpointIds(HcsVmOrchestrator.HcnOwner));
+        // Unfiltered: owners are run-scoped now, and a filtered query that names the wrong
+        // owner would make this assertion pass vacuously.
+        Assert.DoesNotContain(vm.HcnEndpointId, HcnClient.EnumerateEndpointIds());
         Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
     }
 }
