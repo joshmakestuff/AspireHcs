@@ -48,6 +48,11 @@ param(
     [ValidateScript({ -not $_ -or (Test-Path $_ -PathType Leaf) })]
     [string]$FodIsoPath,
 
+    # Required whenever the FOD fallback actually consumes the ISO — an input that can alter
+    # the sealed image is pinned exactly like the primary ISO.
+    [ValidatePattern('^$|^[0-9a-fA-F]{64}$')]
+    [string]$FodIsoSha256,
+
     [Parameter(Mandatory)]
     [string]$OutputVhdx,
 
@@ -191,8 +196,14 @@ try {
         # UNVERIFIED BRANCH: Server 2025 ships OpenSSH in-box, so no build on the reference
         # machine has ever taken this path. First exercised when an ISO without the capability
         # appears; until then treat it as best-effort and read the build log closely.
-        Write-Step "Mounting LOF ISO and installing OpenSSH.Server offline..."
+        if (-not $FodIsoSha256) {
+            throw "The FOD fallback is about to service the image from $FodIsoPath but no -FodIsoSha256 pin was provided."
+        }
+        Write-Step "Verifying and mounting LOF ISO, installing OpenSSH.Server offline..."
         $fodIsoHash = (Get-FileHash -Algorithm SHA256 -Path $FodIsoPath).Hash
+        if ($fodIsoHash -ne $FodIsoSha256.ToUpperInvariant()) {
+            throw "FOD ISO SHA-256 mismatch.`n  expected: $($FodIsoSha256.ToUpperInvariant())`n  actual:   $fodIsoHash"
+        }
         $fodMount = Mount-DiskImage -ImagePath (Resolve-Path $FodIsoPath).Path -PassThru
         $fodDrive = ($fodMount | Get-Volume).DriveLetter
         $fodSource = "${fodDrive}:\LanguagesAndOptionalFeatures"

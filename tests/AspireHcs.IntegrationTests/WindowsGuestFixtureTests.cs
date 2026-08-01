@@ -73,12 +73,14 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
             await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
 
             // What this pins: the check goes Healthy against a real guest listener AND ready
-            // fires. What it deliberately does NOT pin is the release-BY-health ordering: the
-            // snapshot stream and the eventing stream are separate async channels, and reading
-            // the snapshot at the instant ready fired was tried and observed racing (the report
-            // entry present, status not yet recorded). The ordering direction is held by the
-            // NEGATIVE fixture instead — HealthCheckGatesReadinessTests proves ready is
-            // withheld while the same check is Unhealthy — so the pair covers causality.
+            // fires. It does NOT observe the release-BY-health ordering directly: the snapshot
+            // and eventing streams are separate async channels, and reading the snapshot at the
+            // instant ready fired was tried and observed racing (report entry present, status
+            // not yet recorded). The regression that matters — ready firing at Running before
+            // any health evaluation, the pre-#5 bug — is caught deterministically by
+            // HealthCheckGatesReadinessTests (such a fire completes before its first Unhealthy
+            // observation). A hypothetical delayed release while unhealthy is covered nowhere,
+            // deliberately: no such code path exists to regress.
             ResourceEvent healthy = await app.ResourceNotifications.WaitForResourceAsync(
                 "appliance",
                 e => e.Snapshot.HealthReports.Any(h => h.Name == "appliance_ssh_tcp_check" && h.Status == HealthStatus.Healthy),
