@@ -97,6 +97,78 @@ public sealed class EndpointOwnershipTests(ITestOutputHelper output)
         }
     }
 
+    [SkippableFact]
+    public void Owner_with_json_metacharacters_round_trips_intact()
+    {
+        Skip.If(string.IsNullOrEmpty(BaseVhdx), "Set HCS_TEST_VHDX to a bootable Gen2/UEFI VHDX to run HCS integration tests.");
+
+        // Falsifies a revert of the JsonObject encoding in HcnClient: interpolating this owner
+        // into raw JSON produces an invalid document, so creation (settings) or the filtered
+        // enumeration (query) would throw InvalidJson instead of round-tripping.
+        Guid networkId = HcnClient.FindIcsNetworkId();
+        Guid endpointId = Guid.NewGuid();
+        string hostileOwner = "AspireHcs-test:\"quotes\" \\back\\slash {braces}, ünïcödé";
+        HcnClient.CreateDhcpEndpoint(networkId, endpointId, RandomMac(), hostileOwner);
+        try
+        {
+            string? properties = HcnClient.QueryEndpointProperties(endpointId);
+            Assert.NotNull(properties);
+            Assert.Equal(hostileOwner, JsonNode.Parse(properties)?["Owner"]?.GetValue<string>());
+
+            Assert.Contains(endpointId, HcnClient.EnumerateEndpointIds(hostileOwner));
+        }
+        finally
+        {
+            HcnClient.DeleteEndpoint(endpointId);
+        }
+    }
+
+    [SkippableFact]
+    public async Task Scavenger_spares_an_endpoint_owned_by_another_live_process()
+    {
+        Skip.If(string.IsNullOrEmpty(BaseVhdx), "Set HCS_TEST_VHDX to a bootable Gen2/UEFI VHDX to run HCS integration tests.");
+
+        // The cross-process half of the concurrent-AppHosts claim: an endpoint owned by a
+        // DIFFERENT live process — a stand-in for a second AppHost in its endpoint-before-
+        // compute-system window — must survive this process's sweep. The ping bounds the
+        // stand-in's lifetime even if the kill below never runs.
+        Guid networkId = HcnClient.FindIcsNetworkId();
+        using Process standIn = Process.Start(
+            new ProcessStartInfo("cmd.exe", "/c ping -n 60 127.0.0.1 >nul") { CreateNoWindow = true })!;
+        Guid endpointId = Guid.NewGuid();
+        try
+        {
+            HcnClient.CreateDhcpEndpoint(networkId, endpointId, RandomMac(), $"AspireHcs:{standIn.Id}");
+
+            await HcsVmOrchestrator.ScavengeStaleEndpointsAsync(Guid.NewGuid(), NullLogger.Instance);
+
+            // If the stand-in died mid-sweep the Contains below would be testing the wrong thing.
+            Assert.False(standIn.HasExited, "stand-in process died during the sweep");
+            Assert.Contains(endpointId, HcnClient.EnumerateEndpointIds());
+        }
+        finally
+        {
+            try
+            {
+                standIn.Kill();
+            }
+            catch (InvalidOperationException)
+            {
+                // Already exited.
+            }
+
+            try
+            {
+                HcnClient.DeleteEndpoint(endpointId);
+            }
+            catch (Exception)
+            {
+                // Never created, or deleted by the sweep — the latter is the failure the
+                // assertions above already reported.
+            }
+        }
+    }
+
     private static string RandomMac() =>
         $"02-15-5D-{Random.Shared.Next(0x10, 0xFF):X2}-{Random.Shared.Next(0x10, 0xFF):X2}-{Random.Shared.Next(0x10, 0xFF):X2}";
 }
