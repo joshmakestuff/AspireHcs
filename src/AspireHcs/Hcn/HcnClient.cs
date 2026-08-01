@@ -132,10 +132,14 @@ internal static unsafe class HcnClient
         Consume("HcnDeleteEndpoint", hr, default, error);
     }
 
-    /// <summary>Returns endpoint ids owned by <paramref name="owner"/> (for scavenging stale runs).</summary>
-    public static List<Guid> EnumerateEndpointIds(string owner)
+    /// <summary>
+    /// Returns endpoint ids — all of them, or only those whose Owner is exactly
+    /// <paramref name="owner"/>. Scavenging enumerates all because HNS only supports
+    /// exact-match Owner filters and run-scoped owners differ per process (#12).
+    /// </summary>
+    public static List<Guid> EnumerateEndpointIds(string? owner = null)
     {
-        string query = $$"""{ "Owner": "{{owner}}" }""";
+        string query = owner is null ? "{}" : $$"""{ "Owner": "{{owner}}" }""";
         HRESULT hr = PInvoke.HcnEnumerateEndpoints(query, out PWSTR endpointsDoc, out PWSTR error);
         string json = Consume("HcnEnumerateEndpoints", hr, endpointsDoc, error) ?? "[]";
 
