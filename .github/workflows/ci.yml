@@ -73,3 +73,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "HCS integration tests failed with exit code $LASTEXITCODE" }
         env:
           HCS_TEST_VHDX: ${{ vars.HCS_TEST_VHDX }}
+          # Optional guest-image fixtures (tools/guest-images); their tests skip when unset.
+          HCS_TEST_WINDOWS_VHDX: ${{ vars.HCS_TEST_WINDOWS_VHDX }}
+          HCS_TEST_NOLEASE_VHDX: ${{ vars.HCS_TEST_NOLEASE_VHDX }}
