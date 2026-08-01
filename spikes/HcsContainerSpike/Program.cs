@@ -189,7 +189,11 @@ internal static class Program
                 // Runtime witness for "process-isolated container": the properties
                 // must report SystemType Container AND a host-silo object root.
                 // A Hyper-V-isolated container lives in a utility VM and cannot
-                // have an ObRoot under \Silos\ on the host.
+                // have an ObRoot under \Silos\ on the host. Structurally, silent
+                // Hyper-V isolation is not a live hypothesis here anyway: the
+                // config document carries no UtilityVM/HostingSystemId section,
+                // so there is nothing a VM could boot from. The discriminator is
+                // exercised one-sided (no xenon negative control in this spike).
                 ProveProcessIsolation(hr, doc);
 
                 if (orphan)
@@ -352,7 +356,7 @@ internal static class Program
             bool proved = ioDone && banner.Success;
             Step("GuestExecProof(stdout)", proved ? default : ProbeFailed,
                 proved
-                    ? $"guest build={banner.Groups["build"].Value} host build={hostBuild}"
+                    ? $"stdout-reported guest build={banner.Groups["build"].Value} host build={hostBuild}"
                     : $"expected 'Microsoft Windows [Version ...]' banner not captured (host build={hostBuild})");
             return proved ? 0 : 3;
         }
@@ -526,7 +530,16 @@ internal static class Program
     private static string? Opt(string[] args, string name)
     {
         int i = Array.IndexOf(args, name);
-        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+        if (i < 0)
+        {
+            return null;
+        }
+        // Chokepoint: a flag that is present must carry a value. Returning null
+        // here would silently disable whatever behavior the caller asked for
+        // (e.g. `list --absent` degrading to a plain list).
+        return i + 1 < args.Length
+            ? args[i + 1]
+            : throw new ArgumentException($"{name} requires a value");
     }
 
     private static int OptInt(string[] args, string name, int fallback)
@@ -536,9 +549,11 @@ internal static class Program
         {
             return fallback;
         }
-        return int.TryParse(raw, out int value) && value > 0
+        // Upper bound keeps value * 1000 far from int overflow (a 4294968-second
+        // "budget" would otherwise wrap to ~704 ms) and is generous for a spike.
+        return int.TryParse(raw, out int value) && value is > 0 and <= 3600
             ? value
-            : throw new ArgumentException($"{name} must be a positive integer, got '{raw}'");
+            : throw new ArgumentException($"{name} must be an integer between 1 and 3600, got '{raw}'");
     }
 
     private static int Usage()
