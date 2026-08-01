@@ -37,6 +37,14 @@ public class EndpointScavengingTests
     }
 
     [Fact]
+    public void Run_scoped_owner_with_live_pid_and_a_defunct_vm_attachment_is_kept()
+    {
+        // A live run whose endpoint still records a VM from a finished boot (e.g. mid-Restart)
+        // must stay protected by its pid alone.
+        Assert.False(IsStale("AspireHcs:1234", attachedVmRuntimeId: "defunct-runtime-id", pidAlive: true, vmRunning: false));
+    }
+
+    [Fact]
     public void Run_scoped_owner_with_dead_pid_and_a_defunct_vm_attachment_is_stale()
     {
         // Attached-but-not-running: the endpoint still records a VM that no longer exists.
