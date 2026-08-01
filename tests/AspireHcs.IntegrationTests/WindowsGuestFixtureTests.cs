@@ -72,8 +72,13 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
 
             await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
 
-            // The positive pin: the check that stays Unhealthy forever against the Kali image
-            // must go Healthy against a guest that serves.
+            // What this pins: the check goes Healthy against a real guest listener AND ready
+            // fires. What it deliberately does NOT pin is the release-BY-health ordering: the
+            // snapshot stream and the eventing stream are separate async channels, and reading
+            // the snapshot at the instant ready fired was tried and observed racing (the report
+            // entry present, status not yet recorded). The ordering direction is held by the
+            // NEGATIVE fixture instead — HealthCheckGatesReadinessTests proves ready is
+            // withheld while the same check is Unhealthy — so the pair covers causality.
             ResourceEvent healthy = await app.ResourceNotifications.WaitForResourceAsync(
                 "appliance",
                 e => e.Snapshot.HealthReports.Any(h => h.Name == "appliance_ssh_tcp_check" && h.Status == HealthStatus.Healthy),
@@ -81,7 +86,6 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
             HealthReportSnapshot report = healthy.Snapshot.HealthReports.Single(h => h.Name == "appliance_ssh_tcp_check");
             output.WriteLine($"health report: {report.Status} — {report.Description}");
 
-            // Readiness must have been RELEASED by that health, not despite it.
             await ready.Task.WaitAsync(cts.Token);
 
             // Hard accept — the refused branch the round-trip test tolerates is a FAILURE here.
