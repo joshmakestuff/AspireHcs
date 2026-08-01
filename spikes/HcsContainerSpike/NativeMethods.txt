@@ -1,0 +1,16 @@
+HcsCreateOperation
+HcsCloseOperation
+HcsWaitForOperationResult
+HcsWaitForOperationResultAndProcessInfo
+HcsCreateComputeSystem
+HcsStartComputeSystem
+HcsTerminateComputeSystem
+HcsCloseComputeSystem
+HcsGetComputeSystemProperties
+HcsEnumerateComputeSystems
+HcsOpenComputeSystem
+HcsCreateProcess
+HcsGetProcessProperties
+HcsCloseProcess
+CloseHandle
+LocalFree
