@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json.Nodes;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
@@ -21,7 +23,20 @@ namespace AspireHcs.Hosting;
 /// </summary>
 internal static class HcsVmOrchestrator
 {
+    /// <summary>
+    /// Owner prefix for AspireHcs HCN endpoints. Endpoints are created with the run-scoped
+    /// form <see cref="RunHcnOwner"/>; the bare value survives only as the legacy owner of
+    /// endpoints left behind by pre-#12 builds, which are scavenged by VM attachment instead.
+    /// </summary>
     internal const string HcnOwner = "AspireHcs";
+
+    /// <summary>
+    /// The Owner written on HCN endpoints this process creates. Scoped to the AppHost process
+    /// so scavenging can attribute every endpoint to a specific run and delete only those whose
+    /// process is gone — a missing VM proves nothing, because every run has a window where its
+    /// endpoint exists before its compute system does (#12).
+    /// </summary>
+    internal static string RunHcnOwner { get; } = $"{HcnOwner}:{Environment.ProcessId}";
 
     public static void Register(IResourceBuilder<HcsVirtualMachineResource> builder)
     {
@@ -140,6 +155,108 @@ internal static class HcsVmOrchestrator
         {
             return new ExecuteCommandResult { Success = false, Message = ex.Message };
         }
+    }
+
+    /// <summary>
+    /// Deletes AspireHcs-owned HCN endpoints left behind by dead AppHost processes (endpoints
+    /// persist independently of the ephemeral compute systems). Ownership identifies the run:
+    /// an endpoint whose owner pid is alive is never touched, even in the window before its
+    /// compute system exists — the window that made VM-attachment-based scavenging race (#12).
+    /// Static so integration tests can drive it without booting a VM.
+    /// </summary>
+    internal static async Task ScavengeStaleEndpointsAsync(Guid ownEndpointId, ILogger logger)
+    {
+        try
+        {
+            // ORDER MATTERS: endpoints are enumerated BEFORE the pid snapshot below. An endpoint
+            // in this list was created by a process that existed before the snapshot, so if that
+            // process is alive now it is in the snapshot — a recycled pid can therefore only make
+            // a dead run look alive (deferring deletion), never a live run look dead. Snapshotting
+            // pids first would open exactly that hole: a run started after the snapshot could have
+            // its endpoint enumerated and its pid judged dead.
+            List<Guid> endpoints = HcnClient.EnumerateEndpointIds();
+            if (endpoints.Count == 0)
+            {
+                return;
+            }
+
+            string running = await HcsClient.EnumerateComputeSystemsAsync().ConfigureAwait(false) ?? "[]";
+            HashSet<string> runtimeIds = new(StringComparer.OrdinalIgnoreCase);
+            foreach (JsonNode? system in JsonNode.Parse(running) as JsonArray ?? [])
+            {
+                if (system?["RuntimeId"]?.GetValue<string>() is { } runtimeId)
+                {
+                    runtimeIds.Add(runtimeId);
+                }
+            }
+
+            // Snapshot of live pids. A recycled pid can make a dead run look alive — that only
+            // defers the deletion to a later scavenge, never deletes a live run's endpoint.
+            HashSet<int> livePids = [.. Process.GetProcesses().Select(static p => p.Id)];
+
+            foreach (Guid endpointId in endpoints)
+            {
+                // Never scavenge our own endpoint: on a Restart it is recreated under the same
+                // id, and between the delete and the new compute system it looks like a leftover.
+                if (endpointId == ownEndpointId)
+                {
+                    continue;
+                }
+
+                // Guarded per endpoint: concurrent AppHosts may sweep the same leftovers, and
+                // losing the delete race on one endpoint must not abort the rest of the sweep.
+                try
+                {
+                    string? properties = HcnClient.QueryEndpointProperties(endpointId);
+                    JsonNode? parsed = properties is null ? null : JsonNode.Parse(properties);
+                    string? owner = parsed?["Owner"]?.GetValue<string>();
+                    string? vmRuntimeId = parsed?["VirtualMachine"]?.GetValue<string>();
+                    if (IsStaleAspireHcsEndpoint(owner, vmRuntimeId, livePids.Contains, runtimeIds.Contains))
+                    {
+                        logger.LogInformation(
+                            "Scavenging stale HCN endpoint {EndpointId} (owner '{Owner}') from a dead run.",
+                            endpointId, owner);
+                        HcnClient.DeleteEndpoint(endpointId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Skipping HCN endpoint {EndpointId} during scavenging.", endpointId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Scavenging stale HCN endpoints failed; continuing.");
+        }
+    }
+
+    /// <summary>
+    /// Decides whether an endpoint is a scavengeable leftover. Deletion requires proof of
+    /// abandonment: an AspireHcs owner whose recorded pid is dead, or the legacy bare owner
+    /// (pre-#12 builds, no pid recorded) with no compute system attached. Anything attached to
+    /// a running compute system, owned by someone else, or unattributable is left alone.
+    /// </summary>
+    internal static bool IsStaleAspireHcsEndpoint(
+        string? owner,
+        string? attachedVmRuntimeId,
+        Func<int, bool> isProcessAlive,
+        Func<string, bool> isVmRunning)
+    {
+        if (attachedVmRuntimeId is not null && isVmRunning(attachedVmRuntimeId))
+        {
+            return false;
+        }
+
+        if (owner == HcnOwner)
+        {
+            return true;
+        }
+
+        return owner is not null
+            && owner.StartsWith($"{HcnOwner}:", StringComparison.Ordinal)
+            && int.TryParse(owner.AsSpan(HcnOwner.Length + 1), NumberStyles.None, CultureInfo.InvariantCulture, out int pid)
+            && !isProcessAlive(pid);
     }
 
     private sealed class InstanceHolder
@@ -304,9 +421,9 @@ internal sealed class HcsVmInstance(
 
             if (resource.NetworkEnabled)
             {
-                await ScavengeStaleEndpointsAsync().ConfigureAwait(false);
+                await HcsVmOrchestrator.ScavengeStaleEndpointsAsync(resource.HcnEndpointId, logger).ConfigureAwait(false);
                 Guid networkId = HcnClient.FindIcsNetworkId();
-                HcnClient.CreateDhcpEndpoint(networkId, resource.HcnEndpointId, resource.MacAddress, HcsVmOrchestrator.HcnOwner);
+                HcnClient.CreateDhcpEndpoint(networkId, resource.HcnEndpointId, resource.MacAddress, HcsVmOrchestrator.RunHcnOwner);
                 boot.Ledger.Add($"HCN endpoint {resource.HcnEndpointId}",
                     () => HcnClient.DeleteEndpoint(resource.HcnEndpointId));
                 logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on network {NetworkId}",
@@ -618,57 +735,6 @@ internal sealed class HcsVmInstance(
             }
 
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Deletes AspireHcs-owned HCN endpoints whose VM no longer exists — leftovers of crashed
-    /// AppHosts (endpoints persist independently of the ephemeral compute systems). Endpoints
-    /// of concurrently running AspireHcs VMs are recognized by their live VM attachment and
-    /// left alone.
-    /// </summary>
-    private async Task ScavengeStaleEndpointsAsync()
-    {
-        try
-        {
-            List<Guid> owned = HcnClient.EnumerateEndpointIds(HcsVmOrchestrator.HcnOwner);
-            if (owned.Count == 0)
-            {
-                return;
-            }
-
-            string running = await HcsClient.EnumerateComputeSystemsAsync().ConfigureAwait(false) ?? "[]";
-            HashSet<string> runtimeIds = new(StringComparer.OrdinalIgnoreCase);
-            foreach (JsonNode? system in JsonNode.Parse(running) as JsonArray ?? [])
-            {
-                if (system?["RuntimeId"]?.GetValue<string>() is { } runtimeId)
-                {
-                    runtimeIds.Add(runtimeId);
-                }
-            }
-
-            foreach (Guid endpointId in owned)
-            {
-                // Never scavenge our own endpoint: on a Restart it is recreated under the same id,
-                // and between the delete and the new compute system it looks exactly like a
-                // leftover. (The same window across *processes* is issue #12.)
-                if (endpointId == resource.HcnEndpointId)
-                {
-                    continue;
-                }
-
-                string? properties = HcnClient.QueryEndpointProperties(endpointId);
-                string? vmRuntimeId = properties is null ? null : JsonNode.Parse(properties)?["VirtualMachine"]?.GetValue<string>();
-                if (vmRuntimeId is null || !runtimeIds.Contains(vmRuntimeId))
-                {
-                    logger.LogInformation("Scavenging stale HCN endpoint {EndpointId} from a previous run.", endpointId);
-                    HcnClient.DeleteEndpoint(endpointId);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Scavenging stale HCN endpoints failed; continuing.");
         }
     }
 

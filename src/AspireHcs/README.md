@@ -43,7 +43,7 @@ restart discards the previous run's writes the way a container restart does.
 - The AppHost process must run elevated **or** as a member of the **Hyper-V Administrators** group (verified empirically; note that joining the group requires signing out and back in).
 - The guest image must load the Hyper-V integration drivers (`hv_balloon` on Linux, in-box on Windows). The readiness probe resizes guest memory, which only the guest can satisfy; an image without them fails with a `TimeoutException` naming the cause rather than reporting a false ready.
 - The guest image must configure its NIC for DHCP when using `WithNatNetwork()` — the default for stock Linux and Windows images.
-- Only one AppHost using `WithNatNetwork()` should run at a time on a given host. Concurrent AppHosts currently race over HCN endpoint scavenging and can strip each other's NIC.
+- Concurrent AppHosts on one host are supported: each run tags its HCN endpoints with its process id, and leftover endpoints from crashed runs are scavenged only once their owning process is gone. Two caveats: builds predating this scheme tag endpoints without a pid and can still have a starting VM's NIC scavenged out from under them, so don't run old builds concurrently with anything; and all VMs share the Default Switch's DHCP pool.
 
 ## Status
 
