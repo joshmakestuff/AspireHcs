@@ -30,7 +30,26 @@ copy's ext4 root — the Kali root filesystem is not mountable from Windows dire
 
 ## windows/ — Server 2025 base image builder
 
-See issue #11. Offline ISO→VHDX provisioning adapted from SCED's `New-ProvisionedVhd`:
-GPT (EFI/MSR/NTFS) → `Expand-WindowsImage` → unattend → offline servicing → `bcdboot`,
-plus AspireHcs-specific readiness instrumentation (EMS on COM1, OpenSSH as the positive
-TCP health-check fixture) and a boot acceptance test that asserts the image's claims.
+`New-WindowsGuestImage.ps1` (requires an elevated shell and the Hyper-V module — build-time
+only): pins the ISO by SHA-256, provisions offline (GPT EFI/MSR/NTFS → `Expand-WindowsImage`
+→ unattend → `dism.exe` capability servicing → `bcdboot` → EMS on COM1 in the BCD), runs one
+self-terminating burn-in boot so specialize/first-logon churn lands in the base instead of
+every child diff, then seals: `Optimize-VHD` full compaction, file marked read-only,
+provenance JSON with the final image's SHA-256. Deliberately not sysprep-generalized —
+ephemeral per-run children on an isolated NAT network boot faster from a specialized base
+(witnessed: 9–10 s to Running-and-serving through the product path).
+
+Verified empirically on the first sealed build (2026-08-01): OpenSSH Server is **in-box** on
+Server 2025 (`Installed` straight from the WIM; the LOF ISO path remains as fallback), EMS
+streams the SAC console over the pumped COM1 pipe, the guest DHCPs on the Default Switch,
+and sshd accepts — the suite's first positive health-check fixture.
+
+## How the integration suite consumes these images
+
+| Env var | Image | What it unlocks |
+|---|---|---|
+| `HCS_TEST_VHDX` | any bootable Gen2/UEFI VHDX (the Kali base) | the core suite |
+| `HCS_TEST_WINDOWS_VHDX` | `windows/` sealed Server 2025 image | positive fixture: health check goes Healthy, TCP accept required, EMS serial asserted (`WindowsGuestFixtureTests`) |
+| `HCS_TEST_NOLEASE_VHDX` | `kali/` `StaticNoDhcp` variant | never-leases pin: `FailedToStart` + DHCP cause named (`NoLeaseFailureModeTests`, ~2 min by design) |
+
+Unset vars skip their tests; nothing here runs on the hosted CI lane.
