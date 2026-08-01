@@ -10,14 +10,20 @@ using Xunit.Abstractions;
 namespace AspireHcs.IntegrationTests;
 
 // Issue #12: scavenging attributes endpoints to runs via a pid-scoped Owner instead of the racy
-// "no VM attached yet" heuristic. These need HNS (the Default Switch) but no guest image, so
-// they are not gated on HCS_TEST_VHDX.
+// "no VM attached yet" heuristic. These need HNS (the Default Switch) but no guest image; they
+// still gate on HCS_TEST_VHDX because it is the suite's one "this machine can run HCS" signal —
+// the hosted CI runner has no HNS, and a capability probe that swallowed exceptions could skip
+// vacuously on the machines where these must run.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class EndpointOwnershipTests(ITestOutputHelper output)
 {
-    [Fact]
+    private static string? BaseVhdx => Environment.GetEnvironmentVariable("HCS_TEST_VHDX");
+
+    [SkippableFact]
     public void Owner_round_trips_through_creation_query_and_filtered_enumeration()
     {
+        Skip.If(string.IsNullOrEmpty(BaseVhdx), "Set HCS_TEST_VHDX to a bootable Gen2/UEFI VHDX to run HCS integration tests.");
+
         // The whole #12 design rests on two HNS facts this pins: QueryEndpointProperties
         // returns the Owner exactly as written (including the ":pid" suffix), and
         // HcnEnumerateEndpoints exact-match filtering works on such an owner.
@@ -39,9 +45,11 @@ public sealed class EndpointOwnershipTests(ITestOutputHelper output)
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Scavenger_deletes_dead_run_endpoints_and_spares_live_ones()
     {
+        Skip.If(string.IsNullOrEmpty(BaseVhdx), "Set HCS_TEST_VHDX to a bootable Gen2/UEFI VHDX to run HCS integration tests.");
+
         Guid networkId = HcnClient.FindIcsNetworkId();
 
         // A pid that is provably dead: spawn a process and wait for it to exit. Windows does

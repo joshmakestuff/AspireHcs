@@ -168,6 +168,12 @@ internal static class HcsVmOrchestrator
     {
         try
         {
+            // ORDER MATTERS: endpoints are enumerated BEFORE the pid snapshot below. An endpoint
+            // in this list was created by a process that existed before the snapshot, so if that
+            // process is alive now it is in the snapshot — a recycled pid can therefore only make
+            // a dead run look alive (deferring deletion), never a live run look dead. Snapshotting
+            // pids first would open exactly that hole: a run started after the snapshot could have
+            // its endpoint enumerated and its pid judged dead.
             List<Guid> endpoints = HcnClient.EnumerateEndpointIds();
             if (endpoints.Count == 0)
             {
