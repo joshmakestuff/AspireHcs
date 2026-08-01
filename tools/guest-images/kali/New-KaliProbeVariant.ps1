@@ -152,6 +152,9 @@ try {
         throw "Expected exactly one new WSL block device after attach, found $($newDisks.Count) ($($newDisks -join ', '))."
     }
     $targetDisk = $newDisks[0]
+    if ($targetDisk -notmatch '^[a-z0-9]+$') {
+        throw "Unexpected block-device name '$targetDisk' from WSL."
+    }
     Write-Host "Attached as /dev/$targetDisk"
 
     Write-Host "Applying '$Variant' edits..."
