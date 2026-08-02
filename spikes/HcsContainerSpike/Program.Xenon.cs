@@ -73,9 +73,11 @@ internal static partial class Program
             return 2;
         }
 
-        // #32 question "does the docker-materialized UtilityVM boot as-is": the
-        // windowsfilter import is expected to have produced SystemTemplate.vhdx
-        // (the UVM scratch template) next to UtilityVM\Files.
+        // Precondition probe only — the #32 question "does the docker-materialized
+        // UtilityVM boot as-is" is answered by HcsStartComputeSystem(uvm) below,
+        // not here. This checks the one prep artifact the boot consumes that the
+        // layer tar does NOT carry: SystemTemplate.vhdx, which the windowsfilter
+        // import is expected to have produced next to UtilityVM\Files.
         string template = Path.Combine(uvmLayer, "UtilityVM", "SystemTemplate.vhdx");
         bool templateExists = File.Exists(template);
         Step("UvmTemplateProbe", templateExists ? default : ProbeFailed,
@@ -229,7 +231,7 @@ internal static partial class Program
                         Console.WriteLine($"Xenon '{containerId}' (utility VM '{uvmId}') is running. Exiting abruptly WITHOUT " +
                                           $"terminate/close (ShouldTerminateOnLastHandleClosed test for the hosted container AND its UVM). " +
                                           $"Run 'list --absent {containerId}' and 'list --absent {uvmId}' next, then " +
-                                          $"'cleanup --isolation hyperv --work {workDir}' to release the sandbox layer and UVM scratch.");
+                                          $"'cleanup --isolation hyperv --id {containerId} --work {workDir}' to release the sandbox layer and UVM scratch.");
                         PrintSummary();
                         Environment.Exit(99);
                     }
@@ -293,10 +295,16 @@ internal static partial class Program
                 string? systemType = (string?)props?["SystemType"];
                 string? obRoot = (string?)props?["ObRoot"];
                 string? hostingSystemId = (string?)props?["HostingSystemId"];
+                // A reported HostingSystemId naming a DIFFERENT UVM is affirmative
+                // evidence of a wrong hosting relationship and fails the proof.
+                // Absence merely records that the field is unpopulated for hosted
+                // systems (unknown until the first elevated run) — the isolation
+                // claim itself rests on SystemType + the missing host-silo ObRoot.
                 proved = string.Equals(systemType, "Container", StringComparison.OrdinalIgnoreCase)
-                    && obRoot is null;
+                    && obRoot is null
+                    && (hostingSystemId is null || string.Equals(hostingSystemId, uvmId, StringComparison.OrdinalIgnoreCase));
                 detail = $"SystemType={systemType ?? "(null)"} ObRoot={obRoot ?? "(absent)"} " +
-                         $"HostingSystemId={hostingSystemId ?? "(absent)"} (expected {uvmId})";
+                         $"HostingSystemId={hostingSystemId ?? "(absent)"} (ours: {uvmId})";
             }
             catch (JsonException ex)
             {
