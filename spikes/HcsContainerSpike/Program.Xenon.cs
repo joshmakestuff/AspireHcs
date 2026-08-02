@@ -55,7 +55,8 @@ internal static partial class Program
         string command,
         int budgetSeconds,
         string workDir,
-        bool orphan)
+        bool orphan,
+        string scratchMode)
     {
         string sandboxPath = Path.Combine(workDir, containerId);
         string uvmId = containerId + "-uvm";
@@ -97,8 +98,11 @@ internal static partial class Program
         bool hostedCreated = false;
         try
         {
-            Step("CreateSandboxLayer", WcLayer.CreateScratchLayer(sandboxPath, chain), sandboxPath);
             string sandboxVhdx = Path.Combine(sandboxPath, "sandbox.vhdx");
+            if (!CreateXenonScratch(scratchMode, chain, sandboxPath, sandboxVhdx))
+            {
+                return 2;
+            }
             Step("ScratchVhdxProbe", File.Exists(sandboxVhdx) ? default : ProbeFailed, sandboxVhdx);
 
             string uvmScratchVhdx = Path.Combine(uvmScratchDir, "sandbox.vhdx");
@@ -275,6 +279,50 @@ internal static partial class Program
             {
                 ProbeComputeSystemGone(uvmId);
             }
+        }
+    }
+
+    /// <summary>Produces the container scratch for a xenon boot. 'api' is the
+    /// proven path (CreateSandboxLayer, elevated in every run so far). 'template'
+    /// is issue #33 experiment 2: because the host never Activates or Prepares a
+    /// xenon scratch — the guest consumes the VHDX — a plain copy of the store's
+    /// blank template should be a complete substitute, leaving the Hyper-V-isolated
+    /// path with no privilege-gated storage call. Returns false when the scratch
+    /// could not be produced.</summary>
+    private static bool CreateXenonScratch(string scratchMode, IReadOnlyList<string> chain, string sandboxPath, string sandboxVhdx)
+    {
+        if (scratchMode == "api")
+        {
+            HRESULT hr = WcLayer.CreateScratchLayer(sandboxPath, chain);
+            Step("CreateSandboxLayer", hr, sandboxPath);
+            return hr.Succeeded;
+        }
+
+        // Observed on this host: blank-base.vhdx ships inside the layer directory
+        // itself. FindScratchTemplate searches there and at the store root.
+        string? template = FindScratchTemplate(chain[0], out string searched, out bool denied);
+        if (template is null)
+        {
+            Step("FindScratchTemplate", denied ? new HRESULT(AccessDenied) : ProbeFailed,
+                denied
+                    ? $"a blank template exists but could not be opened at this privilege level ({searched})"
+                    : $"no blank template exists ({searched})");
+            return false;
+        }
+        Step("FindScratchTemplate", default, template);
+
+        try
+        {
+            File.Copy(template, sandboxVhdx, overwrite: true);
+            Step("CopyScratchTemplate", default,
+                $"{template} -> {sandboxVhdx} ({new FileInfo(sandboxVhdx).Length / (1024 * 1024)} MB); " +
+                "no privilege-gated storage call used");
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Step("CopyScratchTemplate", ProbeFailed, $"{ex.GetType().Name}: {ex.Message}");
+            return false;
         }
     }
 

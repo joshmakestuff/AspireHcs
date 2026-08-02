@@ -65,6 +65,9 @@ internal static partial class Program
                     "cleanup" => Cleanup(args, containerId),
                     "list" => List(args),
                     "terminate" => Terminate(containerId),
+                    "grant" => Grant(args),
+                    "verify" => Verify(args),
+                    "privilege" => Privilege(args),
                     _ => Usage(),
                 };
             }
@@ -96,32 +99,24 @@ internal static partial class Program
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
         string isolation = IsolationOpt(args);
+        string scratch = ScratchOpt(args, isolation);
 
         // The read-only layer chain, topmost first. Docker's windowsfilter store
-        // records parents in layerchain.json; a base image has none. Reading it
-        // may fail without elevation (the store is ACLed to Administrators) —
-        // File.Exists reports false on access-denied, so say what we assumed.
-        List<string> chain = [layerPath];
-        string chainFile = Path.Combine(layerPath, "layerchain.json");
-        string chainNote;
-        try
-        {
-            if (File.Exists(chainFile))
-            {
-                chain.AddRange(JsonSerializer.Deserialize<string[]>(File.ReadAllText(chainFile)) ?? []);
-                chainNote = $"layerchain.json read, {chain.Count} layer(s) total";
-            }
-            else
-            {
-                chainNote = "no layerchain.json visible (treating --layer as a base layer; " +
-                            "also true when the caller cannot read the store)";
-            }
-        }
-        catch (Exception ex)
-        {
-            chainNote = $"layerchain.json unreadable ({ex.GetType().Name}: {ex.Message}); treating as base layer";
-        }
+        // records parents in layerchain.json; a base image has none. This shares
+        // ReadParentChain with the privilege probe deliberately: two readers of
+        // one file format would be free to disagree about what an unreadable
+        // chain means, and that meaning is exactly what #33 turns on.
+        List<string> chain = [layerPath, .. ReadParentChain(layerPath, out ChainStatus chainStatus, out string chainNote)];
         Console.WriteLine($"[layers] {chainNote}");
+        if (chainStatus is not (ChainStatus.Absent or ChainStatus.Parsed))
+        {
+            // Fail closed rather than boot a layer whose parents we guessed at.
+            // A silent "treat as base layer" here would produce a container built
+            // from an incomplete stack, and the failure would surface later as
+            // something that looks nothing like a chain-read problem.
+            Step("ReadLayerChain", ChainHr(chainStatus), chainNote);
+            return 2;
+        }
 
         var layerIds = new List<(string Path, Guid Id)>();
         foreach (string layer in chain)
@@ -137,7 +132,7 @@ internal static partial class Program
 
         if (isolation == "hyperv")
         {
-            return RunXenon(containerId, chain, layerIds, command, budgetSeconds, workDir, orphan);
+            return RunXenon(containerId, chain, layerIds, command, budgetSeconds, workDir, orphan, scratch);
         }
 
         PrecleanSandbox(sandboxPath);
@@ -540,6 +535,12 @@ internal static partial class Program
 
     private static void PrintSummary()
     {
+        if (Results.Count == 0)
+        {
+            // privilege mode keeps its own record (the matrix); an empty summary
+            // printed under it would read as "nothing was probed".
+            return;
+        }
         Console.WriteLine();
         Console.WriteLine("=== Summary ===");
         foreach ((string step, HRESULT hr, string detail) in Results)
@@ -567,6 +568,24 @@ internal static partial class Program
         return isolation is "process" or "hyperv"
             ? isolation
             : throw new ArgumentException($"--isolation must be 'process' or 'hyperv', got '{isolation}'");
+    }
+
+    /// <summary>How the container scratch is produced (issue #33 experiment 2).
+    /// 'api' calls CreateSandboxLayer; 'template' copies the store's blank VHDX,
+    /// which involves no privilege-gated storage call at all. Only the xenon path
+    /// can use 'template' — an argon still needs the host to Activate/Prepare the
+    /// scratch, so accepting it there would silently test nothing.</summary>
+    private static string ScratchOpt(string[] args, string isolation)
+    {
+        string scratch = Opt(args, "--scratch") ?? "api";
+        if (scratch is not ("api" or "template"))
+        {
+            throw new ArgumentException($"--scratch must be 'api' or 'template', got '{scratch}'");
+        }
+        return scratch == "template" && isolation != "hyperv"
+            ? throw new ArgumentException("--scratch template requires --isolation hyperv: the process-isolated path " +
+                                          "prepares the scratch host-side, so a copied template cannot stand in for CreateSandboxLayer there")
+            : scratch;
     }
 
     private static string? Opt(string[] args, string name)
@@ -601,16 +620,31 @@ internal static partial class Program
     private static int Usage()
     {
         Console.WriteLine("""
-            usage: HcsContainerSpike <run|orphan|cleanup|list|terminate> [options]
+            usage: HcsContainerSpike <run|orphan|cleanup|list|terminate|grant|verify|privilege> [options]
               run       --layer <dir> [--id <containerId>] [--command <cmdline>] [--seconds <n>] [--work <dir>]
                         [--isolation <process|hyperv>]   process (default) boots a host silo (argon);
                                              hyperv boots the same layer inside a utility VM (xenon)
+                        [--scratch <api|template>]       api (default) calls CreateSandboxLayer; template
+                                             copies the store's blank VHDX instead — no privileged storage
+                                             call at all. Requires --isolation hyperv (#33).
               orphan    --layer <dir> ...   create+start then exit without terminating
               cleanup   [--work <dir>] [--id <containerId>] [--isolation <process|hyperv>]
                                              release a leftover sandbox layer (and UVM scratch for hyperv)
               list      [--absent <id>]      enumerate HCS compute systems; with --absent,
                                              fail (exit 5) if <id> is still enumerable
               terminate [--id <containerId>]   terminate a leftover spike container
+              grant     --layer <dir> [--account <user>] [--revoke]   ELEVATED, one-time: grant read
+                                             access to a layer directory IN PLACE, isolating the #33
+                                             question (API gate vs store ACL) by changing only the ACL.
+                                             --account names the principal to grant (default: current
+                                             user) — required when UAC elevates by credential, since
+                                             the elevated identity is then not the developer's
+              verify    --layer <dir>       Run UNELEVATED: check that every path a boot opens is
+                                             reachable. Elevated it cannot fail, so it only means
+                                             something from the session that will do the booting
+              privilege --layer <dir> [--work <dir>] [--id <containerId>]    record every layer-storage
+                                             call's own HRESULT at the current privilege level, continuing
+                                             past failures; SKIP marks calls never attempted (#33)
             """);
         return 64;
     }

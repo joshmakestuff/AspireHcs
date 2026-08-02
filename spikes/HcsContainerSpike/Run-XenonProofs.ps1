@@ -59,7 +59,12 @@ function Invoke-Step {
     Write-Both ''
     Write-Both "=== $Title ==="
     Write-Both "> HcsContainerSpike $($CommandArgs -join ' ')"
-    & $exe @CommandArgs 2>&1 | Tee-Object -FilePath $LogPath -Append
+    # Out-Host, not a bare Tee-Object: Tee-Object passes its input through, so the
+    # command's output would join this function's return value and make the
+    # returned boolean unreadable — a non-empty array is truthy, so `if ($runOk)`
+    # below could never take its false branch. Latent here (the guarded branch
+    # only skips work); found live in Run-PrivilegeProofs.ps1, fixed in both.
+    & $exe @CommandArgs 2>&1 | Tee-Object -FilePath $LogPath -Append | Out-Host
     $code = $LASTEXITCODE
     $ok = $code -in $ExpectedExit
     $script:steps += [pscustomobject]@{ Step = $Title; Exit = $code; Expected = ($ExpectedExit -join '|'); Ok = $ok }
@@ -77,7 +82,7 @@ function Invoke-AbsenceProbe {
     $attempt = 0
     do {
         $attempt++
-        & $exe list --absent $Id 2>&1 | Tee-Object -FilePath $LogPath -Append
+        & $exe list --absent $Id 2>&1 | Tee-Object -FilePath $LogPath -Append | Out-Host
         $code = $LASTEXITCODE
         if ($code -eq 0) { break }
         Start-Sleep -Seconds 2
