@@ -18,6 +18,8 @@ CloseHandle
 LocalFree
 GetCurrentProcess
 OpenProcessToken
+CreateFile
+GetFileInformationByHandleEx
 LookupPrivilegeValue
 AdjustTokenPrivileges
 SetFileInformationByHandle
