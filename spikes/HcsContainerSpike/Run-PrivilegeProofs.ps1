@@ -115,7 +115,13 @@ function Invoke-Step {
     param(
         [string]$Title,
         [string[]]$CommandArgs,
-        [switch]$MustPass
+        [switch]$MustPass,
+        # Pins a result that is now DOCUMENTED, so the claim cannot silently
+        # drift. Before 2026-08-02 every unelevated step here was measured with no
+        # expectation, which was right while the answer was unknown — but the
+        # README now asserts that a xenon boots unelevated, and an asserted claim
+        # with no failing test is just a claim.
+        [int]$ExpectedExit = -1
     )
     Write-Both ''
     Write-Both "=== $Title (elevated=$isElevated) ==="
@@ -129,17 +135,20 @@ function Invoke-Step {
     # as the only pipeline output.
     & $exe @CommandArgs 2>&1 | Tee-Object -FilePath $LogPath -Append | Out-Host
     $code = $LASTEXITCODE
+    $asserted = $ExpectedExit -ge 0
     $script:steps += [pscustomobject]@{
         Step     = $Title
         Elevated = $isElevated
         Exit     = $code
-        MustPass = [bool]$MustPass
-        # Only required steps carry a pass/fail verdict. Measured steps get $null
-        # so the verdict table can render them as MEAS: a measured nonzero exit is
-        # the finding, and printing it as OK (or as FAIL) would misreport it.
-        Ok       = $MustPass ? ($code -eq 0) : $null
+        MustPass = ([bool]$MustPass) -or $asserted
+        # Steps with no expectation get $null so the verdict table renders them as
+        # MEAS: a measured nonzero exit is the finding, and printing it as OK (or
+        # as FAIL) would misreport it. Steps that DO carry an expectation — either
+        # -MustPass or -ExpectedExit — get a real pass/fail.
+        Ok       = $asserted ? ($code -eq $ExpectedExit) : ($MustPass ? ($code -eq 0) : $null)
     }
-    Write-Both ("--- {0}: exit {1}{2}" -f $Title, $code, ($MustPass ? " (required 0)" : " (measured, no expectation)"))
+    $note = $asserted ? " (asserted $ExpectedExit)" : ($MustPass ? " (required 0)" : " (measured, no expectation)")
+    Write-Both ("--- {0}: exit {1}{2}" -f $Title, $code, $note)
     return ($code -eq 0)
 }
 
@@ -292,9 +301,16 @@ else {
 
 # Everything below is MEASUREMENT. Failures here are the finding.
 [void](Invoke-Step -Title 'UnelevatedMatrix' -CommandArgs @('privilege', '--layer', $exported, '--id', $containerId))
-[void](Invoke-Step -Title 'UnelevatedArgonBoot' -CommandArgs @('run', '--isolation', 'process', '--layer', $exported, '--id', $containerId))
-[void](Invoke-Step -Title 'UnelevatedXenonBoot(api scratch)' -CommandArgs @('run', '--isolation', 'hyperv', '--layer', $exported, '--id', $containerId))
-[void](Invoke-Step -Title 'UnelevatedXenonBoot(template scratch)' -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $exported, '--id', $containerId))
+
+# ASSERTED, because these are the results docs/container-privilege-matrix.md and
+# the README now state as fact. Measuring them without asserting would let the
+# documented answer rot silently. Argon is asserted to FAIL (exit 2, gated at
+# ActivateLayer with ERROR_PRIVILEGE_NOT_HELD) — an unexpected pass there is just
+# as much a drift as an unexpected xenon failure, and would mean the documented
+# privilege boundary has moved.
+[void](Invoke-Step -Title 'UnelevatedArgonBoot' -ExpectedExit 2 -CommandArgs @('run', '--isolation', 'process', '--layer', $exported, '--id', $containerId))
+[void](Invoke-Step -Title 'UnelevatedXenonBoot(api scratch)' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'hyperv', '--layer', $exported, '--id', $containerId))
+[void](Invoke-Step -Title 'UnelevatedXenonBoot(template scratch)' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $exported, '--id', $containerId))
 
 Write-Both ''
 Write-Both '=== Verdict ==='
@@ -304,7 +320,10 @@ $script:steps | ForEach-Object {
 }
 Write-Both ''
 Write-Both 'Reading this record:'
-Write-Both '  - OK/FAIL mark REQUIRED steps (export, elevated controls). A FAIL voids the run.'
+Write-Both '  - OK/FAIL mark steps carrying an expectation: the grant, the elevated controls,'
+Write-Both '    and the unelevated boots whose results the docs now assert. A FAIL voids the run'
+Write-Both '    OR means a documented result has drifted — including argon unexpectedly PASSING,'
+Write-Both '    which would mean the privilege boundary moved.'
 Write-Both '  - MEAS marks MEASURED steps, which have no expected exit code. exit 0 means that'
 Write-Both '    path needs no elevation; a nonzero exit names the first call that gated it —'
 Write-Both '    read the matrix rows above. Neither outcome is a pass or a failure.'

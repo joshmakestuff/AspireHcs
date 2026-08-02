@@ -298,7 +298,8 @@ internal static partial class Program
             return hr.Succeeded;
         }
 
-        // The template lives at the store root, alongside the layer directories.
+        // Observed on this host: blank-base.vhdx ships inside the layer directory
+        // itself. FindScratchTemplate searches there and at the store root.
         string? template = FindScratchTemplate(chain[0], out string searched, out bool denied);
         if (template is null)
         {

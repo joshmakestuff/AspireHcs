@@ -9,14 +9,23 @@
 // that store returns *false* rather than throwing, so a naive probe silently
 // reads "not there" instead of "not allowed".)
 //
+// RESOLVED 2026-08-02: it was the ACL. With the layer made readable in place,
+// CreateSandboxLayer succeeds unelevated (0x00000000), and a Hyper-V-isolated
+// container boots end to end as a normal user in Hyper-V Administrators. The
+// remaining real gate is on the process-isolated path: ActivateLayer returns
+// 0x80070522 ERROR_PRIVILEGE_NOT_HELD — a privilege, not an ACL. Full record in
+// docs/container-privilege-matrix.md.
+//
 // Two modes remove the confound and then measure the real gate:
 //
-//   export     ONE-TIME, ELEVATED. Lifts a layer out of Docker's store into a
-//              store the developer owns, using ExportLayer/ImportLayer (the
-//              transport format — a plain recursive copy silently drops the
-//              backup streams, security descriptors and hard links the layer
-//              format depends on, which would produce a broken layer and, worse,
-//              a *plausible* privilege result from a layer that never worked).
+//   grant      ONE-TIME, ELEVATED. Makes a layer readable by the current user IN
+//              PLACE, then verifies the grant was SUFFICIENT by opening the files
+//              a boot actually needs. An earlier design exported the layer into a
+//              developer-owned store instead; that was abandoned after ExportLayer
+//              returned 0x80070057, because hcsshim does not route base layers
+//              through ExportLayer at all. Moving a base layer into our own store
+//              is the OCI-tar import path — image-acquisition work, not this
+//              question.
 //
 //   privilege  Runs the storage-call matrix against a given layer, recording
 //              each call's own HRESULT and CONTINUING past failures, so the
@@ -153,11 +162,91 @@ internal static partial class Program
 
         ReportAcl(layer);
 
+        if (revoke)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Revoked. The unelevated matrix should now report DENIED again.");
+            return 0;
+        }
+
+        // SUFFICIENCY, not tidiness, is the verdict. icacls routinely fails on
+        // most of a layer tree — measured here: 554 processed, 9613 rejected,
+        // because an elevated Administrator still lacks WRITE_DAC on files whose
+        // DACLs name only SYSTEM/TrustedInstaller — and that partial grant is
+        // ENOUGH, because the layer's bulk content is read by the VM worker
+        // process under its own identity via VSMB, not by the developer's token.
+        // Failing the step on the rejection count would abort the very flow that
+        // is proven to work. So the count is recorded as data, and what decides
+        // is whether the files the boot actually opens are now reachable.
+        bool sufficient = ProbeGrantSufficiency(layer);
         Console.WriteLine();
-        Console.WriteLine(revoke
-            ? "Revoked. The unelevated matrix should now report DENIED again."
-            : $"Granted. Run the unelevated matrix against it with:{Environment.NewLine}  HcsContainerSpike privilege --layer {layer}");
-        return Results.Any(r => r.Hr.Failed) ? 2 : 0;
+        Console.WriteLine(sufficient
+            ? $"Granted and verified sufficient. Run the unelevated matrix with:{Environment.NewLine}  HcsContainerSpike privilege --layer {layer}"
+            : "Granted, but the layer is still NOT sufficiently readable — see the SufficiencyProbe rows above.");
+        return sufficient ? 0 : 2;
+    }
+
+    private static void ReportAcl(string path)
+    {
+        try
+        {
+            DirectorySecurity security = new DirectoryInfo(path).GetAccessControl();
+            IdentityReference? owner = security.GetOwner(typeof(NTAccount));
+            Console.WriteLine($"--- ACL: owner={owner?.Value ?? "(unknown)"} ---");
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(NTAccount)))
+            {
+                Console.WriteLine($"  {rule.AccessControlType,-5} {rule.IdentityReference.Value,-45} {rule.FileSystemRights}");
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            Console.WriteLine($"--- ACL unreadable: {ex.GetType().Name}: {ex.Message} ---");
+        }
+    }
+
+    /// <summary>Checks that the paths an unelevated boot actually opens are
+    /// reachable. This is the authoritative post-grant verdict, and it is
+    /// deliberately independent of icacls' own reporting: icacls exits 0 even
+    /// when it touched nothing, and its summary line is English-only text that a
+    /// localized Windows would render differently. Opening the real files cannot
+    /// be fooled by either.</summary>
+    private static bool ProbeGrantSufficiency(string layer)
+    {
+        Console.WriteLine();
+        Console.WriteLine("--- Grant sufficiency (the paths an unelevated boot opens) ---");
+
+        bool ok = true;
+        foreach (string relative in (string[])["", "Files", "UtilityVM"])
+        {
+            string path = relative.Length == 0 ? layer : Path.Combine(layer, relative);
+            HRESULT hr = TryEnumerate(path, out _, out string detail);
+            Step($"SufficiencyProbe(dir:{(relative.Length == 0 ? "." : relative)})", hr, detail);
+            ok &= hr.Succeeded;
+        }
+
+        // layerchain.json is optional (a base layer may legitimately lack it);
+        // the two VHDX templates are not — the xenon boot copies one and probes
+        // the other, so an unreadable one fails the run later rather than here.
+        foreach (string relative in (string[])["blank-base.vhdx", @"UtilityVM\SystemTemplate.vhdx"])
+        {
+            string path = Path.Combine(layer, relative);
+            HRESULT hr;
+            string detail;
+            try
+            {
+                using FileStream probe = File.OpenRead(path);
+                hr = default;
+                detail = $"{path}: readable ({probe.Length / (1024 * 1024)} MB)";
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                hr = ex.HResult == AccessDenied ? new HRESULT(AccessDenied) : new HRESULT(ex.HResult);
+                detail = $"{path}: {ex.GetType().Name}: {ex.Message}";
+            }
+            Step($"SufficiencyProbe(file:{Path.GetFileName(relative)})", hr, detail);
+            ok &= hr.Succeeded;
+        }
+        return ok;
     }
 
     /// <summary>icacls rather than DirectorySecurity: the layer tree is ~1 GB of
@@ -203,237 +292,22 @@ internal static partial class Program
         string combined = stdout.Result + stderr.Result;
         string summary = combined.ReplaceLineEndings(" ").Trim();
 
-        // icacls exits 0 even when it could not touch a single file: it reports
-        // per-file outcomes in its own summary line instead. Observed on this
-        // host — "Successfully processed 554 files; Failed processing 9613 files"
-        // with exit 0, which a bare exit-code check recorded as a clean grant.
-        // The failure count is the real verdict.
+        // icacls exits 0 even when it could not touch a single file, reporting
+        // per-file outcomes in a summary line instead — observed here as
+        // "Successfully processed 554 files; Failed processing 9613 files" with
+        // exit 0. This surfaces that count so the record shows it, but it is
+        // DIAGNOSTIC ONLY and deliberately does not decide the step: the pattern
+        // is English-only text that a localized Windows would not produce, and a
+        // partial grant is frequently sufficient anyway. ProbeGrantSufficiency
+        // opens the files that matter and is the authoritative verdict.
         System.Text.RegularExpressions.Match failed = System.Text.RegularExpressions.Regex.Match(
             combined, @"Failed processing (?<n>\d+) files");
-        bool anyFailed = failed.Success && failed.Groups["n"].Value != "0";
+        string rejected = failed.Success && failed.Groups["n"].Value != "0"
+            ? $" [{failed.Groups["n"].Value} files rejected the ACE — diagnostic only; sufficiency is probed separately]"
+            : "";
 
-        Step($"icacls({what})", process.ExitCode == 0 && !anyFailed ? default : ProbeFailed,
-            $"exit={process.ExitCode}{(anyFailed ? $" BUT {failed.Groups["n"].Value} files rejected the ACE" : "")} {Truncate(summary)}");
-    }
-
-    // ---------------------------------------------------------------- export --
-
-    private static int Export(string[] args)
-    {
-        string source = Path.TrimEndingDirectorySeparator(Opt(args, "--layer")
-            ?? throw new ArgumentException("--layer <source layer dir, e.g. under Docker's windowsfilter store> is required"));
-        string storeRoot = Opt(args, "--store") ?? DefaultStoreRoot();
-        string name = Opt(args, "--name") ?? Path.GetFileName(source);
-        string dest = Path.Combine(storeRoot, name);
-        string transport = Path.Combine(storeRoot, ".transport-" + name);
-
-        Console.WriteLine($"[export] source={source}");
-        Console.WriteLine($"[export] dest={dest}");
-
-        if (!IsElevated())
-        {
-            // Refusing beats producing a half-copied layer that would later be
-            // mistaken for evidence about the API's privilege model.
-            Console.WriteLine("error: export must run ELEVATED — it reads Docker's Administrators-ACLed store. " +
-                              "This is the one-time setup step the whole exercise is trying to isolate.");
-            return 2;
-        }
-
-        // Source-side visibility. Recorded because "the elevated session could
-        // read it" is half of the confound being isolated.
-        Step("SourceEnumerate", TryEnumerate(source, out int entryCount, out string enumDetail), enumDetail);
-        Step("SourceLayerExists(driver)", WcLayer.Exists(source, out bool driverSaysExists), $"driver reports exists={driverSaysExists}");
-
-        List<string> parents = ReadParentChain(source, out ChainStatus chainStatus, out string chainNote);
-        Step("ReadLayerChain", ChainHr(chainStatus), chainNote);
-        if (chainStatus is not (ChainStatus.Absent or ChainStatus.Parsed))
-        {
-            // Fail closed. A chain we could not read is UNKNOWN, not empty, and
-            // exporting a layer that actually has parents as though it were a base
-            // layer would produce a store that imports cleanly and boots wrong —
-            // then every privilege result measured against it would be garbage.
-            Console.WriteLine("error: the source layer's parent chain could not be determined. Refusing to export: " +
-                              "a layer exported as a base when it in fact has parents would boot wrong, and the " +
-                              "privilege matrix measured against it would be meaningless.");
-            return 2;
-        }
-        if (parents.Count == 0)
-        {
-            // MEASURED, not assumed: this exact call was run elevated against the
-            // nanoserver base layer on 2026-08-02 and returned 0x80070057. The
-            // reason is in hcsshim internal/wclayer/exportlayer.go — NewLayerReader
-            // branches away from ExportLayer entirely when there are no parents
-            // ("This is a base layer. It gets exported differently."), to a
-            // backup-stream reader. ExportLayer simply does not accept base layers.
-            Console.WriteLine("error: --layer is a base layer (no parents), and ExportLayer does not support base " +
-                              "layers — it returns 0x80070057. Getting a base layer into a store you own means the " +
-                              "OCI-tar import path, which is image-acquisition work. To isolate the ACL confound " +
-                              "instead, use `grant` to make this layer readable in place.");
-            return 2;
-        }
-
-        Directory.CreateDirectory(storeRoot);
-        PrecleanDirectory(transport, "transport folder");
-        PrecleanDirectory(dest, "destination layer");
-        Directory.CreateDirectory(transport);
-
-        try
-        {
-            Step("ExportLayer", WcLayer.Export(source, transport, parents), $"{source} -> {transport}");
-            if (Results.Any(r => r.Hr.Failed))
-            {
-                return 2;
-            }
-
-            Step("ImportLayer", WcLayer.Import(dest, transport, parents), $"{transport} -> {dest}");
-            if (Results.Any(r => r.Hr.Failed))
-            {
-                return 2;
-            }
-        }
-        finally
-        {
-            PrecleanDirectory(transport, "transport folder");
-        }
-
-        EnsureScratchTemplate(Path.GetDirectoryName(source)!, storeRoot, dest);
-
-        ReportLayerShape(dest);
-        ReportAcl(dest);
-
-        Console.WriteLine();
-        Console.WriteLine($"Exported. Run the unelevated matrix against it with:");
-        Console.WriteLine($"  HcsContainerSpike privilege --layer {dest}");
-        return Results.Any(r => r.Hr.Failed) ? 2 : 0;
-    }
-
-    /// <summary>Puts a blank container-scratch VHDX in the developer's store, so
-    /// the unelevated xenon run has something to copy instead of calling
-    /// CreateSandboxLayer (#33 experiment 2).
-    ///
-    /// #33 assumed windowsfilter base layers ship such a template
-    /// (blank.vhdx/blank-base.vhdx). CONFIRMED on this host 2026-08-02:
-    /// `blank-base.vhdx` sits INSIDE the layer directory, alongside Files\ and
-    /// UtilityVM\ — not at the store root. An earlier revision of this comment
-    /// claimed the opposite ("VERIFIED FALSE"); that claim came from an
-    /// inspection script that only looked at the store root, which is a lesson
-    /// about the probe rather than about the platform.
-    ///
-    /// The generation path below is therefore a FALLBACK, kept for stores that
-    /// genuinely have no template: it runs one privileged CreateSandboxLayer
-    /// during the one-time elevated setup and keeps the output to copy per run.
-    /// Either way the shape is the developer story #33 proposes — privileged work
-    /// happens once at setup, and each `aspire run` afterwards does only
-    /// unprivileged file copies.</summary>
-    private static void EnsureScratchTemplate(string sourceStoreRoot, string destStoreRoot, string importedLayer)
-    {
-        if (CopyScratchTemplateIfPresent(sourceStoreRoot, destStoreRoot))
-        {
-            return;
-        }
-
-        string generator = Path.Combine(destStoreRoot, ".template-gen");
-        PrecleanDirectory(generator, "template generator");
-        Directory.CreateDirectory(generator);
-        try
-        {
-            HRESULT hr = WcLayer.CreateScratchLayer(generator, [importedLayer]);
-            Step("GenerateScratchTemplate(CreateSandboxLayer)", hr, generator);
-            if (hr.Failed)
-            {
-                return;
-            }
-
-            string produced = Path.Combine(generator, "sandbox.vhdx");
-            string template = Path.Combine(destStoreRoot, "blank.vhdx");
-            try
-            {
-                File.Copy(produced, template, overwrite: true);
-                Step("KeepScratchTemplate", default,
-                    $"{template} ({new FileInfo(template).Length / (1024 * 1024)} MB) — copied per run unelevated from here");
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                Step("KeepScratchTemplate", ProbeFailed, $"{produced}: {ex.GetType().Name}: {ex.Message}");
-            }
-        }
-        finally
-        {
-            // Release the layer through the API that created it, then remove the
-            // directory; leaving an activated scratch behind would hold handles.
-            WcLayer.Destroy(generator);
-            PrecleanDirectory(generator, "template generator");
-        }
-    }
-
-    /// <summary>Returns true when a pre-existing blank template was carried over.</summary>
-    private static bool CopyScratchTemplateIfPresent(string sourceStoreRoot, string destStoreRoot)
-    {
-        foreach (string candidate in ScratchTemplateNames)
-        {
-            string from = Path.Combine(sourceStoreRoot, candidate);
-            string to = Path.Combine(destStoreRoot, candidate);
-            try
-            {
-                // No File.Exists guard: it reports a denied file as absent, which
-                // would route a denial into the silent "no template here" path —
-                // the same defect FindScratchTemplate was fixed for. Attempt the
-                // copy and let the exception say which it was.
-                File.Copy(from, to, overwrite: true);
-                Step($"CopyScratchTemplate({candidate})", default, $"{from} -> {to} ({new FileInfo(to).Length / (1024 * 1024)} MB)");
-                return true;
-            }
-            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
-            {
-                continue;
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Keep trying the remaining names: returning here would leave the
-                // store with no template because the FIRST candidate happened to
-                // be locked or denied, and the xenon hypothesis would then report
-                // SKIP for a reason that has nothing to do with privilege.
-                Step($"CopyScratchTemplate({candidate})", ex is UnauthorizedAccessException ? new HRESULT(AccessDenied) : ProbeFailed,
-                    $"{from}: {ex.GetType().Name}: {ex.Message}");
-            }
-        }
-        // Not a failure: this store has no prebuilt template, so the caller
-        // generates one. Observed to be the normal case on this host.
-        Console.WriteLine($"[export] no prebuilt scratch template ({string.Join(" / ", ScratchTemplateNames)}) " +
-                          $"at {sourceStoreRoot} — generating one instead");
-        return false;
-    }
-
-    private static void ReportLayerShape(string layerPath)
-    {
-        Console.WriteLine();
-        Console.WriteLine($"--- Imported layer shape: {layerPath} ---");
-        foreach (string relative in (string[])["Files", @"UtilityVM\Files", @"UtilityVM\SystemTemplate.vhdx", "layerchain.json"])
-        {
-            string full = Path.Combine(layerPath, relative);
-            bool isDir = Directory.Exists(full);
-            bool isFile = File.Exists(full);
-            string what = isDir ? "directory" : isFile ? $"file, {new FileInfo(full).Length / (1024 * 1024)} MB" : "ABSENT";
-            Console.WriteLine($"  {relative,-32} {what}");
-        }
-    }
-
-    private static void ReportAcl(string path)
-    {
-        try
-        {
-            DirectorySecurity security = new DirectoryInfo(path).GetAccessControl();
-            IdentityReference? owner = security.GetOwner(typeof(NTAccount));
-            Console.WriteLine($"--- ACL: owner={owner?.Value ?? "(unknown)"} ---");
-            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(NTAccount)))
-            {
-                Console.WriteLine($"  {rule.AccessControlType,-5} {rule.IdentityReference.Value,-45} {rule.FileSystemRights}");
-            }
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
-        {
-            Console.WriteLine($"--- ACL unreadable: {ex.GetType().Name}: {ex.Message} ---");
-        }
+        Step($"icacls({what})", process.ExitCode == 0 ? default : ProbeFailed,
+            $"exit={process.ExitCode}{rejected} {Truncate(summary)}");
     }
 
     // ------------------------------------------------------------- privilege --
@@ -459,7 +333,7 @@ internal static partial class Program
             Console.WriteLine();
             Console.WriteLine("Layer is not readable at this privilege level — the storage calls are NOT attempted, " +
                               "because their failures would be attributable to the store ACL rather than the API. " +
-                              "Export the layer to a store you own first (`export` mode) and rerun.");
+                              "Make the layer readable first (`grant` mode, elevated) and rerun.");
             SkipAllStorageCalls("layer directory unreadable at this privilege level");
             PrintMatrix();
             return 2;
@@ -750,7 +624,11 @@ internal static partial class Program
     // ----------------------------------------------------------------- shared --
 
     /// <summary>Base-layer scratch templates, in the order moby's windowsfilter
-    /// driver prefers them. These live at the STORE root, not inside a layer.</summary>
+    /// driver prefers them. OBSERVED 2026-08-02: `blank-base.vhdx` lives INSIDE
+    /// the layer directory, alongside Files\ and UtilityVM\ — not at the store
+    /// root, as an earlier revision of this comment asserted. Both locations are
+    /// searched because the store-root layout is what moby's driver historically
+    /// used and this has only been checked against one store.</summary>
     private static readonly string[] ScratchTemplateNames = ["blank-base.vhdx", "blank.vhdx"];
 
     /// <summary>Locates a blank scratch template, opening each candidate rather
