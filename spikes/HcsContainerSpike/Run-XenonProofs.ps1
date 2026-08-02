@@ -120,6 +120,11 @@ $buildOk = $LASTEXITCODE -eq 0
 $script:steps += [pscustomobject]@{ Step = 'Build'; Exit = $LASTEXITCODE; Expected = '0'; Ok = $buildOk }
 if (-not $buildOk) { Write-Both 'Build failed — aborting.'; exit 1 }
 
+# Argon control in the same record: its ProcessIsolationProof asserts
+# HostingSystemId is ABSENT — the other half of the isolation discriminator
+# the xenon run exercises.
+[void](Invoke-Step -Title 'ArgonControl' -ExpectedExit 0 -CommandArgs @('run', '--layer', $Layer))
+
 $runOk = Invoke-Step -Title 'XenonRun' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'hyperv', '--layer', $Layer)
 
 if (-not $SkipOrphan) {
