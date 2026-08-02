@@ -199,13 +199,12 @@ internal static partial class Program
                 Step("HcsGetComputeSystemProperties", hr, doc ?? "");
 
                 // Runtime witness for "process-isolated container": the properties
-                // must report SystemType Container AND a host-silo object root.
-                // A Hyper-V-isolated container lives in a utility VM and cannot
-                // have an ObRoot under \Silos\ on the host. Structurally, silent
-                // Hyper-V isolation is not a live hypothesis here anyway: the
-                // config document carries no UtilityVM/HostingSystemId section,
-                // so there is nothing a VM could boot from. The discriminator is
-                // exercised one-sided (no xenon negative control in this spike).
+                // must report SystemType Container, a silo object root, and NO
+                // HostingSystemId. The xenon negative control (run 2026-08-02)
+                // showed a Hyper-V-isolated container ALSO reports an ObRoot
+                // under \Silos\ — the silo inside its utility VM, relayed by the
+                // guest — so ObRoot alone does not discriminate; HostingSystemId
+                // (absent here, naming the UVM for a xenon) is what does.
                 ProveProcessIsolation(hr, doc);
 
                 if (orphan)
@@ -264,9 +263,12 @@ internal static partial class Program
                 JsonNode? props = JsonNode.Parse(propertiesDoc);
                 string? systemType = (string?)props?["SystemType"];
                 string? obRoot = (string?)props?["ObRoot"];
+                string? hostingSystemId = (string?)props?["HostingSystemId"];
                 proved = string.Equals(systemType, "Container", StringComparison.OrdinalIgnoreCase)
-                    && obRoot?.Contains(@"\Silos\", StringComparison.OrdinalIgnoreCase) == true;
-                detail = $"SystemType={systemType ?? "(null)"} ObRoot={obRoot ?? "(null)"}";
+                    && obRoot?.Contains(@"\Silos\", StringComparison.OrdinalIgnoreCase) == true
+                    && hostingSystemId is null;
+                detail = $"SystemType={systemType ?? "(null)"} ObRoot={obRoot ?? "(null)"} " +
+                         $"HostingSystemId={hostingSystemId ?? "(absent)"}";
             }
             catch (System.Text.Json.JsonException ex)
             {
