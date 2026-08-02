@@ -40,14 +40,29 @@ as both argon and xenon on this host.
                     substitutes for CreateSandboxLayer, the Hyper-V-isolated path
                     contains no privilege-gated storage call at all.
 
-Three steps have hard expectations, all in the setup phase: the grant itself,
-and an elevated control boot of EACH isolation mode that the main phase then
-measures unelevated. If the layer will not boot with full privilege, something
-is wrong with the layer or the host rather than with privileges, and every
-unelevated result below it is meaningless — so the script stops rather than
-reporting privilege findings drawn from a bad layer. Controls must cover both
-isolation modes: without an elevated argon control, an unelevated argon failure
-is indistinguishable from an argon-path defect in the layer itself.
+Steps carrying hard expectations:
+
+  setup    the grant, and an elevated control boot of EACH isolation mode the
+           main phase measures. If the layer will not boot with full privilege,
+           something is wrong with the layer or the host rather than with
+           privileges, and every unelevated result below is meaningless — so the
+           script stops rather than reporting findings drawn from a bad layer.
+           Controls must cover both modes: without an elevated argon control, an
+           unelevated argon failure is indistinguishable from an argon-path
+           defect in the layer itself.
+
+  main     the unelevated access verify, and the three unelevated boots, whose
+           results are now DOCUMENTED and so are asserted rather than merely
+           measured (xenon 0, xenon-template 0, argon 2 gated at ActivateLayer
+           with ERROR_PRIVILEGE_NOT_HELD). Argon is asserted to FAIL on purpose:
+           an unexpected pass means the privilege boundary moved, which is drift
+           exactly as much as an unexpected failure would be. The argon assertion
+           also matches the HRESULT in the output, because exit 2 alone is
+           returned for several unrelated failures and would witness nothing.
+
+The access verify runs UNELEVATED and nowhere else. Run in the elevated setup
+phase it would pass whether or not the grant did anything — an elevated token
+reads the layer regardless — which is a verifier that cannot fail.
 
 The template-scratch path is run at BOTH privilege levels, but neither run is a
 control — it tests the #33 experiment-2 hypothesis, and a hypothesis that turns
@@ -87,6 +102,9 @@ param(
     [string]$Layer,
     [string]$LogPath,
     [ValidateSet('setup')][string]$Phase,
+    # Internal: the unelevated caller's account, forwarded into the elevated
+    # phase so the grant names the developer rather than whoever UAC ran as.
+    [string]$GrantAccount,
     [switch]$SkipSetup
 )
 
@@ -121,7 +139,13 @@ function Invoke-Step {
         # expectation, which was right while the answer was unknown — but the
         # README now asserts that a xenon boots unelevated, and an asserted claim
         # with no failing test is just a claim.
-        [int]$ExpectedExit = -1
+        [int]$ExpectedExit = -1,
+        # Exit codes are coarse: `run` returns 2 for a layer-read failure, a
+        # create failure and a start failure alike. When the documented claim is
+        # about a SPECIFIC call — argon gated at ActivateLayer with
+        # ERROR_PRIVILEGE_NOT_HELD — the exit code alone cannot witness it, so the
+        # output must show the call and HRESULT too.
+        [string]$ExpectOutputMatch
     )
     Write-Both ''
     Write-Both "=== $Title (elevated=$isElevated) ==="
@@ -133,8 +157,15 @@ function Invoke-Step {
     # setup phase ran all three control boots after the export had already failed.
     # Out-Host writes to the console and emits nothing, leaving the boolean below
     # as the only pipeline output.
-    & $exe @CommandArgs 2>&1 | Tee-Object -FilePath $LogPath -Append | Out-Host
+    & $exe @CommandArgs 2>&1 | Tee-Object -Variable captured | Tee-Object -FilePath $LogPath -Append | Out-Host
     $code = $LASTEXITCODE
+
+    $matched = $true
+    if ($ExpectOutputMatch) {
+        $text = ($captured | Out-String)
+        $matched = $text -match $ExpectOutputMatch
+        Write-Both ("--- output assertion /{0}/: {1}" -f $ExpectOutputMatch, ($matched ? 'matched' : 'NOT MATCHED'))
+    }
     $asserted = $ExpectedExit -ge 0
     $script:steps += [pscustomobject]@{
         Step     = $Title
@@ -145,7 +176,7 @@ function Invoke-Step {
         # MEAS: a measured nonzero exit is the finding, and printing it as OK (or
         # as FAIL) would misreport it. Steps that DO carry an expectation — either
         # -MustPass or -ExpectedExit — get a real pass/fail.
-        Ok       = $asserted ? ($code -eq $ExpectedExit) : ($MustPass ? ($code -eq 0) : $null)
+        Ok       = $asserted ? (($code -eq $ExpectedExit) -and $matched) : ($MustPass ? (($code -eq 0) -and $matched) : $null)
     }
     $note = $asserted ? " (asserted $ExpectedExit)" : ($MustPass ? " (required 0)" : " (measured, no expectation)")
     Write-Both ("--- {0}: exit {1}{2}" -f $Title, $code, $note)
@@ -189,7 +220,11 @@ if ($Phase -eq 'setup') {
     }
     else { Write-Both "source layer (given): $Layer" }
 
-    if (-not (Invoke-Step -Title 'Grant' -MustPass -CommandArgs @('grant', '--layer', $Layer))) {
+    # --account carries the UNELEVATED developer's identity across the elevation
+    # boundary. Where UAC elevates by credential rather than consent, this process
+    # is an administrator who is not the developer, and granting "current user"
+    # would grant the wrong principal and still report success.
+    if (-not (Invoke-Step -Title 'Grant' -MustPass -CommandArgs @('grant', '--layer', $Layer, '--account', $GrantAccount))) {
         Write-Both 'Grant failed — nothing downstream would mean anything. Stopping.'
         exit 1
     }
@@ -278,6 +313,7 @@ else {
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', (& $q $PSCommandPath),
         '-Phase', 'setup',
+        '-GrantAccount', (& $q ([Security.Principal.WindowsIdentity]::GetCurrent().Name)),
         '-LogPath', (& $q $LogPath)
     )
     if ($Layer) { $childArgs += @('-Layer', (& $q $Layer)) }
@@ -300,6 +336,17 @@ else {
 }
 
 # Everything below is MEASUREMENT. Failures here are the finding.
+# REQUIRED, and required HERE rather than in the setup phase: this is the only
+# context in which it can fail. Run elevated it would pass whether or not the
+# grant did anything, since an elevated token reads the layer regardless — a
+# verifier that cannot fail proves nothing. It also catches the wrong-principal
+# case, where the grant succeeded but named an account that is not this one.
+if (-not (Invoke-Step -Title 'UnelevatedAccessVerify' -MustPass -CommandArgs @('verify', '--layer', $exported))) {
+    Write-Both 'The layer is not reachable from this unelevated session, so nothing below could'
+    Write-Both 'distinguish a privilege result from a plain access failure. Stopping.'
+    exit 1
+}
+
 [void](Invoke-Step -Title 'UnelevatedMatrix' -CommandArgs @('privilege', '--layer', $exported, '--id', $containerId))
 
 # ASSERTED, because these are the results docs/container-privilege-matrix.md and
@@ -308,7 +355,9 @@ else {
 # ActivateLayer with ERROR_PRIVILEGE_NOT_HELD) — an unexpected pass there is just
 # as much a drift as an unexpected xenon failure, and would mean the documented
 # privilege boundary has moved.
-[void](Invoke-Step -Title 'UnelevatedArgonBoot' -ExpectedExit 2 -CommandArgs @('run', '--isolation', 'process', '--layer', $exported, '--id', $containerId))
+[void](Invoke-Step -Title 'UnelevatedArgonBoot' -ExpectedExit 2 `
+    -ExpectOutputMatch 'ActivateLayer: hr=0x80070522' `
+    -CommandArgs @('run', '--isolation', 'process', '--layer', $exported, '--id', $containerId))
 [void](Invoke-Step -Title 'UnelevatedXenonBoot(api scratch)' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'hyperv', '--layer', $exported, '--id', $containerId))
 [void](Invoke-Step -Title 'UnelevatedXenonBoot(template scratch)' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $exported, '--id', $containerId))
 
