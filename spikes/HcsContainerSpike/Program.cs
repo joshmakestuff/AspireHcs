@@ -69,6 +69,7 @@ internal static partial class Program
                     "verify" => Verify(args),
                     "privilege" => Privilege(args),
                     "pull" => Pull(args),
+                    "selftest" => SelfTest(args),
                     _ => Usage(),
                 };
             }
