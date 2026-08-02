@@ -126,7 +126,14 @@ internal static partial class Program
         string layer = Path.TrimEndingDirectorySeparator(Opt(args, "--layer")
             ?? throw new ArgumentException("--layer <layer dir> is required"));
         bool revoke = args.Contains("--revoke");
-        string account = WindowsIdentity.GetCurrent().Name;
+
+        // --account matters whenever UAC elevates by CREDENTIAL rather than by
+        // consent: on a machine where the developer is not an administrator,
+        // RunAs prompts for a different account and this process's identity is
+        // that administrator, not the developer. Granting GetCurrent().Name would
+        // then grant the wrong principal and report success. The unelevated caller
+        // knows who it is, so it passes that name in.
+        string account = Opt(args, "--account") ?? WindowsIdentity.GetCurrent().Name;
 
         Console.WriteLine($"[grant] layer={layer}");
         Console.WriteLine($"[grant] account={account} action={(revoke ? "revoke" : "grant")}");
@@ -169,21 +176,50 @@ internal static partial class Program
             return 0;
         }
 
-        // SUFFICIENCY, not tidiness, is the verdict. icacls routinely fails on
-        // most of a layer tree — measured here: 554 processed, 9613 rejected,
-        // because an elevated Administrator still lacks WRITE_DAC on files whose
-        // DACLs name only SYSTEM/TrustedInstaller — and that partial grant is
-        // ENOUGH, because the layer's bulk content is read by the VM worker
-        // process under its own identity via VSMB, not by the developer's token.
-        // Failing the step on the rejection count would abort the very flow that
-        // is proven to work. So the count is recorded as data, and what decides
-        // is whether the files the boot actually opens are now reachable.
-        bool sufficient = ProbeGrantSufficiency(layer);
+        // Deliberately NOT verified here. A sufficiency check run in THIS process
+        // would open the files with the ELEVATED token, which can read them
+        // whether or not the grant did anything — a verifier that cannot fail for
+        // the reason it claims to check. The check belongs in the unelevated
+        // session, and lives in `verify`.
         Console.WriteLine();
-        Console.WriteLine(sufficient
-            ? $"Granted and verified sufficient. Run the unelevated matrix with:{Environment.NewLine}  HcsContainerSpike privilege --layer {layer}"
-            : "Granted, but the layer is still NOT sufficiently readable — see the SufficiencyProbe rows above.");
-        return sufficient ? 0 : 2;
+        Console.WriteLine("Granted (NOT yet verified — this process is elevated, so it could read the layer");
+        Console.WriteLine("regardless). Verify from the UNELEVATED session that will actually boot it:");
+        Console.WriteLine($"  HcsContainerSpike verify --layer {layer}");
+        return Results.Any(r => r.Hr.Failed) ? 2 : 0;
+    }
+
+    /// <summary>Checks, AT THE CURRENT PRIVILEGE LEVEL, that the paths a boot
+    /// opens are reachable. Intended to run UNELEVATED — that is the only context
+    /// in which it can fail, and therefore the only one in which passing means
+    /// anything.
+    ///
+    /// icacls routinely rejects most of a layer tree (measured: ~554 processed,
+    /// ~9613 rejected, because an elevated Administrator still lacks WRITE_DAC on
+    /// files whose DACLs name only SYSTEM/TrustedInstaller) and the boot works
+    /// anyway, because the layer's bulk content is read by the VM worker process
+    /// under its own identity via VSMB rather than by the developer's token. So
+    /// the rejection count is not the verdict in either direction; reachability
+    /// of the specific paths is.</summary>
+    private static int Verify(string[] args)
+    {
+        string layer = Path.TrimEndingDirectorySeparator(Opt(args, "--layer")
+            ?? throw new ArgumentException("--layer <layer dir> is required"));
+
+        Console.WriteLine($"[verify] layer={layer}");
+        if (IsElevated())
+        {
+            // Not a hard failure — someone may legitimately be checking the
+            // elevated view — but it must never be mistaken for the real answer.
+            Console.WriteLine("WARNING: running ELEVATED. This cannot falsify the grant, because an elevated " +
+                              "token reads the layer regardless. Rerun unelevated for a meaningful result.");
+        }
+
+        bool ok = ProbeAccessSufficiency(layer);
+        Console.WriteLine();
+        Console.WriteLine(ok
+            ? "Sufficient: every path a boot opens is reachable at this privilege level."
+            : "NOT sufficient — see the SufficiencyProbe rows above.");
+        return ok ? 0 : 2;
     }
 
     private static void ReportAcl(string path)
@@ -204,16 +240,15 @@ internal static partial class Program
         }
     }
 
-    /// <summary>Checks that the paths an unelevated boot actually opens are
-    /// reachable. This is the authoritative post-grant verdict, and it is
-    /// deliberately independent of icacls' own reporting: icacls exits 0 even
-    /// when it touched nothing, and its summary line is English-only text that a
-    /// localized Windows would render differently. Opening the real files cannot
-    /// be fooled by either.</summary>
-    private static bool ProbeGrantSufficiency(string layer)
+    /// <summary>Checks that the paths a boot actually opens are reachable, at
+    /// whatever privilege level this process holds. Deliberately independent of
+    /// icacls' own reporting: icacls exits 0 even when it touched nothing, and its
+    /// summary line is English-only text a localized Windows would not produce.
+    /// Opening the real files cannot be fooled by either.</summary>
+    private static bool ProbeAccessSufficiency(string layer)
     {
         Console.WriteLine();
-        Console.WriteLine("--- Grant sufficiency (the paths an unelevated boot opens) ---");
+        Console.WriteLine($"--- Access sufficiency (elevated={IsElevated()}) ---");
 
         bool ok = true;
         foreach (string relative in (string[])["", "Files", "UtilityVM"])
@@ -224,35 +259,46 @@ internal static partial class Program
             ok &= hr.Succeeded;
         }
 
-        // layerchain.json is optional (a base layer may legitimately lack it);
-        // the two VHDX templates are not — the xenon boot copies one and probes
-        // the other, so an unreadable one fails the run later rather than here.
-        foreach (string relative in (string[])["blank-base.vhdx", @"UtilityVM\SystemTemplate.vhdx"])
+        // The scratch template requirement is asked of the SAME function the boot
+        // uses, rather than restated here. Hardcoding "blank-base.vhdx" would
+        // reject a layer carrying only blank.vhdx — which FindScratchTemplate
+        // accepts — i.e. a rule stricter than the consumer's.
+        string? template = FindScratchTemplate(layer, out string searched, out bool denied);
+        Step("SufficiencyProbe(scratch template)",
+            template is not null ? default : denied ? new HRESULT(AccessDenied) : ProbeFailed,
+            template ?? searched);
+        ok &= template is not null;
+
+        // The UVM template is not interchangeable and has one name; the xenon boot
+        // copies it directly.
+        string uvmTemplate = Path.Combine(layer, "UtilityVM", "SystemTemplate.vhdx");
+        HRESULT uvmHr;
+        string uvmDetail;
+        try
         {
-            string path = Path.Combine(layer, relative);
-            HRESULT hr;
-            string detail;
-            try
-            {
-                using FileStream probe = File.OpenRead(path);
-                hr = default;
-                detail = $"{path}: readable ({probe.Length / (1024 * 1024)} MB)";
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                hr = ex.HResult == AccessDenied ? new HRESULT(AccessDenied) : new HRESULT(ex.HResult);
-                detail = $"{path}: {ex.GetType().Name}: {ex.Message}";
-            }
-            Step($"SufficiencyProbe(file:{Path.GetFileName(relative)})", hr, detail);
-            ok &= hr.Succeeded;
+            using FileStream probe = File.OpenRead(uvmTemplate);
+            uvmHr = default;
+            uvmDetail = $"{uvmTemplate}: readable ({probe.Length / (1024 * 1024)} MB)";
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            uvmHr = ex.HResult == AccessDenied ? new HRESULT(AccessDenied) : new HRESULT(ex.HResult);
+            uvmDetail = $"{uvmTemplate}: {ex.GetType().Name}: {ex.Message}";
+        }
+        Step("SufficiencyProbe(file:SystemTemplate.vhdx)", uvmHr, uvmDetail);
+        ok &= uvmHr.Succeeded;
+
         return ok;
     }
 
     /// <summary>icacls rather than DirectorySecurity: the layer tree is ~1 GB of
     /// files whose inheritance state we do not control, and icacls /T is the
-    /// documented way to reapply across one. Its exit code is recorded as the
-    /// step's result — a partially applied ACL must not read as success.</summary>
+    /// documented way to reapply across one.
+    ///
+    /// Only the process exit code decides this step. That is NOT a claim that the
+    /// ACL applied everywhere — it routinely does not, and does not need to. The
+    /// authoritative check is <see cref="ProbeAccessSufficiency"/>, run
+    /// unelevated via `verify`, which opens the paths a boot uses.</summary>
     private static void RunIcacls(string arguments, string what)
     {
         var psi = new System.Diagnostics.ProcessStartInfo("icacls.exe", arguments)

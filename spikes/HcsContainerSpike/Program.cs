@@ -66,6 +66,7 @@ internal static partial class Program
                     "list" => List(args),
                     "terminate" => Terminate(containerId),
                     "grant" => Grant(args),
+                    "verify" => Verify(args),
                     "privilege" => Privilege(args),
                     _ => Usage(),
                 };
@@ -619,7 +620,7 @@ internal static partial class Program
     private static int Usage()
     {
         Console.WriteLine("""
-            usage: HcsContainerSpike <run|orphan|cleanup|list|terminate|grant|privilege> [options]
+            usage: HcsContainerSpike <run|orphan|cleanup|list|terminate|grant|verify|privilege> [options]
               run       --layer <dir> [--id <containerId>] [--command <cmdline>] [--seconds <n>] [--work <dir>]
                         [--isolation <process|hyperv>]   process (default) boots a host silo (argon);
                                              hyperv boots the same layer inside a utility VM (xenon)
@@ -632,9 +633,15 @@ internal static partial class Program
               list      [--absent <id>]      enumerate HCS compute systems; with --absent,
                                              fail (exit 5) if <id> is still enumerable
               terminate [--id <containerId>]   terminate a leftover spike container
-              grant     --layer <dir> [--revoke]     ELEVATED, one-time: grant the current user read
+              grant     --layer <dir> [--account <user>] [--revoke]   ELEVATED, one-time: grant read
                                              access to a layer directory IN PLACE, isolating the #33
-                                             question (API gate vs store ACL) by changing only the ACL
+                                             question (API gate vs store ACL) by changing only the ACL.
+                                             --account names the principal to grant (default: current
+                                             user) — required when UAC elevates by credential, since
+                                             the elevated identity is then not the developer's
+              verify    --layer <dir>       Run UNELEVATED: check that every path a boot opens is
+                                             reachable. Elevated it cannot fail, so it only means
+                                             something from the session that will do the booting
               privilege --layer <dir> [--work <dir>] [--id <containerId>]    record every layer-storage
                                              call's own HRESULT at the current privilege level, continuing
                                              past failures; SKIP marks calls never attempted (#33)

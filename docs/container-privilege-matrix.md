@@ -172,12 +172,21 @@ descriptors and hard links that ordinary file I/O drops.
 ## Reproducing
 
 ```powershell
-# One-time, elevated: make the layer readable (reversible with --revoke)
-HcsContainerSpike grant --layer C:\ProgramData\Docker\windowsfilter\<sha>
+# One-time, elevated: make the layer readable (reversible with --revoke).
+# --account matters when UAC elevates by credential rather than consent — the
+# elevated identity is then not the developer's.
+HcsContainerSpike grant --layer C:\ProgramData\Docker\windowsfilter\<sha> --account DOMAIN\you
 
 # Everything below runs UNELEVATED
+HcsContainerSpike verify    --layer C:\ProgramData\Docker\windowsfilter\<sha>
 HcsContainerSpike privilege --layer C:\ProgramData\Docker\windowsfilter\<sha>
 HcsContainerSpike run --isolation hyperv --scratch template --layer C:\ProgramData\Docker\windowsfilter\<sha>
 ```
 
-`Run-PrivilegeProofs.ps1` drives the whole sequence, self-elevating only the grant.
+`verify` must run unelevated: elevated it passes whether or not the grant did
+anything, since an elevated token reads the layer regardless.
+
+`Run-PrivilegeProofs.ps1` drives the whole sequence, self-elevating only the grant, and
+**asserts** the results above rather than merely measuring them — including asserting that
+argon *fails* at `ActivateLayer` with `0x80070522`. An unexpected pass there means the
+privilege boundary moved and the document you are reading is stale.
