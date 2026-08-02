@@ -70,6 +70,9 @@ internal static partial class Program
                     "privilege" => Privilege(args),
                     "pull" => Pull(args),
                     "selftest" => SelfTest(args),
+                    "inspect" => Inspect(args),
+                    "import" => Import(args),
+                    "finalize" => Finalize(args),
                     _ => Usage(),
                 };
             }
@@ -651,6 +654,15 @@ internal static partial class Program
                                              Windows base image on an anonymous registry and download its
                                              layer blob + metadata into the AspireHcs store, digest-verified
                                              (default store: %LOCALAPPDATA%\AspireHcs\layers) (#30)
+              inspect   --metadata <json> [--samples <n>]   report what a pulled layer tar actually contains
+                                             (entry types, PAX keys, symlinks/junctions/hard links/ADS)
+              import    --metadata <json> [--no-security] [--skip-finalize]   materialize the pulled layer
+                                             into a windowsfilter-format layer dir via backup streams, then
+                                             finalize it with ProcessBaseImage/ProcessUtilityImage. Needs
+                                             SeBackup+SeRestore (i.e. elevation) unless --no-security, which
+                                             measures what an unprivileged extraction can do (no SDs)
+              finalize  --entry <dir>       run the finalize half alone, on an entry left by --skip-finalize;
+                                             privileges are MEASURED here, never required
             """);
         return 64;
     }
