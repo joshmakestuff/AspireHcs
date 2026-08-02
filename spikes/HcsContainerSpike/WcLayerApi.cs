@@ -120,6 +120,71 @@ internal static unsafe partial class WcLayer
         return new(DestroyLayer(&info, sandboxPath));
     }
 
+    /// <summary>Writes <paramref name="layerPath"/> out to <paramref name="exportFolderPath"/>
+    /// in the layer transport format. Used by the #33 export step to get a layer
+    /// out of Docker's Administrators-ACLed store. A plain recursive file copy is
+    /// NOT equivalent: the transport format carries Win32 backup streams (security
+    /// descriptors, EAs, hard links) that ordinary file I/O drops, which is why
+    /// hcsshim never copies layer trees directly.</summary>
+    public static HRESULT Export(string layerPath, string exportFolderPath, IReadOnlyList<string> parentPaths)
+    {
+        WcLayerDescriptor[] descriptors = BuildDescriptors(parentPaths, out HRESULT hr);
+        if (hr.Failed)
+        {
+            return hr;
+        }
+        try
+        {
+            DriverInfo info = new() { Flavour = 1, HomeDir = EmptyHome };
+            fixed (WcLayerDescriptor* pDescs = descriptors)
+            {
+                return new(ExportLayer(&info, layerPath, exportFolderPath, pDescs, (uint)descriptors.Length));
+            }
+        }
+        finally
+        {
+            FreeDescriptors(descriptors);
+        }
+    }
+
+    /// <summary>Reconstructs a layer at <paramref name="layerPath"/> from a folder
+    /// previously written by <see cref="Export"/>. All parent layers must already
+    /// be present at <paramref name="parentPaths"/> for the transport format to be
+    /// interpretable (hcsshim internal/wclayer/importlayer.go).</summary>
+    public static HRESULT Import(string layerPath, string importFolderPath, IReadOnlyList<string> parentPaths)
+    {
+        WcLayerDescriptor[] descriptors = BuildDescriptors(parentPaths, out HRESULT hr);
+        if (hr.Failed)
+        {
+            return hr;
+        }
+        try
+        {
+            DriverInfo info = new() { Flavour = 1, HomeDir = EmptyHome };
+            fixed (WcLayerDescriptor* pDescs = descriptors)
+            {
+                return new(ImportLayer(&info, layerPath, importFolderPath, pDescs, (uint)descriptors.Length));
+            }
+        }
+        finally
+        {
+            FreeDescriptors(descriptors);
+        }
+    }
+
+    /// <summary>Asks the layer driver whether a layer exists — unlike
+    /// <see cref="File.Exists"/>, which reports false for a path the caller merely
+    /// cannot read. That distinction is the whole confound this spike exists to
+    /// remove, so the driver's own answer is worth recording separately.</summary>
+    public static HRESULT Exists(string layerPath, out bool exists)
+    {
+        DriverInfo info = new() { Flavour = 1, HomeDir = EmptyHome };
+        uint value = 0;
+        int hr = LayerExists(&info, layerPath, &value);
+        exists = value != 0;
+        return new(hr);
+    }
+
     private static WcLayerDescriptor[] BuildDescriptors(IReadOnlyList<string> parentPaths, out HRESULT hr)
     {
         hr = default;
@@ -176,4 +241,13 @@ internal static unsafe partial class WcLayer
 
     [LibraryImport("vmcompute.dll", StringMarshalling = StringMarshalling.Utf16)]
     private static partial int DestroyLayer(DriverInfo* info, string id);
+
+    [LibraryImport("vmcompute.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int ExportLayer(DriverInfo* info, string id, string path, WcLayerDescriptor* layers, uint layerCount);
+
+    [LibraryImport("vmcompute.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int ImportLayer(DriverInfo* info, string id, string path, WcLayerDescriptor* layers, uint layerCount);
+
+    [LibraryImport("vmcompute.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int LayerExists(DriverInfo* info, string id, uint* exists);
 }
