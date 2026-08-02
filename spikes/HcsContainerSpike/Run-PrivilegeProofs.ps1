@@ -1,0 +1,385 @@
+#Requires -Version 7
+<#
+.SYNOPSIS
+Privilege-model proof harness for Windows containers (#33).
+
+.DESCRIPTION
+Answers the question the #30 spike could not: is the gate on container layer
+storage the wclayer API itself, or merely the ACL on Docker's store?
+
+Unlike Run-XenonProofs.ps1 this script is started UNELEVATED — that is the
+condition under test, and it mirrors the developer story being proposed
+(a one-time elevated setup, then unelevated `aspire run`). It self-elevates
+exactly one phase, via Start-Process -Verb RunAs, and that phase is the setup:
+
+  setup (ELEVATED, one UAC prompt)
+    1. grant        make the layer readable by the current user IN PLACE
+    2. CONTROL      boot that layer elevated, once per isolation mode
+    3. matrix       record the storage-call matrix at full elevation
+
+Granting in place rather than copying the layer elsewhere is deliberate, and
+was arrived at empirically: the first design exported the layer into a store
+the developer owns, and ExportLayer returned 0x80070057 against a base layer.
+hcsshim says why — NewLayerReader branches away from ExportLayer entirely when
+there are no parent layers ("This is a base layer. It gets exported
+differently."). Materializing a base layer into your own store is the OCI-tar
+import path, i.e. image-acquisition work, not this question.
+
+Granting in place is also the cleaner experiment: #33 asks whether the gate is
+the wclayer API or the store ACL, and this changes exactly that one variable
+while the layer bits stay byte-for-byte the ones already proven to boot green
+as both argon and xenon on this host.
+
+  main (UNELEVATED, this session)
+    4. matrix       the same storage calls, unelevated, against the same layer
+    5. argon boot   run --isolation process
+    6. xenon boot   run --isolation hyperv                  (CreateSandboxLayer)
+    7. xenon boot   run --isolation hyperv --scratch template
+                    the #33 experiment-2 hypothesis: the host never Activates or
+                    Prepares a xenon scratch, so if a copied blank template
+                    substitutes for CreateSandboxLayer, the Hyper-V-isolated path
+                    contains no privilege-gated storage call at all.
+
+Steps carrying hard expectations:
+
+  setup    the grant, and an elevated control boot of EACH isolation mode the
+           main phase measures. If the layer will not boot with full privilege,
+           something is wrong with the layer or the host rather than with
+           privileges, and every unelevated result below is meaningless — so the
+           script stops rather than reporting findings drawn from a bad layer.
+           Controls must cover both modes: without an elevated argon control, an
+           unelevated argon failure is indistinguishable from an argon-path
+           defect in the layer itself.
+
+  main     the unelevated access verify, and the three unelevated boots, whose
+           results are now DOCUMENTED and so are asserted rather than merely
+           measured (xenon 0, xenon-template 0, argon 2 gated at ActivateLayer
+           with ERROR_PRIVILEGE_NOT_HELD). Argon is asserted to FAIL on purpose:
+           an unexpected pass means the privilege boundary moved, which is drift
+           exactly as much as an unexpected failure would be. The argon assertion
+           also matches the HRESULT in the output, because exit 2 alone is
+           returned for several unrelated failures and would witness nothing.
+
+The access verify runs UNELEVATED and nowhere else. Run in the elevated setup
+phase it would pass whether or not the grant did anything — an elevated token
+reads the layer regardless — which is a verifier that cannot fail.
+
+The template-scratch path is run at BOTH privilege levels, but neither run is a
+control — it tests the #33 experiment-2 hypothesis, and a hypothesis that turns
+out false is a finding, not an invalid experiment. Both runs are needed to tell
+the two failure meanings apart:
+
+  elevated OK, unelevated fails  -> a privilege gate, which is the finding sought
+  both fail                      -> template substitution does not work at all
+  both OK                        -> the xenon path needs no privileged storage call
+
+With only the unelevated run, those first two are indistinguishable.
+
+Every other step is MEASURED, not asserted: an unelevated failure is the datum,
+not a bug. Measured steps are reported as MEAS with their exit code and never as
+OK or FAIL, because a measured nonzero exit is a result, not a failure — and
+showing it as OK would misreport the very thing being measured.
+
+.PARAMETER Layer
+The layer to grant access to and then measure, in Docker's windowsfilter store.
+REQUIRED: the layer is measured where it lives, so the unelevated session must
+know which one it will probe. Pass a base image directory carrying both Files\
+and UtilityVM\Files.
+
+.PARAMETER LogPath
+Shared log. Default %TEMP%\AspireHcsPrivilegeProofs\privilege-proofs-<stamp>.log
+
+.PARAMETER Phase
+Internal. 'setup' is what the elevated child runs; leave unset.
+
+.PARAMETER SkipSetup
+Reuse a layer already granted by an earlier run — no UAC prompt, no elevated control.
+The record is then missing its control and its elevated comparison; the verdict
+says so.
+#>
+[CmdletBinding()]
+param(
+    [string]$Layer,
+    [string]$LogPath,
+    [ValidateSet('setup')][string]$Phase,
+    # Internal: the unelevated caller's account, forwarded into the elevated
+    # phase so the grant names the developer rather than whoever UAC ran as.
+    [string]$GrantAccount,
+    [switch]$SkipSetup
+)
+
+$ErrorActionPreference = 'Stop'
+$exe = Join-Path $PSScriptRoot 'bin\Debug\net10.0-windows10.0.17763.0\HcsContainerSpike.exe'
+$containerId = 'AspireHcsPrivilegeProbe'
+
+if (-not $LogPath) {
+    $logDir = Join-Path $env:TEMP 'AspireHcsPrivilegeProofs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $LogPath = Join-Path $logDir ("privilege-proofs-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
+}
+
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+function Write-Both([string]$Text) {
+    Write-Host $Text
+    Add-Content -Path $LogPath -Value $Text
+}
+
+# Records what a step DID rather than whether it matched an expectation. Only
+# steps passed -MustPass are allowed to abort the run.
+$script:steps = @()
+function Invoke-Step {
+    param(
+        [string]$Title,
+        [string[]]$CommandArgs,
+        [switch]$MustPass,
+        # Pins a result that is now DOCUMENTED, so the claim cannot silently
+        # drift. Before 2026-08-02 every unelevated step here was measured with no
+        # expectation, which was right while the answer was unknown — but the
+        # README now asserts that a xenon boots unelevated, and an asserted claim
+        # with no failing test is just a claim.
+        [int]$ExpectedExit = -1,
+        # Exit codes are coarse: `run` returns 2 for a layer-read failure, a
+        # create failure and a start failure alike. When the documented claim is
+        # about a SPECIFIC call — argon gated at ActivateLayer with
+        # ERROR_PRIVILEGE_NOT_HELD — the exit code alone cannot witness it, so the
+        # output must show the call and HRESULT too.
+        [string]$ExpectOutputMatch
+    )
+    Write-Both ''
+    Write-Both "=== $Title (elevated=$isElevated) ==="
+    Write-Both "> HcsContainerSpike $($CommandArgs -join ' ')"
+    # Out-Host, not a bare Tee-Object: Tee-Object PASSES ITS INPUT THROUGH, so the
+    # command's output would become part of this function's return value. Callers
+    # do `if (-not (Invoke-Step ...))`, and a non-empty array is truthy in
+    # PowerShell — so every such guard silently never fired. Observed live: the
+    # setup phase ran all three control boots after the export had already failed.
+    # Out-Host writes to the console and emits nothing, leaving the boolean below
+    # as the only pipeline output.
+    & $exe @CommandArgs 2>&1 | Tee-Object -Variable captured | Tee-Object -FilePath $LogPath -Append | Out-Host
+    $code = $LASTEXITCODE
+
+    $matched = $true
+    if ($ExpectOutputMatch) {
+        $text = ($captured | Out-String)
+        $matched = $text -match $ExpectOutputMatch
+        Write-Both ("--- output assertion /{0}/: {1}" -f $ExpectOutputMatch, ($matched ? 'matched' : 'NOT MATCHED'))
+    }
+    $asserted = $ExpectedExit -ge 0
+    $script:steps += [pscustomobject]@{
+        Step     = $Title
+        Elevated = $isElevated
+        Exit     = $code
+        MustPass = ([bool]$MustPass) -or $asserted
+        # Steps with no expectation get $null so the verdict table renders them as
+        # MEAS: a measured nonzero exit is the finding, and printing it as OK (or
+        # as FAIL) would misreport it. Steps that DO carry an expectation — either
+        # -MustPass or -ExpectedExit — get a real pass/fail.
+        Ok       = $asserted ? (($code -eq $ExpectedExit) -and $matched) : ($MustPass ? (($code -eq 0) -and $matched) : $null)
+    }
+    $note = $asserted ? " (asserted $ExpectedExit)" : ($MustPass ? " (required 0)" : " (measured, no expectation)")
+    Write-Both ("--- {0}: exit {1}{2}" -f $Title, $code, $note)
+    return ($code -eq 0)
+}
+
+Write-Both "privilege proof run $(Get-Date -Format o)"
+Write-Both "log:   $LogPath"
+Write-Both "host:  $([Environment]::OSVersion.VersionString) as $(whoami)"
+Write-Both "phase: $($Phase ? $Phase : 'main')  elevated: $isElevated  hyperVAdmin: $($principal.IsInRole((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-578'))))"
+try { Write-Both "commit: $(git -C $PSScriptRoot rev-parse --short HEAD) ($(git -C $PSScriptRoot branch --show-current))" } catch { }
+
+# ---------------------------------------------------------------- setup phase --
+# Runs elevated, launched by the main phase below (or directly, for debugging).
+if ($Phase -eq 'setup') {
+    if (-not $isElevated) { Write-Both 'setup phase requires elevation.'; exit 2 }
+
+    # Deliberately does NOT build: the unelevated parent already did, and building
+    # here would leave Administrator-owned obj\/bin\ artifacts that break the next
+    # unelevated build. Assert the binary the parent produced is present instead.
+    if (-not (Test-Path $exe)) {
+        Write-Both "setup phase: $exe is missing — the unelevated phase should have built it. Stopping."
+        exit 2
+    }
+    Write-Both "exe:   $exe (built $((Get-Item $exe).LastWriteTime.ToString('o')))"
+
+    if (-not $Layer) {
+        $dockerStore = 'C:\ProgramData\Docker\windowsfilter'
+        $candidates = @(Get-ChildItem $dockerStore -Directory -ErrorAction SilentlyContinue | Where-Object {
+            (Test-Path (Join-Path $_.FullName 'Files')) -and (Test-Path (Join-Path $_.FullName 'UtilityVM\Files'))
+        })
+        switch ($candidates.Count) {
+            0 { Write-Both "No base layer with Files\ + UtilityVM\Files under $dockerStore. Switch Docker Desktop to Windows containers and 'docker pull mcr.microsoft.com/windows/nanoserver:ltsc2025', or pass -Layer."; exit 2 }
+            1 { $Layer = $candidates[0].FullName; Write-Both "source layer (auto): $Layer" }
+            default {
+                Write-Both 'Multiple UtilityVM-bearing layers found — rerun with -Layer <dir>:'
+                $candidates | ForEach-Object { Write-Both "  $($_.FullName)" }
+                exit 2
+            }
+        }
+    }
+    else { Write-Both "source layer (given): $Layer" }
+
+    # --account carries the UNELEVATED developer's identity across the elevation
+    # boundary. Where UAC elevates by credential rather than consent, this process
+    # is an administrator who is not the developer, and granting "current user"
+    # would grant the wrong principal and still report success.
+    if (-not (Invoke-Step -Title 'Grant' -MustPass -CommandArgs @('grant', '--layer', $Layer, '--account', $GrantAccount))) {
+        Write-Both 'Grant failed — nothing downstream would mean anything. Stopping.'
+        exit 1
+    }
+
+    # The layer stays where it is; only its ACL changed. That is the single
+    # variable #33 asks about, and these are bits already proven to boot green.
+    $exported = $Layer
+
+    # THE CONTROL. A freshly exported layer that will not boot with full
+    # privilege invalidates every unelevated result, so this is the one step
+    # allowed to abort the experiment.
+    # One control per isolation mode the main phase measures. Without the argon
+    # control an unelevated argon failure could equally be an argon-path defect in
+    # the exported layer, and the record could not tell the two apart.
+    foreach ($mode in @('hyperv', 'process')) {
+        if (-not (Invoke-Step -Title "ElevatedControlBoot($mode)" -MustPass -CommandArgs @('run', '--isolation', $mode, '--layer', $exported, '--id', $containerId))) {
+            Write-Both "CONTROL FAILED: the layer does not boot as --isolation $mode even elevated."
+            Write-Both 'Something is wrong with the layer or the host, not with privileges; no conclusion may'
+            Write-Both 'be drawn about privileges from this run. Stopping.'
+            exit 1
+        }
+    }
+
+    # Measured, not a control: its failure would mean the hypothesis is false,
+    # not that the experiment is invalid. It runs here so the unelevated result
+    # below it has an elevated counterpart to be read against.
+    [void](Invoke-Step -Title 'ElevatedXenonBoot(template scratch)' -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $exported, '--id', $containerId))
+
+    [void](Invoke-Step -Title 'ElevatedMatrix' -CommandArgs @('privilege', '--layer', $exported, '--id', $containerId))
+
+    Write-Both ''
+    Write-Both '=== Setup phase verdict ==='
+    $script:steps | ForEach-Object { Write-Both ("  {0}  elevated={1} exit={2}" -f $_.Step, $_.Elevated, $_.Exit) }
+    exit ((@($script:steps | Where-Object { $_.MustPass -and -not $_.Ok }).Count -gt 0) ? 1 : 0)
+}
+
+# ----------------------------------------------------------------- main phase --
+if ($isElevated) {
+    Write-Both ''
+    Write-Both 'REFUSING TO RUN: this harness must start UNELEVATED — an unelevated session is the'
+    Write-Both 'condition under test. Start it from a normal shell; it will prompt for elevation'
+    Write-Both 'once, for the setup phase only.'
+    exit 2
+}
+
+# Build BEFORE anything is measured. The log records the source commit, so a run
+# against a stale bin\Debug binary would attribute results to code that never ran
+# — the exact class of unverified claim this harness exists to avoid. Built here,
+# unelevated, so no Administrator-owned artifacts land in obj\ or bin\.
+Write-Both ''
+Write-Both '=== Build ==='
+dotnet build (Join-Path $PSScriptRoot 'HcsContainerSpike.csproj') -v q --nologo 2>&1 | Tee-Object -FilePath $LogPath -Append
+if ($LASTEXITCODE -ne 0) {
+    Write-Both 'Build failed — aborting rather than measuring a stale binary.'
+    exit 1
+}
+if (-not (Test-Path $exe)) {
+    Write-Both "Build reported success but $exe is missing — aborting."
+    exit 1
+}
+Write-Both "exe: $exe (built $((Get-Item $exe).LastWriteTime.ToString('o')))"
+
+# The layer is measured where it lives; setup only changes its ACL.
+$exported = $Layer
+
+if ($SkipSetup) {
+    Write-Both ''
+    Write-Both "Skipping setup: reusing $exported as-is. No control boot and no elevated comparison in this record."
+    if (-not $exported) {
+        Write-Both '…but no -Layer was given, so there is nothing to probe. Pass -Layer.'
+        exit 2
+    }
+    if (-not (Test-Path (Join-Path $exported 'Files'))) {
+        Write-Both "…but $exported has no readable Files\ — nothing to probe. Rerun without -SkipSetup to grant access."
+        exit 2
+    }
+}
+else {
+    Write-Both ''
+    Write-Both '=== Setup (elevating: expect one UAC prompt) ==='
+    # Start-Process joins -ArgumentList with spaces and does NOT quote, so every
+    # path is quoted here; an unquoted "C:\Program Files\..." would silently
+    # become two arguments and the child would misparse its own store path.
+    $q = { param($v) '"' + $v + '"' }
+    $childArgs = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', (& $q $PSCommandPath),
+        '-Phase', 'setup',
+        '-GrantAccount', (& $q ([Security.Principal.WindowsIdentity]::GetCurrent().Name)),
+        '-LogPath', (& $q $LogPath)
+    )
+    if ($Layer) { $childArgs += @('-Layer', (& $q $Layer)) }
+
+    if (-not $Layer) {
+        Write-Both 'ERROR: -Layer is required. The setup phase grants access to a layer IN PLACE, so the'
+        Write-Both 'unelevated session must know which layer it will then measure. Pass the Docker'
+        Write-Both 'windowsfilter directory of a base image carrying Files\ and UtilityVM\Files.'
+        exit 2
+    }
+
+    $child = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
+    Write-Both "--- setup phase exit: $($child.ExitCode)"
+    if ($child.ExitCode -ne 0) {
+        Write-Both 'Setup phase failed (see its output above, written to the shared log). Stopping:'
+        Write-Both 'without a successful export and control boot there is nothing valid to measure.'
+        exit 1
+    }
+    $script:steps += [pscustomobject]@{ Step = 'SetupPhase(elevated)'; Elevated = $true; Exit = $child.ExitCode; MustPass = $true; Ok = $true }
+}
+
+# Everything below is MEASUREMENT. Failures here are the finding.
+# REQUIRED, and required HERE rather than in the setup phase: this is the only
+# context in which it can fail. Run elevated it would pass whether or not the
+# grant did anything, since an elevated token reads the layer regardless — a
+# verifier that cannot fail proves nothing. It also catches the wrong-principal
+# case, where the grant succeeded but named an account that is not this one.
+if (-not (Invoke-Step -Title 'UnelevatedAccessVerify' -MustPass -CommandArgs @('verify', '--layer', $exported))) {
+    Write-Both 'The layer is not reachable from this unelevated session, so nothing below could'
+    Write-Both 'distinguish a privilege result from a plain access failure. Stopping.'
+    exit 1
+}
+
+[void](Invoke-Step -Title 'UnelevatedMatrix' -CommandArgs @('privilege', '--layer', $exported, '--id', $containerId))
+
+# ASSERTED, because these are the results docs/container-privilege-matrix.md and
+# the README now state as fact. Measuring them without asserting would let the
+# documented answer rot silently. Argon is asserted to FAIL (exit 2, gated at
+# ActivateLayer with ERROR_PRIVILEGE_NOT_HELD) — an unexpected pass there is just
+# as much a drift as an unexpected xenon failure, and would mean the documented
+# privilege boundary has moved.
+[void](Invoke-Step -Title 'UnelevatedArgonBoot' -ExpectedExit 2 `
+    -ExpectOutputMatch 'ActivateLayer: hr=0x80070522' `
+    -CommandArgs @('run', '--isolation', 'process', '--layer', $exported, '--id', $containerId))
+[void](Invoke-Step -Title 'UnelevatedXenonBoot(api scratch)' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'hyperv', '--layer', $exported, '--id', $containerId))
+[void](Invoke-Step -Title 'UnelevatedXenonBoot(template scratch)' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $exported, '--id', $containerId))
+
+Write-Both ''
+Write-Both '=== Verdict ==='
+$script:steps | ForEach-Object {
+    $tag = ($null -eq $_.Ok) ? 'MEAS' : ($_.Ok ? 'OK  ' : 'FAIL')
+    Write-Both ("{0}  {1,-40} elevated={2,-5} exit={3}" -f $tag, $_.Step, $_.Elevated, $_.Exit)
+}
+Write-Both ''
+Write-Both 'Reading this record:'
+Write-Both '  - OK/FAIL mark steps carrying an expectation: the grant, the elevated controls,'
+Write-Both '    and the unelevated boots whose results the docs now assert. A FAIL voids the run'
+Write-Both '    OR means a documented result has drifted — including argon unexpectedly PASSING,'
+Write-Both '    which would mean the privilege boundary moved.'
+Write-Both '  - MEAS marks MEASURED steps, which have no expected exit code. exit 0 means that'
+Write-Both '    path needs no elevation; a nonzero exit names the first call that gated it —'
+Write-Both '    read the matrix rows above. Neither outcome is a pass or a failure.'
+Write-Both '  - SKIP rows in a matrix were never attempted and prove nothing either way.'
+Write-Both ''
+Write-Both "log: $LogPath"
+
+# Only required steps can fail the run; a measured nonzero exit is the finding.
+$requiredFailed = @($script:steps | Where-Object { $_.MustPass -and -not $_.Ok })
+exit ($requiredFailed.Count -gt 0 ? 1 : 0)
