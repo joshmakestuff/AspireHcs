@@ -95,11 +95,7 @@ internal static partial class Program
         int budgetSeconds = OptInt(args, "--seconds", 60);
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
-        string isolation = Opt(args, "--isolation") ?? "process";
-        if (isolation is not ("process" or "hyperv"))
-        {
-            throw new ArgumentException($"--isolation must be 'process' or 'hyperv', got '{isolation}'");
-        }
+        string isolation = IsolationOpt(args);
 
         // The read-only layer chain, topmost first. Docker's windowsfilter store
         // records parents in layerchain.json; a base image has none. Reading it
@@ -217,7 +213,7 @@ internal static partial class Program
                     Console.WriteLine();
                     Console.WriteLine($"Container '{containerId}' is running. Exiting abruptly WITHOUT terminate/close " +
                                       $"(ShouldTerminateOnLastHandleClosed test). Run 'list --absent {containerId}' next to " +
-                                      $"verify the container died, then 'cleanup --work {workDir}' to release the sandbox layer.");
+                                      $"verify the container died, then 'cleanup --id {containerId} --work {workDir}' to release the sandbox layer.");
                     PrintSummary();
                     Environment.Exit(99);
                 }
@@ -420,7 +416,7 @@ internal static partial class Program
     {
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
-        if ((Opt(args, "--isolation") ?? "process") == "hyperv")
+        if (IsolationOpt(args) == "hyperv")
         {
             // A xenon sandbox was never host-prepared (the guest consumed its
             // sandbox.vhdx), so unprepare/deactivate do not apply.
@@ -496,7 +492,7 @@ internal static partial class Program
 
     private static string BuildContainerConfig(IReadOnlyList<(string Path, Guid Id)> layers, string volumePath) => new JsonObject
     {
-        ["SchemaVersion"] = new JsonObject { ["Major"] = 2, ["Minor"] = 1 },
+        ["SchemaVersion"] = SchemaV21(),
         ["Owner"] = "AspireHcs",
         ["ShouldTerminateOnLastHandleClosed"] = true,
         ["Container"] = new JsonObject
@@ -558,6 +554,17 @@ internal static partial class Program
         }
         string flat = text.ReplaceLineEndings(" ");
         return flat.Length <= 200 ? flat : flat[..200] + "…";
+    }
+
+    /// <summary>Single validated parse of --isolation, shared by every mode that
+    /// honors it — a typo must fail loud, never silently select a cleanup or run
+    /// path for the wrong isolation.</summary>
+    private static string IsolationOpt(string[] args)
+    {
+        string isolation = Opt(args, "--isolation") ?? "process";
+        return isolation is "process" or "hyperv"
+            ? isolation
+            : throw new ArgumentException($"--isolation must be 'process' or 'hyperv', got '{isolation}'");
     }
 
     private static string? Opt(string[] args, string name)
