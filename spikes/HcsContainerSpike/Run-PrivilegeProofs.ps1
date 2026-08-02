@@ -13,10 +13,22 @@ condition under test, and it mirrors the developer story being proposed
 exactly one phase, via Start-Process -Verb RunAs, and that phase is the setup:
 
   setup (ELEVATED, one UAC prompt)
-    1. export       lift a base layer out of Docker's Administrators-ACLed
-                    store into a store the developer owns
-    2. CONTROL      boot the exported layer elevated
+    1. grant        make the layer readable by the current user IN PLACE
+    2. CONTROL      boot that layer elevated, once per isolation mode
     3. matrix       record the storage-call matrix at full elevation
+
+Granting in place rather than copying the layer elsewhere is deliberate, and
+was arrived at empirically: the first design exported the layer into a store
+the developer owns, and ExportLayer returned 0x80070057 against a base layer.
+hcsshim says why — NewLayerReader branches away from ExportLayer entirely when
+there are no parent layers ("This is a base layer. It gets exported
+differently."). Materializing a base layer into your own store is the OCI-tar
+import path, i.e. image-acquisition work, not this question.
+
+Granting in place is also the cleaner experiment: #33 asks whether the gate is
+the wclayer API or the store ACL, and this changes exactly that one variable
+while the layer bits stay byte-for-byte the ones already proven to boot green
+as both argon and xenon on this host.
 
   main (UNELEVATED, this session)
     4. matrix       the same storage calls, unelevated, against the same layer
@@ -28,14 +40,14 @@ exactly one phase, via Start-Process -Verb RunAs, and that phase is the setup:
                     substitutes for CreateSandboxLayer, the Hyper-V-isolated path
                     contains no privilege-gated storage call at all.
 
-Three steps have hard expectations, all in the setup phase: the export itself,
+Three steps have hard expectations, all in the setup phase: the grant itself,
 and an elevated control boot of EACH isolation mode that the main phase then
-measures unelevated. If a freshly exported layer will not boot with full
-privilege, the export is broken and every unelevated result below it is
-meaningless — so the script stops rather than reporting privilege findings drawn
-from a bad layer. Controls must cover both isolation modes: without an elevated
-argon control, an unelevated argon failure is indistinguishable from an
-argon-path defect in the exported layer.
+measures unelevated. If the layer will not boot with full privilege, something
+is wrong with the layer or the host rather than with privileges, and every
+unelevated result below it is meaningless — so the script stops rather than
+reporting privilege findings drawn from a bad layer. Controls must cover both
+isolation modes: without an elevated argon control, an unelevated argon failure
+is indistinguishable from an argon-path defect in the layer itself.
 
 The template-scratch path is run at BOTH privilege levels, but neither run is a
 control — it tests the #33 experiment-2 hypothesis, and a hypothesis that turns
@@ -54,13 +66,10 @@ OK or FAIL, because a measured nonzero exit is a result, not a failure — and
 showing it as OK would misreport the very thing being measured.
 
 .PARAMETER Layer
-Source layer in Docker's store. Omitted, the elevated phase auto-detects the
-single windowsfilter directory carrying both Files\ and UtilityVM\Files.
-
-.PARAMETER Store
-Root of the developer-owned layer store. Default %LOCALAPPDATA%\AspireHcs\layers.
-Resolved in the UNELEVATED session and passed explicitly to the elevated phase,
-so the two can never disagree about which profile they mean.
+The layer to grant access to and then measure, in Docker's windowsfilter store.
+REQUIRED: the layer is measured where it lives, so the unelevated session must
+know which one it will probe. Pass a base image directory carrying both Files\
+and UtilityVM\Files.
 
 .PARAMETER LogPath
 Shared log. Default %TEMP%\AspireHcsPrivilegeProofs\privilege-proofs-<stamp>.log
@@ -69,14 +78,13 @@ Shared log. Default %TEMP%\AspireHcsPrivilegeProofs\privilege-proofs-<stamp>.log
 Internal. 'setup' is what the elevated child runs; leave unset.
 
 .PARAMETER SkipSetup
-Reuse a layer exported by an earlier run — no UAC prompt, no elevated control.
+Reuse a layer already granted by an earlier run — no UAC prompt, no elevated control.
 The record is then missing its control and its elevated comparison; the verdict
 says so.
 #>
 [CmdletBinding()]
 param(
     [string]$Layer,
-    [string]$Store,
     [string]$LogPath,
     [ValidateSet('setup')][string]$Phase,
     [switch]$SkipSetup
@@ -86,9 +94,6 @@ $ErrorActionPreference = 'Stop'
 $exe = Join-Path $PSScriptRoot 'bin\Debug\net10.0-windows10.0.17763.0\HcsContainerSpike.exe'
 $containerId = 'AspireHcsPrivilegeProbe'
 
-if (-not $Store) {
-    $Store = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AspireHcs\layers'
-}
 if (-not $LogPath) {
     $logDir = Join-Path $env:TEMP 'AspireHcsPrivilegeProofs'
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -115,7 +120,14 @@ function Invoke-Step {
     Write-Both ''
     Write-Both "=== $Title (elevated=$isElevated) ==="
     Write-Both "> HcsContainerSpike $($CommandArgs -join ' ')"
-    & $exe @CommandArgs 2>&1 | Tee-Object -FilePath $LogPath -Append
+    # Out-Host, not a bare Tee-Object: Tee-Object PASSES ITS INPUT THROUGH, so the
+    # command's output would become part of this function's return value. Callers
+    # do `if (-not (Invoke-Step ...))`, and a non-empty array is truthy in
+    # PowerShell — so every such guard silently never fired. Observed live: the
+    # setup phase ran all three control boots after the export had already failed.
+    # Out-Host writes to the console and emits nothing, leaving the boolean below
+    # as the only pipeline output.
+    & $exe @CommandArgs 2>&1 | Tee-Object -FilePath $LogPath -Append | Out-Host
     $code = $LASTEXITCODE
     $script:steps += [pscustomobject]@{
         Step     = $Title
@@ -135,7 +147,6 @@ Write-Both "privilege proof run $(Get-Date -Format o)"
 Write-Both "log:   $LogPath"
 Write-Both "host:  $([Environment]::OSVersion.VersionString) as $(whoami)"
 Write-Both "phase: $($Phase ? $Phase : 'main')  elevated: $isElevated  hyperVAdmin: $($principal.IsInRole((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-578'))))"
-Write-Both "store: $Store"
 try { Write-Both "commit: $(git -C $PSScriptRoot rev-parse --short HEAD) ($(git -C $PSScriptRoot branch --show-current))" } catch { }
 
 # ---------------------------------------------------------------- setup phase --
@@ -169,12 +180,14 @@ if ($Phase -eq 'setup') {
     }
     else { Write-Both "source layer (given): $Layer" }
 
-    if (-not (Invoke-Step -Title 'Export' -MustPass -CommandArgs @('export', '--layer', $Layer, '--store', $Store, '--name', 'base'))) {
-        Write-Both 'Export failed — nothing downstream would mean anything. Stopping.'
+    if (-not (Invoke-Step -Title 'Grant' -MustPass -CommandArgs @('grant', '--layer', $Layer))) {
+        Write-Both 'Grant failed — nothing downstream would mean anything. Stopping.'
         exit 1
     }
 
-    $exported = Join-Path $Store 'base'
+    # The layer stays where it is; only its ACL changed. That is the single
+    # variable #33 asks about, and these are bits already proven to boot green.
+    $exported = $Layer
 
     # THE CONTROL. A freshly exported layer that will not boot with full
     # privilege invalidates every unelevated result, so this is the one step
@@ -184,8 +197,9 @@ if ($Phase -eq 'setup') {
     # the exported layer, and the record could not tell the two apart.
     foreach ($mode in @('hyperv', 'process')) {
         if (-not (Invoke-Step -Title "ElevatedControlBoot($mode)" -MustPass -CommandArgs @('run', '--isolation', $mode, '--layer', $exported, '--id', $containerId))) {
-            Write-Both "CONTROL FAILED: the exported layer does not boot as --isolation $mode even elevated."
-            Write-Both 'The export is broken; no conclusion may be drawn about privileges from this run. Stopping.'
+            Write-Both "CONTROL FAILED: the layer does not boot as --isolation $mode even elevated."
+            Write-Both 'Something is wrong with the layer or the host, not with privileges; no conclusion may'
+            Write-Both 'be drawn about privileges from this run. Stopping.'
             exit 1
         }
     }
@@ -229,13 +243,18 @@ if (-not (Test-Path $exe)) {
 }
 Write-Both "exe: $exe (built $((Get-Item $exe).LastWriteTime.ToString('o')))"
 
-$exported = Join-Path $Store 'base'
+# The layer is measured where it lives; setup only changes its ACL.
+$exported = $Layer
 
 if ($SkipSetup) {
     Write-Both ''
-    Write-Both "Skipping setup: reusing $exported. No control boot and no elevated comparison in this record."
+    Write-Both "Skipping setup: reusing $exported as-is. No control boot and no elevated comparison in this record."
+    if (-not $exported) {
+        Write-Both '…but no -Layer was given, so there is nothing to probe. Pass -Layer.'
+        exit 2
+    }
     if (-not (Test-Path (Join-Path $exported 'Files'))) {
-        Write-Both "…but $exported has no Files\ — nothing to probe. Rerun without -SkipSetup."
+        Write-Both "…but $exported has no readable Files\ — nothing to probe. Rerun without -SkipSetup to grant access."
         exit 2
     }
 }
@@ -250,10 +269,16 @@ else {
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', (& $q $PSCommandPath),
         '-Phase', 'setup',
-        '-Store', (& $q $Store),
         '-LogPath', (& $q $LogPath)
     )
     if ($Layer) { $childArgs += @('-Layer', (& $q $Layer)) }
+
+    if (-not $Layer) {
+        Write-Both 'ERROR: -Layer is required. The setup phase grants access to a layer IN PLACE, so the'
+        Write-Both 'unelevated session must know which layer it will then measure. Pass the Docker'
+        Write-Both 'windowsfilter directory of a base image carrying Files\ and UtilityVM\Files.'
+        exit 2
+    }
 
     $child = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
     Write-Both "--- setup phase exit: $($child.ExitCode)"

@@ -66,6 +66,7 @@ internal static partial class Program
                     "list" => List(args),
                     "terminate" => Terminate(containerId),
                     "export" => Export(args),
+                    "grant" => Grant(args),
                     "privilege" => Privilege(args),
                     _ => Usage(),
                 };
@@ -632,9 +633,13 @@ internal static partial class Program
               list      [--absent <id>]      enumerate HCS compute systems; with --absent,
                                              fail (exit 5) if <id> is still enumerable
               terminate [--id <containerId>]   terminate a leftover spike container
-              export    --layer <dir> [--store <dir>] [--name <layerName>]   ELEVATED, one-time: lift a base
-                                             layer out of Docker's Administrators-ACLed store into a store
-                                             the developer owns, via ExportLayer/ImportLayer (#33)
+              grant     --layer <dir> [--revoke]     ELEVATED, one-time: grant the current user read
+                                             access to a layer directory IN PLACE, isolating the #33
+                                             question (API gate vs store ACL) by changing only the ACL
+              export    --layer <dir> [--store <dir>] [--name <layerName>]   ELEVATED: lift a layer into a
+                                             store the developer owns via ExportLayer/ImportLayer. NOTE:
+                                             refuses base layers — ExportLayer does not support them
+                                             (0x80070057, measured); use `grant` for those
               privilege --layer <dir> [--work <dir>] [--id <containerId>]    record every layer-storage
                                              call's own HRESULT at the current privilege level, continuing
                                              past failures; SKIP marks calls never attempted (#33)
