@@ -28,11 +28,23 @@ exactly one phase, via Start-Process -Verb RunAs, and that phase is the setup:
                     substitutes for CreateSandboxLayer, the Hyper-V-isolated path
                     contains no privilege-gated storage call at all.
 
-Exactly ONE step has a hard expectation: the elevated control (step 2). If a
-freshly exported layer will not boot even with full privilege, the export is
-broken and every unelevated result below it is meaningless — so the script stops
-rather than reporting privilege findings drawn from a bad layer. Every other
-step is MEASURED, not asserted: an unelevated failure is the datum, not a bug.
+Three steps have hard expectations, all in the setup phase: the export itself,
+and an elevated control boot of EACH isolation mode that the main phase then
+measures unelevated. If a freshly exported layer will not boot with full
+privilege, the export is broken and every unelevated result below it is
+meaningless — so the script stops rather than reporting privilege findings drawn
+from a bad layer. Controls must cover both isolation modes: without an elevated
+argon control, an unelevated argon failure is indistinguishable from an
+argon-path defect in the exported layer.
+
+The elevated template-scratch run is deliberately NOT a control. It tests the
+#33 experiment-2 hypothesis, and a hypothesis that turns out false is a finding,
+not an invalid experiment.
+
+Every other step is MEASURED, not asserted: an unelevated failure is the datum,
+not a bug. Measured steps are reported as MEAS with their exit code and never as
+OK or FAIL, because a measured nonzero exit is a result, not a failure — and
+showing it as OK would misreport the very thing being measured.
 
 .PARAMETER Layer
 Source layer in Docker's store. Omitted, the elevated phase auto-detects the
@@ -103,7 +115,10 @@ function Invoke-Step {
         Elevated = $isElevated
         Exit     = $code
         MustPass = [bool]$MustPass
-        Ok       = (-not $MustPass) -or ($code -eq 0)
+        # Only required steps carry a pass/fail verdict. Measured steps get $null
+        # so the verdict table can render them as MEAS: a measured nonzero exit is
+        # the finding, and printing it as OK (or as FAIL) would misreport it.
+        Ok       = $MustPass ? ($code -eq 0) : $null
     }
     Write-Both ("--- {0}: exit {1}{2}" -f $Title, $code, ($MustPass ? " (required 0)" : " (measured, no expectation)"))
     return ($code -eq 0)
@@ -120,6 +135,15 @@ try { Write-Both "commit: $(git -C $PSScriptRoot rev-parse --short HEAD) ($(git 
 # Runs elevated, launched by the main phase below (or directly, for debugging).
 if ($Phase -eq 'setup') {
     if (-not $isElevated) { Write-Both 'setup phase requires elevation.'; exit 2 }
+
+    # Deliberately does NOT build: the unelevated parent already did, and building
+    # here would leave Administrator-owned obj\/bin\ artifacts that break the next
+    # unelevated build. Assert the binary the parent produced is present instead.
+    if (-not (Test-Path $exe)) {
+        Write-Both "setup phase: $exe is missing — the unelevated phase should have built it. Stopping."
+        exit 2
+    }
+    Write-Both "exe:   $exe (built $((Get-Item $exe).LastWriteTime.ToString('o')))"
 
     if (-not $Layer) {
         $dockerStore = 'C:\ProgramData\Docker\windowsfilter'
@@ -148,10 +172,15 @@ if ($Phase -eq 'setup') {
     # THE CONTROL. A freshly exported layer that will not boot with full
     # privilege invalidates every unelevated result, so this is the one step
     # allowed to abort the experiment.
-    if (-not (Invoke-Step -Title 'ElevatedControlBoot(xenon)' -MustPass -CommandArgs @('run', '--isolation', 'hyperv', '--layer', $exported, '--id', $containerId))) {
-        Write-Both 'CONTROL FAILED: the exported layer does not boot even elevated. The export is broken;'
-        Write-Both 'no conclusion may be drawn about privileges from this run. Stopping.'
-        exit 1
+    # One control per isolation mode the main phase measures. Without the argon
+    # control an unelevated argon failure could equally be an argon-path defect in
+    # the exported layer, and the record could not tell the two apart.
+    foreach ($mode in @('hyperv', 'process')) {
+        if (-not (Invoke-Step -Title "ElevatedControlBoot($mode)" -MustPass -CommandArgs @('run', '--isolation', $mode, '--layer', $exported, '--id', $containerId))) {
+            Write-Both "CONTROL FAILED: the exported layer does not boot as --isolation $mode even elevated."
+            Write-Both 'The export is broken; no conclusion may be drawn about privileges from this run. Stopping.'
+            exit 1
+        }
     }
 
     [void](Invoke-Step -Title 'ElevatedMatrix' -CommandArgs @('privilege', '--layer', $exported, '--id', $containerId))
@@ -159,7 +188,7 @@ if ($Phase -eq 'setup') {
     Write-Both ''
     Write-Both '=== Setup phase verdict ==='
     $script:steps | ForEach-Object { Write-Both ("  {0}  elevated={1} exit={2}" -f $_.Step, $_.Elevated, $_.Exit) }
-    exit (($script:steps | Where-Object { -not $_.Ok }) ? 1 : 0)
+    exit ((@($script:steps | Where-Object { $_.MustPass -and -not $_.Ok }).Count -gt 0) ? 1 : 0)
 }
 
 # ----------------------------------------------------------------- main phase --
@@ -170,6 +199,23 @@ if ($isElevated) {
     Write-Both 'once, for the setup phase only.'
     exit 2
 }
+
+# Build BEFORE anything is measured. The log records the source commit, so a run
+# against a stale bin\Debug binary would attribute results to code that never ran
+# — the exact class of unverified claim this harness exists to avoid. Built here,
+# unelevated, so no Administrator-owned artifacts land in obj\ or bin\.
+Write-Both ''
+Write-Both '=== Build ==='
+dotnet build (Join-Path $PSScriptRoot 'HcsContainerSpike.csproj') -v q --nologo 2>&1 | Tee-Object -FilePath $LogPath -Append
+if ($LASTEXITCODE -ne 0) {
+    Write-Both 'Build failed — aborting rather than measuring a stale binary.'
+    exit 1
+}
+if (-not (Test-Path $exe)) {
+    Write-Both "Build reported success but $exe is missing — aborting."
+    exit 1
+}
+Write-Both "exe: $exe (built $((Get-Item $exe).LastWriteTime.ToString('o')))"
 
 $exported = Join-Path $Store 'base'
 
@@ -216,16 +262,19 @@ else {
 Write-Both ''
 Write-Both '=== Verdict ==='
 $script:steps | ForEach-Object {
-    Write-Both ("{0}  {1,-38} elevated={2,-5} exit={3}" -f ($_.Ok ? 'OK  ' : 'FAIL'), $_.Step, $_.Elevated, $_.Exit)
+    $tag = ($null -eq $_.Ok) ? 'MEAS' : ($_.Ok ? 'OK  ' : 'FAIL')
+    Write-Both ("{0}  {1,-40} elevated={2,-5} exit={3}" -f $tag, $_.Step, $_.Elevated, $_.Exit)
 }
 Write-Both ''
 Write-Both 'Reading this record:'
-Write-Both '  - Required steps (export, elevated control) must be exit 0 or the run is void.'
-Write-Both '  - Unelevated steps are measurements. exit 0 means that path needs no elevation;'
-Write-Both '    a nonzero exit names the first call that gated it — read the matrix rows above.'
+Write-Both '  - OK/FAIL mark REQUIRED steps (export, elevated controls). A FAIL voids the run.'
+Write-Both '  - MEAS marks MEASURED steps, which have no expected exit code. exit 0 means that'
+Write-Both '    path needs no elevation; a nonzero exit names the first call that gated it —'
+Write-Both '    read the matrix rows above. Neither outcome is a pass or a failure.'
 Write-Both '  - SKIP rows in a matrix were never attempted and prove nothing either way.'
 Write-Both ''
 Write-Both "log: $LogPath"
 
-$requiredFailed = @($script:steps | Where-Object { -not $_.Ok })
+# Only required steps can fail the run; a measured nonzero exit is the finding.
+$requiredFailed = @($script:steps | Where-Object { $_.MustPass -and -not $_.Ok })
 exit ($requiredFailed.Count -gt 0 ? 1 : 0)
