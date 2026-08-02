@@ -214,6 +214,7 @@ internal static partial class Program
                         (hr, doc) = op.Wait();
                     }
                     Step("HcsGetComputeSystemProperties(hosted)", hr, doc ?? "");
+                    Console.WriteLine($"--- Hosted container properties document ---\n{doc ?? "(none)"}\n----------------------------------------");
                     ProveHyperVIsolation(hr, doc, uvmId);
 
                     hr = PInvoke.HcsGetComputeSystemProperties(uvm, op.Handle, "{}");
@@ -223,6 +224,7 @@ internal static partial class Program
                         (hr, uvmDoc) = op.Wait();
                     }
                     Step("HcsGetComputeSystemProperties(uvm)", hr, uvmDoc ?? "");
+                    Console.WriteLine($"--- Utility VM properties document ---\n{uvmDoc ?? "(none)"}\n----------------------------------------");
                     ProveUvmIsVirtualMachine(hr, uvmDoc);
 
                     if (orphan)
@@ -276,9 +278,14 @@ internal static partial class Program
         }
     }
 
-    /// <summary>The negative side of the argon ObRoot discriminator (PR #31 left
-    /// it one-sided): a xenon must report SystemType Container with NO host-silo
-    /// ObRoot — its silo lives inside the utility VM, not on the host.</summary>
+    /// <summary>The xenon side of the isolation discriminator, CORRECTED by the
+    /// first elevated run (2026-08-02): a xenon ALSO reports an ObRoot under
+    /// \Silos\ — hosted-system properties are relayed from the guest, where the
+    /// silo does exist — so ObRoot absence (the untested hypothesis PR #31
+    /// recorded) is NOT the xenon witness. The field that discriminates is
+    /// HostingSystemId: absent for argon, naming the hosting UVM for xenon
+    /// (observed populated, so it is hard-required here). ObRoot is recorded as
+    /// data only.</summary>
     private static void ProveHyperVIsolation(HRESULT propertiesHr, string? propertiesDoc, string uvmId)
     {
         string detail;
@@ -295,16 +302,10 @@ internal static partial class Program
                 string? systemType = (string?)props?["SystemType"];
                 string? obRoot = (string?)props?["ObRoot"];
                 string? hostingSystemId = (string?)props?["HostingSystemId"];
-                // A reported HostingSystemId naming a DIFFERENT UVM is affirmative
-                // evidence of a wrong hosting relationship and fails the proof.
-                // Absence merely records that the field is unpopulated for hosted
-                // systems (unknown until the first elevated run) — the isolation
-                // claim itself rests on SystemType + the missing host-silo ObRoot.
                 proved = string.Equals(systemType, "Container", StringComparison.OrdinalIgnoreCase)
-                    && obRoot is null
-                    && (hostingSystemId is null || string.Equals(hostingSystemId, uvmId, StringComparison.OrdinalIgnoreCase));
-                detail = $"SystemType={systemType ?? "(null)"} ObRoot={obRoot ?? "(absent)"} " +
-                         $"HostingSystemId={hostingSystemId ?? "(absent)"} (ours: {uvmId})";
+                    && string.Equals(hostingSystemId, uvmId, StringComparison.OrdinalIgnoreCase);
+                detail = $"SystemType={systemType ?? "(null)"} HostingSystemId={hostingSystemId ?? "(absent)"} " +
+                         $"(ours: {uvmId}) ObRoot={obRoot ?? "(absent)"} [guest-namespace silo; presence does not discriminate]";
             }
             catch (JsonException ex)
             {
