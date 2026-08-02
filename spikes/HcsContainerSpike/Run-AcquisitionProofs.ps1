@@ -1,0 +1,340 @@
+#Requires -Version 7
+<#
+.SYNOPSIS
+    Proves image acquisition end to end (issue #30): pull a Windows base image
+    from an anonymous registry, materialize it into a store AspireHcs owns, and
+    boot it as a Hyper-V-isolated container — with NO Docker and NO ACL surgery.
+
+.DESCRIPTION
+    Run this from a NORMAL (unelevated) shell. It refuses to start elevated,
+    because "what can a developer do without elevation" is the question under
+    test. It prompts for elevation ONCE, for the import phase, whose privilege
+    requirement is itself one of the measured results.
+
+    What the run settles:
+
+      1. Can a developer acquire a base image without Docker and without
+         touching another product's store?  (pull + import, then boot)
+      2. Where exactly is the privilege boundary in acquisition?  Extraction
+         and finalization are measured SEPARATELY, because they are different
+         gates: measured 2026-08-02, unelevated extraction of all 10288
+         entries succeeds while ProcessBaseImage returns 0x80070522.
+      3. Does Hyper-V isolation really lift the host/image build-match
+         constraint?  The ltsc2022 boot (build 20348 on a 26200 host) is the
+         first real test of that claim — MEASURED, since it has never run.
+
+    Steps carrying an expectation are asserted (-MustPass / -ExpectedExit);
+    everything else is MEASURED and rendered MEAS, because a measured nonzero
+    exit is a datum, not a failure.
+
+.PARAMETER Store
+    Layer store root. Defaults to %LOCALAPPDATA%\AspireHcs\layers. Passed
+    EXPLICITLY across the elevation boundary: an env-derived default inside the
+    elevated child would resolve to a different profile whenever UAC elevates
+    by credential rather than consent.
+
+.PARAMETER SkipPull
+    Reuse already-pulled blobs. The pull steps are then absent from the record.
+#>
+[CmdletBinding()]
+param(
+    [string]$Store,
+    [string]$LogPath,
+    [ValidateSet('import')][string]$Phase,
+    [string]$MetadataPath,
+    [switch]$SkipPull
+)
+
+$ErrorActionPreference = 'Stop'
+$exe = Join-Path $PSScriptRoot 'bin\Debug\net10.0-windows10.0.17763.0\HcsContainerSpike.exe'
+$containerId = 'AspireHcsAcquisitionProbe'
+
+# The two fixtures. ltsc2025 matches the host build family and is the one whose
+# boot is ASSERTED; ltsc2022 is deliberately build-MISMATCHED (20348 vs 26200)
+# and is the #32 stretch question, measured for the first time here.
+$images = @(
+    [pscustomobject]@{ Name = 'ltsc2025'; Ref = 'mcr.microsoft.com/windows/nanoserver:ltsc2025'; Matched = $true }
+    [pscustomobject]@{ Name = 'ltsc2022'; Ref = 'mcr.microsoft.com/windows/nanoserver:ltsc2022'; Matched = $false }
+)
+
+if (-not $Store) {
+    $Store = Join-Path $env:LOCALAPPDATA 'AspireHcs\layers'
+}
+if (-not $LogPath) {
+    $logDir = Join-Path $env:TEMP 'AspireHcsAcquisitionProofs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $LogPath = Join-Path $logDir ("acquisition-proofs-{0:yyyyMMdd-HHmmss}.log" -f (Get-Date))
+}
+
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+function Write-Both([string]$Text) {
+    Write-Host $Text
+    Add-Content -Path $LogPath -Value $Text
+}
+
+# Finds the metadata file by its RECORDED image reference rather than by
+# recomputing the spike's file-naming rule here. A second implementation of that
+# rule would be free to drift from the first, and the failure would look like a
+# missing pull rather than a naming disagreement.
+function Get-MetadataPath([string]$ImageRef) {
+    $imagesDir = Join-Path $Store 'images'
+    if (-not (Test-Path $imagesDir)) { return $null }
+    foreach ($file in Get-ChildItem $imagesDir -Filter '*.json' -ErrorAction SilentlyContinue) {
+        try {
+            if ((Get-Content $file.FullName -Raw | ConvertFrom-Json).image -eq $ImageRef) {
+                return $file.FullName
+            }
+        }
+        catch { continue }  # a torn/partial metadata file is not the one we want
+    }
+    return $null
+}
+
+$script:steps = @()
+function Invoke-Step {
+    param(
+        [string]$Title,
+        [string[]]$CommandArgs,
+        [switch]$MustPass,
+        [int]$ExpectedExit = -1,
+        # Exit codes are coarse — `import` returns 2 for a privilege failure and
+        # a diffID mismatch alike — so a claim about a SPECIFIC call needs the
+        # output to witness it.
+        [string]$ExpectOutputMatch
+    )
+    Write-Both ''
+    Write-Both "=== $Title (elevated=$isElevated) ==="
+    Write-Both "> HcsContainerSpike $($CommandArgs -join ' ')"
+    # Out-Host, not a bare Tee-Object: Tee-Object PASSES ITS INPUT THROUGH, so
+    # the command's output would join this function's return value and every
+    # `if (-not (Invoke-Step ...))` guard would silently never fire (a non-empty
+    # array is truthy). Found live in Run-PrivilegeProofs.ps1; do not "simplify".
+    & $exe @CommandArgs 2>&1 | Tee-Object -Variable captured | Tee-Object -FilePath $LogPath -Append | Out-Host
+    $code = $LASTEXITCODE
+
+    $matched = $true
+    if ($ExpectOutputMatch) {
+        $text = ($captured | Out-String)
+        $matched = $text -match $ExpectOutputMatch
+        Write-Both ("--- output assertion /{0}/: {1}" -f $ExpectOutputMatch, ($matched ? 'matched' : 'NOT MATCHED'))
+    }
+    $asserted = $ExpectedExit -ge 0
+    $script:steps += [pscustomobject]@{
+        Step     = $Title
+        Elevated = $isElevated
+        Exit     = $code
+        MustPass = ([bool]$MustPass) -or $asserted
+        Ok       = $asserted ? (($code -eq $ExpectedExit) -and $matched) : ($MustPass ? (($code -eq 0) -and $matched) : $null)
+    }
+    $note = $asserted ? " (asserted $ExpectedExit)" : ($MustPass ? " (required 0)" : " (measured, no expectation)")
+    Write-Both ("--- {0}: exit {1}{2}" -f $Title, $code, $note)
+    return ($code -eq 0)
+}
+
+Write-Both "acquisition proof run $(Get-Date -Format o)"
+Write-Both "log:   $LogPath"
+Write-Both "host:  $([Environment]::OSVersion.VersionString) as $(whoami)"
+Write-Both "store: $Store"
+Write-Both "phase: $($Phase ? $Phase : 'main')  elevated: $isElevated  hyperVAdmin: $($principal.IsInRole((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-578'))))"
+try { Write-Both "commit: $(git -C $PSScriptRoot rev-parse --short HEAD) ($(git -C $PSScriptRoot branch --show-current))" } catch { }
+
+# --------------------------------------------------------------- import phase --
+# Elevated, launched by the main phase. Does exactly the one thing that needs
+# elevation — nothing else, so the rest of the record stays a genuine
+# unelevated measurement.
+if ($Phase -eq 'import') {
+    if (-not $isElevated) { Write-Both 'import phase requires elevation.'; exit 2 }
+    # Deliberately does NOT build: that would leave Administrator-owned obj\/bin\
+    # artifacts and break the next unelevated build.
+    if (-not (Test-Path $exe)) {
+        Write-Both "import phase: $exe is missing — the unelevated phase should have built it. Stopping."
+        exit 2
+    }
+    if (-not $MetadataPath) { Write-Both 'import phase requires -MetadataPath.'; exit 2 }
+
+    # Every path is explicit; nothing is derived from this process's environment,
+    # whose %LOCALAPPDATA% may belong to a different account than the developer's.
+    foreach ($metadata in ($MetadataPath -split ';')) {
+        if (-not (Invoke-Step -Title "ElevatedImport($(Split-Path $metadata -Leaf))" -MustPass `
+                    -CommandArgs @('import', '--metadata', $metadata))) {
+            Write-Both 'Import failed elevated. Nothing downstream can be interpreted — stopping.'
+            exit 1
+        }
+    }
+
+    Write-Both ''
+    Write-Both '=== Import phase verdict ==='
+    $script:steps | ForEach-Object { Write-Both ("  {0}  elevated={1} exit={2}" -f $_.Step, $_.Elevated, $_.Exit) }
+    exit ((@($script:steps | Where-Object { $_.MustPass -and -not $_.Ok }).Count -gt 0) ? 1 : 0)
+}
+
+# ----------------------------------------------------------------- main phase --
+if ($isElevated) {
+    Write-Both ''
+    Write-Both 'REFUSING TO RUN: this harness must start UNELEVATED — an unelevated session is the'
+    Write-Both 'condition under test. Start it from a normal shell; it will prompt for elevation'
+    Write-Both 'once, for the import phase only.'
+    exit 2
+}
+
+# Build first, unelevated: the log records the commit, so measuring a stale
+# binary would attribute results to code that never ran.
+Write-Both ''
+Write-Both '=== Build ==='
+dotnet build (Join-Path $PSScriptRoot 'HcsContainerSpike.csproj') -v q --nologo 2>&1 | Tee-Object -FilePath $LogPath -Append
+if ($LASTEXITCODE -ne 0) {
+    Write-Both 'Build failed — aborting rather than measuring a stale binary.'
+    exit 1
+}
+if (-not (Test-Path $exe)) {
+    Write-Both "Build reported success but $exe is missing — aborting."
+    exit 1
+}
+Write-Both "exe: $exe (built $((Get-Item $exe).LastWriteTime.ToString('o')))"
+
+[void](Invoke-Step -Title 'SelfTest(native building blocks)' -CommandArgs @('selftest'))
+
+# --- 1. Acquire, unelevated -------------------------------------------------
+# REQUIRED: pulling is plain HTTPS plus file writes into the user's own profile.
+# If this needs anything more, the premise of a user-owned store is wrong.
+if (-not $SkipPull) {
+    foreach ($image in $images) {
+        if (-not (Invoke-Step -Title "UnelevatedPull($($image.Name))" -MustPass `
+                    -ExpectOutputMatch '(digest verified|re-hashed and verified)' `
+                    -CommandArgs @('pull', '--image', $image.Ref, '--store', $Store))) {
+            Write-Both 'Pull failed unelevated — the acquisition premise fails here. Stopping.'
+            exit 1
+        }
+    }
+}
+else {
+    Write-Both ''
+    Write-Both 'Skipping pull: reusing existing blobs. The pull steps are absent from this record.'
+}
+
+$metadataPaths = @()
+foreach ($image in $images) {
+    $found = Get-MetadataPath $image.Ref
+    if (-not $found) {
+        Write-Both "No metadata recorded for $($image.Ref) under $Store\images — rerun without -SkipPull."
+        exit 2
+    }
+    $metadataPaths += $found
+}
+
+# What the images actually contain, on the record: the port's handling of
+# symlinks/junctions/ADS is only exercised if the fixtures carry them.
+[void](Invoke-Step -Title 'Inspect(ltsc2025)' -CommandArgs @('inspect', '--metadata', $metadataPaths[0]))
+
+# --- 2. The privilege boundary, measured in three separate places -----------
+# Full-fidelity import unelevated: expected to stop at privilege enablement.
+[void](Invoke-Step -Title 'UnelevatedImport(full fidelity)' `
+        -CommandArgs @('import', '--metadata', $metadataPaths[0]))
+
+# Extraction alone, no security data: measured 2026-08-02 to SUCCEED, which is
+# why it is asserted here — the claim "extraction needs no privileges" now has
+# a test that can fail.
+[void](Invoke-Step -Title 'UnelevatedExtract(--no-security --skip-finalize)' -ExpectedExit 0 `
+        -ExpectOutputMatch 'VerifyDiffId: hr=0x00000000' `
+        -CommandArgs @('import', '--metadata', $metadataPaths[0], '--no-security', '--skip-finalize'))
+
+# Finalize alone on that same entry: the OTHER gate. Asserted to FAIL with
+# ERROR_PRIVILEGE_NOT_HELD — an unexpected pass would mean the boundary moved.
+$extracted = (Get-Content $metadataPaths[0] -Raw | ConvertFrom-Json).expectedDiffId -replace '^sha256:', ''
+[void](Invoke-Step -Title 'UnelevatedFinalize' -ExpectedExit 2 `
+        -ExpectOutputMatch 'ProcessBaseImage: hr=0x80070522' `
+        -CommandArgs @('finalize', '--entry', (Join-Path $Store $extracted)))
+
+# --- 3. Import for real, elevated -------------------------------------------
+Write-Both ''
+Write-Both '=== Import (elevating: expect one UAC prompt) ==='
+# Start-Process joins -ArgumentList with spaces and does NOT quote, so every
+# path is quoted here; an unquoted "C:\Program Files\..." would silently become
+# two arguments and the child would misparse its own store path.
+$q = { param($v) '"' + $v + '"' }
+$childArgs = @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', (& $q $PSCommandPath),
+    '-Phase', 'import',
+    '-Store', (& $q $Store),
+    '-MetadataPath', (& $q ($metadataPaths -join ';')),
+    '-LogPath', (& $q $LogPath)
+)
+$child = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
+Write-Both "--- import phase exit: $($child.ExitCode)"
+if ($child.ExitCode -ne 0) {
+    Write-Both 'Import phase failed (see its output above, in the shared log). Stopping: without a'
+    Write-Both 'materialized store entry there is nothing to boot.'
+    exit 1
+}
+$script:steps += [pscustomobject]@{ Step = 'ImportPhase(elevated)'; Elevated = $true; Exit = $child.ExitCode; MustPass = $true; Ok = $true }
+
+# --- 4. Is the result usable BY THE DEVELOPER, unelevated? ------------------
+# The entry root inherits from %LOCALAPPDATA%, but UtilityVM's SD is restored
+# verbatim from the image and SystemTemplate.vhdx inherits THAT. If the image's
+# descriptor does not grant this user read/traverse, the boots below would fail
+# for ACL reasons that have nothing to do with acquisition — so the reachability
+# of exactly the boot-consumed paths is checked first, and separately.
+$entries = @()
+foreach ($i in 0..($images.Count - 1)) {
+    $diffId = (Get-Content $metadataPaths[$i] -Raw | ConvertFrom-Json).expectedDiffId -replace '^sha256:', ''
+    $entries += [pscustomobject]@{ Image = $images[$i]; Path = (Join-Path $Store $diffId) }
+}
+foreach ($entry in $entries) {
+    if (-not (Invoke-Step -Title "UnelevatedVerify($($entry.Image.Name))" -MustPass `
+                -CommandArgs @('verify', '--layer', $entry.Path))) {
+        Write-Both ''
+        Write-Both 'The imported entry is NOT reachable from this unelevated session. That is a real'
+        Write-Both 'finding about restored security descriptors, not a harness error: record which'
+        Write-Both 'SufficiencyProbe rows failed. A store AspireHcs owns was supposed to need no ACL'
+        Write-Both 'work at all; if it does, the import must grant it explicitly.'
+        exit 1
+    }
+}
+
+# --- 5. Boot what we acquired, unelevated ----------------------------------
+# ASSERTED for the build-matched image: acquisition -> boot with no Docker and
+# no ACL surgery is the claim this whole spike exists to establish.
+$matched = ($entries | Where-Object { $_.Image.Matched })[0]
+# The output assertion names the SUCCEEDING proof line, not merely the step:
+# "GuestExecProof" alone appears on failure too, so matching it would assert
+# nothing the exit code had not already decided.
+[void](Invoke-Step -Title 'UnelevatedXenonBoot(own store, ltsc2025)' -ExpectedExit 0 `
+        -ExpectOutputMatch 'GuestExecProof\(stdout\): hr=0x00000000' `
+        -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $matched.Path, '--id', $containerId))
+
+# MEASURED, and the headline unknown: a 20348 guest on a 26200 host. The claim
+# that Hyper-V isolation lifts the build-match constraint has never been tested
+# on this host, so this row carries no expectation in either direction.
+$mismatched = ($entries | Where-Object { -not $_.Image.Matched })[0]
+[void](Invoke-Step -Title 'UnelevatedXenonBoot(BUILD-MISMATCHED ltsc2022)' `
+        -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $mismatched.Path, '--id', $containerId))
+
+# MEASURED: argon on our own store. Expected to gate at ActivateLayer exactly as
+# it does on Docker's store — which would show the gate is a privilege, not
+# anything about where the layer lives.
+[void](Invoke-Step -Title 'UnelevatedArgonBoot(own store)' `
+        -CommandArgs @('run', '--isolation', 'process', '--layer', $matched.Path, '--id', $containerId))
+
+Write-Both ''
+Write-Both '=== Verdict ==='
+$script:steps | ForEach-Object {
+    $tag = ($null -eq $_.Ok) ? 'MEAS' : ($_.Ok ? 'OK  ' : 'FAIL')
+    Write-Both ("{0}  {1,-46} elevated={2,-5} exit={3}" -f $tag, $_.Step, $_.Elevated, $_.Exit)
+}
+Write-Both ''
+Write-Both 'Reading this record:'
+Write-Both '  - OK/FAIL mark steps carrying an expectation: the unelevated pull and verify, the'
+Write-Both '    elevated import, the extraction/finalize privilege boundary, and the ltsc2025'
+Write-Both '    boot. A FAIL voids the run OR means a documented result has drifted — including'
+Write-Both '    UnelevatedFinalize unexpectedly PASSING, which would mean the boundary moved.'
+Write-Both '  - MEAS marks measured steps with no expected exit. The build-mismatched ltsc2022'
+Write-Both '    boot is the one that matters: exit 0 answers #32''s stretch question YES, a'
+Write-Both '    nonzero exit names the call that stopped it. Neither is a pass or a failure.'
+Write-Both ''
+Write-Both "log: $LogPath"
+
+$requiredFailed = @($script:steps | Where-Object { $_.MustPass -and -not $_.Ok })
+exit ($requiredFailed.Count -gt 0 ? 1 : 0)
