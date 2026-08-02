@@ -5,6 +5,8 @@ HcsWaitForOperationResultAndProcessInfo
 HcsCreateComputeSystem
 HcsStartComputeSystem
 HcsTerminateComputeSystem
+HcsModifyComputeSystem
+HcsGrantVmAccess
 HcsCloseComputeSystem
 HcsGetComputeSystemProperties
 HcsEnumerateComputeSystems

@@ -1,18 +1,24 @@
 // Spike for issue #30: boot a process-isolated Windows container from a
 // hand-materialized layer directory via HcsCreateComputeSystem, run a process
 // in it, and record, per privilege level, the actual HRESULT of every layer
-// and HCS call. Modes:
+// and HCS call. Extended for issue #32 with a Hyper-V-isolated (xenon) mode
+// that boots the same layer directory inside a utility VM (Program.Xenon.cs).
+// Modes:
 //
 //   run     --layer <dir>  create a scratch layer over <dir>, prepare the layer
 //                          stack, create + start the container, exec --command,
 //                          capture stdio, terminate, clean up
 //   orphan  --layer <dir>  create + start, then exit abruptly WITHOUT terminating,
 //                          to test ShouldTerminateOnLastHandleClosed for containers
+//                          (with --isolation hyperv: for the container AND its UVM)
 //   cleanup [--work <dir>] unprepare/deactivate/destroy a leftover sandbox layer
+//                          (with --isolation hyperv: destroy sandbox + UVM scratch)
 //   list                   enumerate HCS compute systems
-//   terminate [--id <id>]  open + terminate a leftover spike container
+//   terminate [--id <id>]  open + terminate a leftover spike container (for hyperv
+//                          leftovers run twice: --id <id> and --id <id>-uvm)
 //
-// Options: --id <containerId> --command <cmdline> --seconds <io/exit budget> --work <dir>
+// Options: --id <containerId> --command <cmdline> --seconds <io/exit budget>
+//          --work <dir> --isolation <process|hyperv>
 // Exit codes: 0 success; 2 layer/create/start failure; 3 exec failure; 4 a step
 // after an otherwise-successful run failed (teardown or post-teardown probe);
 // 5 list --absent found the id still enumerable; 64 usage.
@@ -33,7 +39,7 @@ using Windows.Win32.System.HostComputeSystem;
 
 namespace HcsContainerSpike;
 
-internal static class Program
+internal static partial class Program
 {
     private const string DefaultContainerId = "AspireHcsContainerSpike";
     private static readonly HRESULT ProbeFailed = new(unchecked((int)0x80004005)); // E_FAIL for locally-judged proof steps
@@ -89,6 +95,11 @@ internal static class Program
         int budgetSeconds = OptInt(args, "--seconds", 60);
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
+        string isolation = Opt(args, "--isolation") ?? "process";
+        if (isolation is not ("process" or "hyperv"))
+        {
+            throw new ArgumentException($"--isolation must be 'process' or 'hyperv', got '{isolation}'");
+        }
 
         // The read-only layer chain, topmost first. Docker's windowsfilter store
         // records parents in layerchain.json; a base image has none. Reading it
@@ -126,6 +137,11 @@ internal static class Program
                 return 2;
             }
             layerIds.Add((layer, guid));
+        }
+
+        if (isolation == "hyperv")
+        {
+            return RunXenon(containerId, chain, layerIds, command, budgetSeconds, workDir, orphan);
         }
 
         PrecleanSandbox(sandboxPath);
@@ -232,22 +248,7 @@ internal static class Program
                 Directory.Exists(sandboxPath) ? $"{sandboxPath} still exists" : "sandbox directory removed");
             if (created)
             {
-                using var probeOp = new HcsOperation();
-                HRESULT probeHr = PInvoke.HcsEnumerateComputeSystems("{}", probeOp.Handle);
-                string? enumDoc = null;
-                if (probeHr.Succeeded)
-                {
-                    (probeHr, enumDoc) = probeOp.Wait();
-                }
-                bool? present = ContainsComputeSystemId(enumDoc, containerId);
-                Step("ComputeSystemGoneProbe",
-                    probeHr.Failed ? probeHr : present is null or true ? ProbeFailed : default,
-                    present switch
-                    {
-                        null => "enumeration document missing or unparseable — cannot judge",
-                        true => $"'{containerId}' still enumerable",
-                        false => $"'{containerId}' absent from enumeration",
-                    });
+                ProbeComputeSystemGone(containerId);
             }
         }
     }
@@ -277,6 +278,28 @@ internal static class Program
             }
         }
         Step("ProcessIsolationProof(properties)", proved ? default : ProbeFailed, detail);
+    }
+
+    /// <summary>Asserts via enumeration that a compute system no longer exists,
+    /// recording the verdict as a summary step that can fail the run.</summary>
+    private static void ProbeComputeSystemGone(string id)
+    {
+        using var probeOp = new HcsOperation();
+        HRESULT probeHr = PInvoke.HcsEnumerateComputeSystems("{}", probeOp.Handle);
+        string? enumDoc = null;
+        if (probeHr.Succeeded)
+        {
+            (probeHr, enumDoc) = probeOp.Wait();
+        }
+        bool? present = ContainsComputeSystemId(enumDoc, id);
+        Step($"ComputeSystemGoneProbe({id})",
+            probeHr.Failed ? probeHr : present is null or true ? ProbeFailed : default,
+            present switch
+            {
+                null => "enumeration document missing or unparseable — cannot judge",
+                true => $"'{id}' still enumerable",
+                false => $"'{id}' absent from enumeration",
+            });
     }
 
     /// <summary>Null means "cannot judge" (missing/unparseable doc) — callers must
@@ -397,9 +420,19 @@ internal static class Program
     {
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
-        Step("UnprepareLayer", WcLayer.Unprepare(sandboxPath), "");
-        Step("DeactivateLayer", WcLayer.Deactivate(sandboxPath), "");
-        Step("DestroyLayer", WcLayer.Destroy(sandboxPath), sandboxPath);
+        if ((Opt(args, "--isolation") ?? "process") == "hyperv")
+        {
+            // A xenon sandbox was never host-prepared (the guest consumed its
+            // sandbox.vhdx), so unprepare/deactivate do not apply.
+            Step("DestroyLayer", WcLayer.Destroy(sandboxPath), sandboxPath);
+            RemoveUvmScratchDir(sandboxPath + "-uvm");
+        }
+        else
+        {
+            Step("UnprepareLayer", WcLayer.Unprepare(sandboxPath), "");
+            Step("DeactivateLayer", WcLayer.Deactivate(sandboxPath), "");
+            Step("DestroyLayer", WcLayer.Destroy(sandboxPath), sandboxPath);
+        }
         return Results.Any(r => r.Hr.Failed) ? 2 : 0;
     }
 
@@ -561,8 +594,11 @@ internal static class Program
         Console.WriteLine("""
             usage: HcsContainerSpike <run|orphan|cleanup|list|terminate> [options]
               run       --layer <dir> [--id <containerId>] [--command <cmdline>] [--seconds <n>] [--work <dir>]
+                        [--isolation <process|hyperv>]   process (default) boots a host silo (argon);
+                                             hyperv boots the same layer inside a utility VM (xenon)
               orphan    --layer <dir> ...   create+start then exit without terminating
-              cleanup   [--work <dir>] [--id <containerId>]   release a leftover sandbox layer
+              cleanup   [--work <dir>] [--id <containerId>] [--isolation <process|hyperv>]
+                                             release a leftover sandbox layer (and UVM scratch for hyperv)
               list      [--absent <id>]      enumerate HCS compute systems; with --absent,
                                              fail (exit 5) if <id> is still enumerable
               terminate [--id <containerId>]   terminate a leftover spike container
