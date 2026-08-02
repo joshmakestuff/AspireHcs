@@ -1,3 +1,4 @@
+#Requires -Version 7
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
@@ -123,7 +124,7 @@ if (-not $buildOk) { Write-Both 'Build failed — aborting.'; exit 1 }
 # Argon control in the same record: its ProcessIsolationProof asserts
 # HostingSystemId is ABSENT — the other half of the isolation discriminator
 # the xenon run exercises.
-[void](Invoke-Step -Title 'ArgonControl' -ExpectedExit 0 -CommandArgs @('run', '--layer', $Layer))
+[void](Invoke-Step -Title 'ArgonControl' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'process', '--layer', $Layer))
 
 $runOk = Invoke-Step -Title 'XenonRun' -ExpectedExit 0 -CommandArgs @('run', '--isolation', 'hyperv', '--layer', $Layer)
 
