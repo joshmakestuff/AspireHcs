@@ -90,6 +90,132 @@ internal static partial class Program
         Console.WriteLine($"[{tag}] {surface,-7} {call,-30} {hrText} {Truncate(detail)}");
     }
 
+    // ----------------------------------------------------------------- grant --
+
+    /// <summary>Grants the current user read access to a layer directory IN PLACE
+    /// (issue #33, one-time elevated setup).
+    ///
+    /// This replaced the export approach after `export` was run for real and
+    /// ExportLayer returned 0x80070057. hcsshim explains why: base layers are not
+    /// exported through ExportLayer at all — NewLayerReader branches to a separate
+    /// backup-stream reader when parentLayerPaths is empty ("This is a base layer.
+    /// It gets exported differently."). Materializing a base layer into a store we
+    /// own is the OCI-tar import path, which belongs to the image-acquisition work,
+    /// not to this question.
+    ///
+    /// Granting in place is also the BETTER experiment. #33 asks whether the gate
+    /// is the wclayer API or the store ACL; this changes exactly that one variable
+    /// and holds the layer bits identical — bits already proven to boot green as
+    /// both argon and xenon on this host. An export would have changed the layer's
+    /// location AND its byte-for-byte provenance at the same time.
+    ///
+    /// Additive and reversible: it adds a read ACE for one user and --revoke
+    /// removes it. Docker owns this directory, so this is a deliberate, stated
+    /// modification of another product's store, done on a dev box for a spike.</summary>
+    private static int Grant(string[] args)
+    {
+        string layer = Path.TrimEndingDirectorySeparator(Opt(args, "--layer")
+            ?? throw new ArgumentException("--layer <layer dir> is required"));
+        bool revoke = args.Contains("--revoke");
+        string account = WindowsIdentity.GetCurrent().Name;
+
+        Console.WriteLine($"[grant] layer={layer}");
+        Console.WriteLine($"[grant] account={account} action={(revoke ? "revoke" : "grant")}");
+
+        if (!IsElevated())
+        {
+            Console.WriteLine("error: grant must run ELEVATED — it edits ACLs on a directory owned by Administrators. " +
+                              "This is the one-time setup step whose necessity the matrix then measures.");
+            return 2;
+        }
+
+        // Traverse rights on each ancestor, or the grant on the leaf is unreachable:
+        // denying traverse on a parent makes a child's contents unopenable no matter
+        // what the child's own DACL says (and reports it as "not found", per
+        // TryEnumerate's note).
+        var ancestors = new List<string>();
+        for (string? d = Path.GetDirectoryName(layer); d is not null; d = Path.GetDirectoryName(d))
+        {
+            ancestors.Insert(0, d);
+            if (d.TrimEnd('\\').EndsWith(":", StringComparison.Ordinal))
+            {
+                break;
+            }
+        }
+        foreach (string ancestor in ancestors.Where(a => a.Contains("Docker", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunIcacls($"\"{ancestor}\" {(revoke ? $"/remove:g \"{account}\"" : $"/grant \"{account}\":(RX)")}", $"ancestor {Path.GetFileName(ancestor)}");
+        }
+
+        // The layer itself, with inheritance, applied to everything beneath it.
+        RunIcacls($"\"{layer}\" {(revoke ? $"/remove:g \"{account}\"" : $"/grant \"{account}\":(OI)(CI)(RX)")} /T /C /Q",
+            revoke ? "layer tree (revoke)" : "layer tree (grant)");
+
+        ReportAcl(layer);
+
+        Console.WriteLine();
+        Console.WriteLine(revoke
+            ? "Revoked. The unelevated matrix should now report DENIED again."
+            : $"Granted. Run the unelevated matrix against it with:{Environment.NewLine}  HcsContainerSpike privilege --layer {layer}");
+        return Results.Any(r => r.Hr.Failed) ? 2 : 0;
+    }
+
+    /// <summary>icacls rather than DirectorySecurity: the layer tree is ~1 GB of
+    /// files whose inheritance state we do not control, and icacls /T is the
+    /// documented way to reapply across one. Its exit code is recorded as the
+    /// step's result — a partially applied ACL must not read as success.</summary>
+    private static void RunIcacls(string arguments, string what)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("icacls.exe", arguments)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using var process = System.Diagnostics.Process.Start(psi)!;
+
+        // Both pipes must be drained CONCURRENTLY. Reading one to completion and
+        // then the other deadlocks the moment the second fills its buffer: the
+        // child blocks writing, so it never exits, so the first ReadToEnd never
+        // returns. Observed live — `icacls /T /C` over a ~1 GB layer tree emits
+        // enough stderr to hang the harness indefinitely.
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+
+        const int timeoutMs = 10 * 60 * 1000;
+        if (!process.WaitForExit(timeoutMs))
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // Already gone between the timeout and the kill.
+            }
+            Step($"icacls({what})", ProbeFailed, $"timed out after {timeoutMs / 1000}s and was killed");
+            return;
+        }
+        // Only safe once the process has exited: the pipes are closed, so these
+        // are already complete and cannot block.
+        Task.WaitAll(stdout, stderr);
+
+        string combined = stdout.Result + stderr.Result;
+        string summary = combined.ReplaceLineEndings(" ").Trim();
+
+        // icacls exits 0 even when it could not touch a single file: it reports
+        // per-file outcomes in its own summary line instead. Observed on this
+        // host — "Successfully processed 554 files; Failed processing 9613 files"
+        // with exit 0, which a bare exit-code check recorded as a clean grant.
+        // The failure count is the real verdict.
+        System.Text.RegularExpressions.Match failed = System.Text.RegularExpressions.Regex.Match(
+            combined, @"Failed processing (?<n>\d+) files");
+        bool anyFailed = failed.Success && failed.Groups["n"].Value != "0";
+
+        Step($"icacls({what})", process.ExitCode == 0 && !anyFailed ? default : ProbeFailed,
+            $"exit={process.ExitCode}{(anyFailed ? $" BUT {failed.Groups["n"].Value} files rejected the ACE" : "")} {Truncate(summary)}");
+    }
+
     // ---------------------------------------------------------------- export --
 
     private static int Export(string[] args)
@@ -131,13 +257,18 @@ internal static partial class Program
                               "privilege matrix measured against it would be meaningless.");
             return 2;
         }
-        if (parents.Count > 0)
+        if (parents.Count == 0)
         {
-            // ImportLayer can only interpret the transport format with every
-            // parent present at its recorded path; a partial store would import
-            // "successfully" and boot wrong.
-            Console.WriteLine("error: --layer has parent layers. This spike exports single base layers only; " +
-                              "exporting a chain needs every parent exported first, at paths the import can still resolve.");
+            // MEASURED, not assumed: this exact call was run elevated against the
+            // nanoserver base layer on 2026-08-02 and returned 0x80070057. The
+            // reason is in hcsshim internal/wclayer/exportlayer.go — NewLayerReader
+            // branches away from ExportLayer entirely when there are no parents
+            // ("This is a base layer. It gets exported differently."), to a
+            // backup-stream reader. ExportLayer simply does not accept base layers.
+            Console.WriteLine("error: --layer is a base layer (no parents), and ExportLayer does not support base " +
+                              "layers — it returns 0x80070057. Getting a base layer into a store you own means the " +
+                              "OCI-tar import path, which is image-acquisition work. To isolate the ACL confound " +
+                              "instead, use `grant` to make this layer readable in place.");
             return 2;
         }
 
@@ -165,11 +296,7 @@ internal static partial class Program
             PrecleanDirectory(transport, "transport folder");
         }
 
-        // A base layer's scratch template lives at the STORE root, not inside the
-        // layer (moby's windowsfilter driver generates blank.vhdx once and copies
-        // it per scratch), so the export has to carry it across explicitly or the
-        // zero-privileged-call hypothesis has nothing to test with.
-        CopyScratchTemplateIfPresent(Path.GetDirectoryName(source)!, storeRoot);
+        EnsureScratchTemplate(Path.GetDirectoryName(source)!, storeRoot, dest);
 
         ReportLayerShape(dest);
         ReportAcl(dest);
@@ -180,7 +307,67 @@ internal static partial class Program
         return Results.Any(r => r.Hr.Failed) ? 2 : 0;
     }
 
-    private static void CopyScratchTemplateIfPresent(string sourceStoreRoot, string destStoreRoot)
+    /// <summary>Puts a blank container-scratch VHDX in the developer's store, so
+    /// the unelevated xenon run has something to copy instead of calling
+    /// CreateSandboxLayer (#33 experiment 2).
+    ///
+    /// #33 assumed windowsfilter base layers ship such a template
+    /// (blank.vhdx/blank-base.vhdx). CONFIRMED on this host 2026-08-02:
+    /// `blank-base.vhdx` sits INSIDE the layer directory, alongside Files\ and
+    /// UtilityVM\ — not at the store root. An earlier revision of this comment
+    /// claimed the opposite ("VERIFIED FALSE"); that claim came from an
+    /// inspection script that only looked at the store root, which is a lesson
+    /// about the probe rather than about the platform.
+    ///
+    /// The generation path below is therefore a FALLBACK, kept for stores that
+    /// genuinely have no template: it runs one privileged CreateSandboxLayer
+    /// during the one-time elevated setup and keeps the output to copy per run.
+    /// Either way the shape is the developer story #33 proposes — privileged work
+    /// happens once at setup, and each `aspire run` afterwards does only
+    /// unprivileged file copies.</summary>
+    private static void EnsureScratchTemplate(string sourceStoreRoot, string destStoreRoot, string importedLayer)
+    {
+        if (CopyScratchTemplateIfPresent(sourceStoreRoot, destStoreRoot))
+        {
+            return;
+        }
+
+        string generator = Path.Combine(destStoreRoot, ".template-gen");
+        PrecleanDirectory(generator, "template generator");
+        Directory.CreateDirectory(generator);
+        try
+        {
+            HRESULT hr = WcLayer.CreateScratchLayer(generator, [importedLayer]);
+            Step("GenerateScratchTemplate(CreateSandboxLayer)", hr, generator);
+            if (hr.Failed)
+            {
+                return;
+            }
+
+            string produced = Path.Combine(generator, "sandbox.vhdx");
+            string template = Path.Combine(destStoreRoot, "blank.vhdx");
+            try
+            {
+                File.Copy(produced, template, overwrite: true);
+                Step("KeepScratchTemplate", default,
+                    $"{template} ({new FileInfo(template).Length / (1024 * 1024)} MB) — copied per run unelevated from here");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Step("KeepScratchTemplate", ProbeFailed, $"{produced}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+        finally
+        {
+            // Release the layer through the API that created it, then remove the
+            // directory; leaving an activated scratch behind would hold handles.
+            WcLayer.Destroy(generator);
+            PrecleanDirectory(generator, "template generator");
+        }
+    }
+
+    /// <summary>Returns true when a pre-existing blank template was carried over.</summary>
+    private static bool CopyScratchTemplateIfPresent(string sourceStoreRoot, string destStoreRoot)
     {
         foreach (string candidate in ScratchTemplateNames)
         {
@@ -194,7 +381,7 @@ internal static partial class Program
                 // copy and let the exception say which it was.
                 File.Copy(from, to, overwrite: true);
                 Step($"CopyScratchTemplate({candidate})", default, $"{from} -> {to} ({new FileInfo(to).Length / (1024 * 1024)} MB)");
-                return;
+                return true;
             }
             catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
             {
@@ -210,10 +397,11 @@ internal static partial class Program
                     $"{from}: {ex.GetType().Name}: {ex.Message}");
             }
         }
-        // Not a failure: CreateSandboxLayer generates the template on first use,
-        // so a store that has never produced a scratch simply has none yet.
-        Console.WriteLine($"[export] no scratch template ({string.Join(" / ", ScratchTemplateNames)}) at {sourceStoreRoot} — " +
-                          "the template-copy hypothesis will report SKIP until one exists");
+        // Not a failure: this store has no prebuilt template, so the caller
+        // generates one. Observed to be the normal case on this host.
+        Console.WriteLine($"[export] no prebuilt scratch template ({string.Join(" / ", ScratchTemplateNames)}) " +
+                          $"at {sourceStoreRoot} — generating one instead");
+        return false;
     }
 
     private static void ReportLayerShape(string layerPath)
@@ -713,12 +901,15 @@ internal static partial class Program
             string[]? parents = JsonSerializer.Deserialize<string[]>(text);
             if (parents is null)
             {
-                // Literal `null` is valid JSON but says nothing about the chain.
-                // Coalescing it to an empty array — as this did — would report an
-                // UNKNOWN chain as a confirmed base layer, which is the same
-                // failure as the malformed case wearing a success label.
-                status = ChainStatus.Malformed;
-                note = "layerchain.json parsed as JSON null — the parent chain is UNKNOWN, not empty";
+                // Literal `null` is how moby's windowsfilter driver records "no
+                // parents": json.Marshal of a nil parent slice. VERIFIED on this
+                // host 2026-08-02 — both base layers in the Docker store contain
+                // exactly `null`, while their child layer contains a one-element
+                // array. An earlier revision treated null as UNKNOWN and failed
+                // closed, which would have refused every real base layer; that
+                // was reasoning about the format instead of reading it.
+                status = ChainStatus.Parsed;
+                note = "layerchain.json is JSON null — moby's encoding for a base layer with no parents";
                 return [];
             }
             status = ChainStatus.Parsed;
