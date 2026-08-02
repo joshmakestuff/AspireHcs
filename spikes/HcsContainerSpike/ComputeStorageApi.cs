@@ -52,12 +52,19 @@ internal static unsafe partial class ComputeStorage
     /// lack them.</summary>
     private static readonly HRESULT ProcNotFound = new(unchecked((int)0x8007007F));
 
-    /// <summary>Single chokepoint converting a missing DLL or export into an
-    /// HRESULT. Without it a host lacking these entry points would take an
-    /// unhandled EntryPointNotFoundException out of whatever call site ran first,
-    /// destroying the whole matrix — a probe harness whose job is to RECORD
-    /// outcomes must never crash on one. Every wrapper below routes through here,
-    /// so a future addition cannot forget it.</summary>
+    /// <summary>Converts a missing DLL or export into an HRESULT. Without it a
+    /// host lacking these entry points would take an unhandled
+    /// EntryPointNotFoundException out of whatever call site ran first, destroying
+    /// the whole matrix — a probe harness whose job is to RECORD outcomes must
+    /// never crash on one.
+    ///
+    /// Every wrapper below routes through this, but note what that is and is not:
+    /// it is a convention this file keeps, NOT a chokepoint. Nothing stops a
+    /// future wrapper from calling one of the private LibraryImport declarations
+    /// directly and reintroducing the crash. Enforcing it structurally would mean
+    /// wrapping the raw imports in a type that cannot be invoked unguarded, which
+    /// is more machinery than a spike warrants — so it is written down instead of
+    /// claimed as guaranteed.</summary>
     private static HRESULT Guarded(Func<int> call)
     {
         try

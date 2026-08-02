@@ -37,9 +37,16 @@ from a bad layer. Controls must cover both isolation modes: without an elevated
 argon control, an unelevated argon failure is indistinguishable from an
 argon-path defect in the exported layer.
 
-The elevated template-scratch run is deliberately NOT a control. It tests the
-#33 experiment-2 hypothesis, and a hypothesis that turns out false is a finding,
-not an invalid experiment.
+The template-scratch path is run at BOTH privilege levels, but neither run is a
+control — it tests the #33 experiment-2 hypothesis, and a hypothesis that turns
+out false is a finding, not an invalid experiment. Both runs are needed to tell
+the two failure meanings apart:
+
+  elevated OK, unelevated fails  -> a privilege gate, which is the finding sought
+  both fail                      -> template substitution does not work at all
+  both OK                        -> the xenon path needs no privileged storage call
+
+With only the unelevated run, those first two are indistinguishable.
 
 Every other step is MEASURED, not asserted: an unelevated failure is the datum,
 not a bug. Measured steps are reported as MEAS with their exit code and never as
@@ -182,6 +189,11 @@ if ($Phase -eq 'setup') {
             exit 1
         }
     }
+
+    # Measured, not a control: its failure would mean the hypothesis is false,
+    # not that the experiment is invalid. It runs here so the unelevated result
+    # below it has an elevated counterpart to be read against.
+    [void](Invoke-Step -Title 'ElevatedXenonBoot(template scratch)' -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $exported, '--id', $containerId))
 
     [void](Invoke-Step -Title 'ElevatedMatrix' -CommandArgs @('privilege', '--layer', $exported, '--id', $containerId))
 

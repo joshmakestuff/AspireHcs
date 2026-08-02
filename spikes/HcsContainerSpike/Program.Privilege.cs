@@ -185,24 +185,29 @@ internal static partial class Program
         foreach (string candidate in ScratchTemplateNames)
         {
             string from = Path.Combine(sourceStoreRoot, candidate);
-            if (!File.Exists(from))
-            {
-                continue;
-            }
             string to = Path.Combine(destStoreRoot, candidate);
             try
             {
+                // No File.Exists guard: it reports a denied file as absent, which
+                // would route a denial into the silent "no template here" path —
+                // the same defect FindScratchTemplate was fixed for. Attempt the
+                // copy and let the exception say which it was.
                 File.Copy(from, to, overwrite: true);
                 Step($"CopyScratchTemplate({candidate})", default, $"{from} -> {to} ({new FileInfo(to).Length / (1024 * 1024)} MB)");
                 return;
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                continue;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 // Keep trying the remaining names: returning here would leave the
                 // store with no template because the FIRST candidate happened to
-                // be locked, and the xenon hypothesis would then report SKIP for
-                // a reason that has nothing to do with privilege.
-                Step($"CopyScratchTemplate({candidate})", ProbeFailed, $"{from}: {ex.GetType().Name}: {ex.Message}");
+                // be locked or denied, and the xenon hypothesis would then report
+                // SKIP for a reason that has nothing to do with privilege.
+                Step($"CopyScratchTemplate({candidate})", ex is UnauthorizedAccessException ? new HRESULT(AccessDenied) : ProbeFailed,
+                    $"{from}: {ex.GetType().Name}: {ex.Message}");
             }
         }
         // Not a failure: CreateSandboxLayer generates the template on first use,
@@ -705,7 +710,17 @@ internal static partial class Program
                 return [];
             }
 
-            string[] parents = JsonSerializer.Deserialize<string[]>(text) ?? [];
+            string[]? parents = JsonSerializer.Deserialize<string[]>(text);
+            if (parents is null)
+            {
+                // Literal `null` is valid JSON but says nothing about the chain.
+                // Coalescing it to an empty array — as this did — would report an
+                // UNKNOWN chain as a confirmed base layer, which is the same
+                // failure as the malformed case wearing a success label.
+                status = ChainStatus.Malformed;
+                note = "layerchain.json parsed as JSON null — the parent chain is UNKNOWN, not empty";
+                return [];
+            }
             status = ChainStatus.Parsed;
             note = $"layerchain.json: {parents.Length} parent layer(s)";
             return [.. parents];
