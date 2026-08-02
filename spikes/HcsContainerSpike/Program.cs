@@ -68,6 +68,7 @@ internal static partial class Program
                     "grant" => Grant(args),
                     "verify" => Verify(args),
                     "privilege" => Privilege(args),
+                    "pull" => Pull(args),
                     _ => Usage(),
                 };
             }
@@ -620,7 +621,7 @@ internal static partial class Program
     private static int Usage()
     {
         Console.WriteLine("""
-            usage: HcsContainerSpike <run|orphan|cleanup|list|terminate|grant|verify|privilege> [options]
+            usage: HcsContainerSpike <run|orphan|cleanup|list|terminate|grant|verify|privilege|pull> [options]
               run       --layer <dir> [--id <containerId>] [--command <cmdline>] [--seconds <n>] [--work <dir>]
                         [--isolation <process|hyperv>]   process (default) boots a host silo (argon);
                                              hyperv boots the same layer inside a utility VM (xenon)
@@ -645,6 +646,10 @@ internal static partial class Program
               privilege --layer <dir> [--work <dir>] [--id <containerId>]    record every layer-storage
                                              call's own HRESULT at the current privilege level, continuing
                                              past failures; SKIP marks calls never attempted (#33)
+              pull      --image <registry/repo:tag> [--store <dir>] [--seconds <n>]   resolve a single-layer
+                                             Windows base image on an anonymous registry and download its
+                                             layer blob + metadata into the AspireHcs store, digest-verified
+                                             (default store: %LOCALAPPDATA%\AspireHcs\layers) (#30)
             """);
         return 64;
     }
