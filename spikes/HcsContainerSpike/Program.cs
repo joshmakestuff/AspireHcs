@@ -1,18 +1,24 @@
 // Spike for issue #30: boot a process-isolated Windows container from a
 // hand-materialized layer directory via HcsCreateComputeSystem, run a process
 // in it, and record, per privilege level, the actual HRESULT of every layer
-// and HCS call. Modes:
+// and HCS call. Extended for issue #32 with a Hyper-V-isolated (xenon) mode
+// that boots the same layer directory inside a utility VM (Program.Xenon.cs).
+// Modes:
 //
 //   run     --layer <dir>  create a scratch layer over <dir>, prepare the layer
 //                          stack, create + start the container, exec --command,
 //                          capture stdio, terminate, clean up
 //   orphan  --layer <dir>  create + start, then exit abruptly WITHOUT terminating,
 //                          to test ShouldTerminateOnLastHandleClosed for containers
+//                          (with --isolation hyperv: for the container AND its UVM)
 //   cleanup [--work <dir>] unprepare/deactivate/destroy a leftover sandbox layer
+//                          (with --isolation hyperv: destroy sandbox + UVM scratch)
 //   list                   enumerate HCS compute systems
-//   terminate [--id <id>]  open + terminate a leftover spike container
+//   terminate [--id <id>]  open + terminate a leftover spike container (for hyperv
+//                          leftovers run twice: --id <id> and --id <id>-uvm)
 //
-// Options: --id <containerId> --command <cmdline> --seconds <io/exit budget> --work <dir>
+// Options: --id <containerId> --command <cmdline> --seconds <io/exit budget>
+//          --work <dir> --isolation <process|hyperv>
 // Exit codes: 0 success; 2 layer/create/start failure; 3 exec failure; 4 a step
 // after an otherwise-successful run failed (teardown or post-teardown probe);
 // 5 list --absent found the id still enumerable; 64 usage.
@@ -33,7 +39,7 @@ using Windows.Win32.System.HostComputeSystem;
 
 namespace HcsContainerSpike;
 
-internal static class Program
+internal static partial class Program
 {
     private const string DefaultContainerId = "AspireHcsContainerSpike";
     private static readonly HRESULT ProbeFailed = new(unchecked((int)0x80004005)); // E_FAIL for locally-judged proof steps
@@ -89,6 +95,7 @@ internal static class Program
         int budgetSeconds = OptInt(args, "--seconds", 60);
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
+        string isolation = IsolationOpt(args);
 
         // The read-only layer chain, topmost first. Docker's windowsfilter store
         // records parents in layerchain.json; a base image has none. Reading it
@@ -126,6 +133,11 @@ internal static class Program
                 return 2;
             }
             layerIds.Add((layer, guid));
+        }
+
+        if (isolation == "hyperv")
+        {
+            return RunXenon(containerId, chain, layerIds, command, budgetSeconds, workDir, orphan);
         }
 
         PrecleanSandbox(sandboxPath);
@@ -187,13 +199,12 @@ internal static class Program
                 Step("HcsGetComputeSystemProperties", hr, doc ?? "");
 
                 // Runtime witness for "process-isolated container": the properties
-                // must report SystemType Container AND a host-silo object root.
-                // A Hyper-V-isolated container lives in a utility VM and cannot
-                // have an ObRoot under \Silos\ on the host. Structurally, silent
-                // Hyper-V isolation is not a live hypothesis here anyway: the
-                // config document carries no UtilityVM/HostingSystemId section,
-                // so there is nothing a VM could boot from. The discriminator is
-                // exercised one-sided (no xenon negative control in this spike).
+                // must report SystemType Container, a silo object root, and NO
+                // HostingSystemId. The xenon negative control (run 2026-08-02)
+                // showed a Hyper-V-isolated container ALSO reports an ObRoot
+                // under \Silos\ — the silo inside its utility VM, relayed by the
+                // guest — so ObRoot alone does not discriminate; HostingSystemId
+                // (absent here, naming the UVM for a xenon) is what does.
                 ProveProcessIsolation(hr, doc);
 
                 if (orphan)
@@ -201,7 +212,7 @@ internal static class Program
                     Console.WriteLine();
                     Console.WriteLine($"Container '{containerId}' is running. Exiting abruptly WITHOUT terminate/close " +
                                       $"(ShouldTerminateOnLastHandleClosed test). Run 'list --absent {containerId}' next to " +
-                                      $"verify the container died, then 'cleanup --work {workDir}' to release the sandbox layer.");
+                                      $"verify the container died, then 'cleanup --id {containerId} --work {workDir}' to release the sandbox layer.");
                     PrintSummary();
                     Environment.Exit(99);
                 }
@@ -232,22 +243,7 @@ internal static class Program
                 Directory.Exists(sandboxPath) ? $"{sandboxPath} still exists" : "sandbox directory removed");
             if (created)
             {
-                using var probeOp = new HcsOperation();
-                HRESULT probeHr = PInvoke.HcsEnumerateComputeSystems("{}", probeOp.Handle);
-                string? enumDoc = null;
-                if (probeHr.Succeeded)
-                {
-                    (probeHr, enumDoc) = probeOp.Wait();
-                }
-                bool? present = ContainsComputeSystemId(enumDoc, containerId);
-                Step("ComputeSystemGoneProbe",
-                    probeHr.Failed ? probeHr : present is null or true ? ProbeFailed : default,
-                    present switch
-                    {
-                        null => "enumeration document missing or unparseable — cannot judge",
-                        true => $"'{containerId}' still enumerable",
-                        false => $"'{containerId}' absent from enumeration",
-                    });
+                ProbeComputeSystemGone(containerId);
             }
         }
     }
@@ -267,9 +263,12 @@ internal static class Program
                 JsonNode? props = JsonNode.Parse(propertiesDoc);
                 string? systemType = (string?)props?["SystemType"];
                 string? obRoot = (string?)props?["ObRoot"];
+                string? hostingSystemId = (string?)props?["HostingSystemId"];
                 proved = string.Equals(systemType, "Container", StringComparison.OrdinalIgnoreCase)
-                    && obRoot?.Contains(@"\Silos\", StringComparison.OrdinalIgnoreCase) == true;
-                detail = $"SystemType={systemType ?? "(null)"} ObRoot={obRoot ?? "(null)"}";
+                    && obRoot?.Contains(@"\Silos\", StringComparison.OrdinalIgnoreCase) == true
+                    && hostingSystemId is null;
+                detail = $"SystemType={systemType ?? "(null)"} ObRoot={obRoot ?? "(null)"} " +
+                         $"HostingSystemId={hostingSystemId ?? "(absent)"}";
             }
             catch (System.Text.Json.JsonException ex)
             {
@@ -277,6 +276,28 @@ internal static class Program
             }
         }
         Step("ProcessIsolationProof(properties)", proved ? default : ProbeFailed, detail);
+    }
+
+    /// <summary>Asserts via enumeration that a compute system no longer exists,
+    /// recording the verdict as a summary step that can fail the run.</summary>
+    private static void ProbeComputeSystemGone(string id)
+    {
+        using var probeOp = new HcsOperation();
+        HRESULT probeHr = PInvoke.HcsEnumerateComputeSystems("{}", probeOp.Handle);
+        string? enumDoc = null;
+        if (probeHr.Succeeded)
+        {
+            (probeHr, enumDoc) = probeOp.Wait();
+        }
+        bool? present = ContainsComputeSystemId(enumDoc, id);
+        Step($"ComputeSystemGoneProbe({id})",
+            probeHr.Failed ? probeHr : present is null or true ? ProbeFailed : default,
+            present switch
+            {
+                null => "enumeration document missing or unparseable — cannot judge",
+                true => $"'{id}' still enumerable",
+                false => $"'{id}' absent from enumeration",
+            });
     }
 
     /// <summary>Null means "cannot judge" (missing/unparseable doc) — callers must
@@ -397,9 +418,19 @@ internal static class Program
     {
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
-        Step("UnprepareLayer", WcLayer.Unprepare(sandboxPath), "");
-        Step("DeactivateLayer", WcLayer.Deactivate(sandboxPath), "");
-        Step("DestroyLayer", WcLayer.Destroy(sandboxPath), sandboxPath);
+        if (IsolationOpt(args) == "hyperv")
+        {
+            // A xenon sandbox was never host-prepared (the guest consumed its
+            // sandbox.vhdx), so unprepare/deactivate do not apply.
+            Step("DestroyLayer", WcLayer.Destroy(sandboxPath), sandboxPath);
+            RemoveUvmScratchDir(sandboxPath + "-uvm");
+        }
+        else
+        {
+            Step("UnprepareLayer", WcLayer.Unprepare(sandboxPath), "");
+            Step("DeactivateLayer", WcLayer.Deactivate(sandboxPath), "");
+            Step("DestroyLayer", WcLayer.Destroy(sandboxPath), sandboxPath);
+        }
         return Results.Any(r => r.Hr.Failed) ? 2 : 0;
     }
 
@@ -463,7 +494,7 @@ internal static class Program
 
     private static string BuildContainerConfig(IReadOnlyList<(string Path, Guid Id)> layers, string volumePath) => new JsonObject
     {
-        ["SchemaVersion"] = new JsonObject { ["Major"] = 2, ["Minor"] = 1 },
+        ["SchemaVersion"] = SchemaV21(),
         ["Owner"] = "AspireHcs",
         ["ShouldTerminateOnLastHandleClosed"] = true,
         ["Container"] = new JsonObject
@@ -527,6 +558,17 @@ internal static class Program
         return flat.Length <= 200 ? flat : flat[..200] + "…";
     }
 
+    /// <summary>Single validated parse of --isolation, shared by every mode that
+    /// honors it — a typo must fail loud, never silently select a cleanup or run
+    /// path for the wrong isolation.</summary>
+    private static string IsolationOpt(string[] args)
+    {
+        string isolation = Opt(args, "--isolation") ?? "process";
+        return isolation is "process" or "hyperv"
+            ? isolation
+            : throw new ArgumentException($"--isolation must be 'process' or 'hyperv', got '{isolation}'");
+    }
+
     private static string? Opt(string[] args, string name)
     {
         int i = Array.IndexOf(args, name);
@@ -561,8 +603,11 @@ internal static class Program
         Console.WriteLine("""
             usage: HcsContainerSpike <run|orphan|cleanup|list|terminate> [options]
               run       --layer <dir> [--id <containerId>] [--command <cmdline>] [--seconds <n>] [--work <dir>]
+                        [--isolation <process|hyperv>]   process (default) boots a host silo (argon);
+                                             hyperv boots the same layer inside a utility VM (xenon)
               orphan    --layer <dir> ...   create+start then exit without terminating
-              cleanup   [--work <dir>] [--id <containerId>]   release a leftover sandbox layer
+              cleanup   [--work <dir>] [--id <containerId>] [--isolation <process|hyperv>]
+                                             release a leftover sandbox layer (and UVM scratch for hyperv)
               list      [--absent <id>]      enumerate HCS compute systems; with --absent,
                                              fail (exit 5) if <id> is still enumerable
               terminate [--id <containerId>]   terminate a leftover spike container
