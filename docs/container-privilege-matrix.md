@@ -121,16 +121,18 @@ Two honest caveats about how that access was obtained here:
 - Access was granted **in place** with `icacls`, additively, and is reversible
   (`grant --revoke`). This modifies another product's store, which is acceptable for a
   spike on a dev box and **is not a shipping design**.
-- The grant was **partial**: `Successfully processed 554 files; Failed processing 9613
-  files` — most layer files rejected the ACE because an elevated Administrator still lacks
-  `WRITE_DAC` on files whose DACLs name only SYSTEM/TrustedInstaller. Directory traverse
-  plus the handful of files that matter (`blank-base.vhdx`,
-  `UtilityVM\SystemTemplate.vhdx`, `layerchain.json`) was sufficient. The layer's bulk
+- The grant was **partial**, and always is: one run reported `Successfully processed 554
+  files; Failed processing 9613 files`, another `553` / `9614`. Most layer files reject the
+  ACE because an elevated Administrator still lacks `WRITE_DAC` on files whose DACLs name
+  only SYSTEM/TrustedInstaller. Directory traverse plus the handful of files that matter
+  (`blank-base.vhdx`, `UtilityVM\SystemTemplate.vhdx`) was sufficient — the layer's bulk
   content is read by the VM worker process under its own identity via VSMB, not by the
-  developer's token — which is why a partial grant was enough.
+  developer's token, which is why a partial grant is enough.
 
-  Note also that `icacls` **exits 0 even when it fails on every file**; the failure count in
-  its summary line is the only real verdict.
+  So the rejection count is **not** the verdict, in either direction: `icacls` exits 0 even
+  when it fails on every file, and a run with thousands of rejections still boots. `grant`
+  therefore decides by opening the files a boot actually needs (`SufficiencyProbe` rows) and
+  reports the count as diagnostics only.
 
 For a shipping design the right answer is a store AspireHcs owns, populated by pulling and
 materializing layers directly rather than borrowing Docker's — i.e. the image-acquisition
