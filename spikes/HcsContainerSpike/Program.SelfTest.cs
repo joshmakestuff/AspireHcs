@@ -9,6 +9,8 @@
 // mode. Privilege-dependent rows (token enablement) record what the CURRENT
 // token produced — run both elevated and unelevated to see both sides.
 
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 using Windows.Win32.Foundation;
 using Windows.Win32.Storage.FileSystem;
@@ -33,8 +35,127 @@ internal static partial class Program
             $"{detail}{(expected ? "" : " — UNEXPECTED for this elevation")}");
 
         NtFileSelfTests(workDir);
+        BackupStreamSelfTests(workDir);
 
         return Results.Any(r => r.Hr.Failed) ? 2 : 0;
+    }
+
+    /// <summary>Round-trips a real file's backup stream: BackupRead what Windows
+    /// itself serializes for a file carrying an explicit DACL and an alternate
+    /// data stream, replay those exact bytes through BackupStreamWriter onto a
+    /// fresh file, and compare what came back. If the WIN32_STREAM_ID header
+    /// were marshalled with padding, or the context freed in the wrong order,
+    /// the replayed file would not reproduce the source — this is the cheapest
+    /// place to find that out.
+    ///
+    /// The security half of the round trip needs SeBackup/SeRestore, so it is
+    /// MEASURED, not asserted, when the token lacks them: the row records what
+    /// this privilege level produced.</summary>
+    private static void BackupStreamSelfTests(string workDir)
+    {
+        string root = Path.Combine(workDir, "backup");
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+        Directory.CreateDirectory(root);
+
+        string sourcePath = Path.Combine(root, "source.txt");
+        File.WriteAllText(sourcePath, "primary-stream-content");
+        File.WriteAllText(sourcePath + ":extra", "alternate-stream-content");
+        var acl = new FileSecurity();
+        acl.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        acl.AddAccessRule(new FileSystemAccessRule(
+            WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl, AccessControlType.Allow));
+        new FileInfo(sourcePath).SetAccessControl(acl);
+        string sourceSddl = new FileInfo(sourcePath).GetAccessControl()
+            .GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+
+        bool processSecurity = TokenPrivileges.EnableBackupRestorePrivileges(out _).Succeeded;
+
+        byte[] stream;
+        HRESULT hr;
+        using (SafeFileHandle source = File.OpenHandle(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var reader = new BackupStreamReader(source, processSecurity))
+        {
+            hr = reader.ReadAll(out stream);
+        }
+        Step($"SelfTest(backup: BackupRead source, security={processSecurity})", hr, $"{stream.Length} bytes of backup stream");
+        if (hr.Failed)
+        {
+            return;
+        }
+
+        // Replay in deliberately awkward chunks: BackupWrite must tolerate a
+        // split anywhere, including mid-header, exactly as the import's
+        // 64 KB copy loop will split large file payloads.
+        string replayPath = Path.Combine(root, "replay.txt");
+        using (SafeFileHandle target = File.OpenHandle(
+            replayPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+            FileOptions.WriteThrough | (FileOptions)0x02000000 /* FILE_FLAG_BACKUP_SEMANTICS */))
+        using (var writer = new BackupStreamWriter(target, processSecurity))
+        {
+            for (int offset = 0; offset < stream.Length && hr.Succeeded; offset += 7)
+            {
+                hr = writer.Write(stream.AsSpan(offset, Math.Min(7, stream.Length - offset)));
+            }
+        }
+        Step("SelfTest(backup: replay in 7-byte chunks)", hr, replayPath);
+        if (hr.Failed)
+        {
+            return;
+        }
+
+        string primary = File.Exists(replayPath) ? File.ReadAllText(replayPath) : "(absent)";
+        Step("SelfTest(backup: primary content survived)",
+            primary == "primary-stream-content" ? default : ProbeFailed, $"'{primary}'");
+
+        string alternate;
+        try
+        {
+            alternate = File.ReadAllText(replayPath + ":extra");
+        }
+        catch (IOException ex)
+        {
+            alternate = $"({ex.GetType().Name})";
+        }
+        Step("SelfTest(backup: alternate data stream survived)",
+            alternate == "alternate-stream-content" ? default : ProbeFailed, $"'{alternate}'");
+
+        string replaySddl = new FileInfo(replayPath).GetAccessControl()
+            .GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+        bool sddlMatch = replaySddl == sourceSddl;
+        // Without the privileges the SD is not part of the stream at all, so a
+        // mismatch there is the expected measurement, not a defect.
+        Step($"SelfTest(backup: security descriptor{(processSecurity ? "" : ", MEASURED — no privileges")})",
+            sddlMatch || !processSecurity ? default : ProbeFailed,
+            sddlMatch ? $"identical: {replaySddl}" : $"source={sourceSddl} replay={replaySddl}");
+
+        // Encoder shapes: assert the wire layout the import depends on rather
+        // than trusting the code that produced it.
+        byte[] junction = ReparseBuffer.Encode(@"C:\target", isMountPoint: true);
+        uint junctionTag = BitConverter.ToUInt32(junction, 0);
+        ushort junctionDataLength = BitConverter.ToUInt16(junction, 4);
+        bool junctionOk = junctionTag == ReparseBuffer.MountPointTag
+            && junctionDataLength == junction.Length - 8
+            && BitConverter.ToUInt16(junction, 10) == @"\??\C:\target".Length * 2;
+        Step("SelfTest(backup: junction reparse buffer shape)", junctionOk ? default : ProbeFailed,
+            $"tag=0x{junctionTag:X8} dataLength={junctionDataLength} total={junction.Length}");
+
+        byte[] symlink = ReparseBuffer.Encode(@"..\relative", isMountPoint: false);
+        bool symlinkOk = BitConverter.ToUInt32(symlink, 0) == ReparseBuffer.SymlinkTag
+            && BitConverter.ToUInt16(symlink, 4) == symlink.Length - 8
+            && BitConverter.ToUInt32(symlink, 16) == 1; // relative flag
+        Step("SelfTest(backup: relative symlink reparse buffer shape)", symlinkOk ? default : ProbeFailed,
+            $"tag=0x{BitConverter.ToUInt32(symlink, 0):X8} flags={BitConverter.ToUInt32(symlink, 16)} total={symlink.Length}");
+
+        byte[] eas = ExtendedAttributes.Encode([("FIRST", [1, 2, 3]), ("SECOND", [4])]);
+        uint firstNext = BitConverter.ToUInt32(eas, 0);
+        bool easOk = firstNext % 4 == 0 && firstNext == 8 + 5 + 1 + 3 + 3 // padded to 4
+            && eas[5] == 5 && BitConverter.ToUInt16(eas, 6) == 3
+            && BitConverter.ToUInt32(eas, (int)firstNext) == 0; // last record terminates
+        Step("SelfTest(backup: EA buffer shape)", easOk ? default : ProbeFailed,
+            $"firstNextOffset={firstNext} total={eas.Length}");
     }
 
     private static void NtFileSelfTests(string workDir)

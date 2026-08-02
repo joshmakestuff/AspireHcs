@@ -20,6 +20,8 @@ GetCurrentProcess
 OpenProcessToken
 CreateFile
 GetFileInformationByHandleEx
+BackupRead
+BackupWrite
 LookupPrivilegeValue
 AdjustTokenPrivileges
 SetFileInformationByHandle
