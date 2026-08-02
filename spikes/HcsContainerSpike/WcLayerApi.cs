@@ -185,6 +185,41 @@ internal static unsafe partial class WcLayer
         return new(hr);
     }
 
+    /// <summary>Post-processes a base layer whose files have been extracted to
+    /// <c>&lt;path&gt;\Files</c> — the finalize half of the OCI-tar import path
+    /// (hcsshim ProcessBaseLayer → vmcompute!ProcessBaseImage).
+    ///
+    /// Unlike the other exports here, this one is called through a Find-style
+    /// guard: hcsshim binds it as an OPTIONAL proc ("ProcessBaseImage?"), so a
+    /// SKU without it must be recorded as a missing export rather than crash a
+    /// harness whose whole job is to record outcomes.</summary>
+    public static HRESULT ProcessBase(string layerPath) => Guarded(() => ProcessBaseImage(layerPath));
+
+    /// <summary>Post-processes an extracted utility VM image at
+    /// <c>&lt;layer&gt;\UtilityVM</c> (files under <c>UtilityVM\Files</c>).
+    ///
+    /// NOTE the export name: hcsshim's Go wrapper is ProcessUtilityVMImage but
+    /// the vmcompute.dll export it binds is <c>ProcessUtilityImage</c> — no
+    /// "VM". Getting that wrong yields a missing-export result that reads like
+    /// an OS-support finding.</summary>
+    public static HRESULT ProcessUtilityVm(string utilityVmPath) => Guarded(() => ProcessUtilityImage(utilityVmPath));
+
+    /// <summary>Same contract as ComputeStorageApi's guard: an export this
+    /// Windows build does not carry is a RECORDED outcome (0x8007007F,
+    /// ERROR_PROC_NOT_FOUND), never an unhandled exception.</summary>
+    private static HRESULT Guarded(Func<int> call)
+    {
+        const int ProcNotFound = unchecked((int)0x8007007F);
+        try
+        {
+            return new HRESULT(call());
+        }
+        catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException)
+        {
+            return new HRESULT(ProcNotFound);
+        }
+    }
+
     private static WcLayerDescriptor[] BuildDescriptors(IReadOnlyList<string> parentPaths, out HRESULT hr)
     {
         hr = default;
@@ -250,4 +285,12 @@ internal static unsafe partial class WcLayer
 
     [LibraryImport("vmcompute.dll", StringMarshalling = StringMarshalling.Utf16)]
     private static partial int LayerExists(DriverInfo* info, string id, uint* exists);
+
+    // The two finalize exports take a bare path and no DriverInfo — they operate
+    // on an extracted tree, not on a registered layer.
+    [LibraryImport("vmcompute.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int ProcessBaseImage(string path);
+
+    [LibraryImport("vmcompute.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial int ProcessUtilityImage(string path);
 }
