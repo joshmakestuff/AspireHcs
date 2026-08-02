@@ -101,30 +101,21 @@ internal static partial class Program
         string scratch = ScratchOpt(args, isolation);
 
         // The read-only layer chain, topmost first. Docker's windowsfilter store
-        // records parents in layerchain.json; a base image has none. Reading it
-        // may fail without elevation (the store is ACLed to Administrators) —
-        // File.Exists reports false on access-denied, so say what we assumed.
-        List<string> chain = [layerPath];
-        string chainFile = Path.Combine(layerPath, "layerchain.json");
-        string chainNote;
-        try
-        {
-            if (File.Exists(chainFile))
-            {
-                chain.AddRange(JsonSerializer.Deserialize<string[]>(File.ReadAllText(chainFile)) ?? []);
-                chainNote = $"layerchain.json read, {chain.Count} layer(s) total";
-            }
-            else
-            {
-                chainNote = "no layerchain.json visible (treating --layer as a base layer; " +
-                            "also true when the caller cannot read the store)";
-            }
-        }
-        catch (Exception ex)
-        {
-            chainNote = $"layerchain.json unreadable ({ex.GetType().Name}: {ex.Message}); treating as base layer";
-        }
+        // records parents in layerchain.json; a base image has none. This shares
+        // ReadParentChain with the privilege probe deliberately: two readers of
+        // one file format would be free to disagree about what an unreadable
+        // chain means, and that meaning is exactly what #33 turns on.
+        List<string> chain = [layerPath, .. ReadParentChain(layerPath, out ChainStatus chainStatus, out string chainNote)];
         Console.WriteLine($"[layers] {chainNote}");
+        if (chainStatus is not (ChainStatus.Absent or ChainStatus.Parsed))
+        {
+            // Fail closed rather than boot a layer whose parents we guessed at.
+            // A silent "treat as base layer" here would produce a container built
+            // from an incomplete stack, and the failure would surface later as
+            // something that looks nothing like a chain-read problem.
+            Step("ReadLayerChain", ChainHr(chainStatus), chainNote);
+            return 2;
+        }
 
         var layerIds = new List<(string Path, Guid Id)>();
         foreach (string layer in chain)

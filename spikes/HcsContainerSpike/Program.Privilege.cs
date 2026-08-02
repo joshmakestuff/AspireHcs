@@ -118,8 +118,19 @@ internal static partial class Program
         Step("SourceEnumerate", TryEnumerate(source, out int entryCount, out string enumDetail), enumDetail);
         Step("SourceLayerExists(driver)", WcLayer.Exists(source, out bool driverSaysExists), $"driver reports exists={driverSaysExists}");
 
-        List<string> parents = ReadParentChain(source, out string chainNote);
-        Console.WriteLine($"[export] {chainNote}");
+        List<string> parents = ReadParentChain(source, out ChainStatus chainStatus, out string chainNote);
+        Step("ReadLayerChain", ChainHr(chainStatus), chainNote);
+        if (chainStatus is not (ChainStatus.Absent or ChainStatus.Parsed))
+        {
+            // Fail closed. A chain we could not read is UNKNOWN, not empty, and
+            // exporting a layer that actually has parents as though it were a base
+            // layer would produce a store that imports cleanly and boots wrong —
+            // then every privilege result measured against it would be garbage.
+            Console.WriteLine("error: the source layer's parent chain could not be determined. Refusing to export: " +
+                              "a layer exported as a base when it in fact has parents would boot wrong, and the " +
+                              "privilege matrix measured against it would be meaningless.");
+            return 2;
+        }
         if (parents.Count > 0)
         {
             // ImportLayer can only interpret the transport format with every
@@ -183,12 +194,16 @@ internal static partial class Program
             {
                 File.Copy(from, to, overwrite: true);
                 Step($"CopyScratchTemplate({candidate})", default, $"{from} -> {to} ({new FileInfo(to).Length / (1024 * 1024)} MB)");
+                return;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
+                // Keep trying the remaining names: returning here would leave the
+                // store with no template because the FIRST candidate happened to
+                // be locked, and the xenon hypothesis would then report SKIP for
+                // a reason that has nothing to do with privilege.
                 Step($"CopyScratchTemplate({candidate})", ProbeFailed, $"{from}: {ex.GetType().Name}: {ex.Message}");
             }
-            return;
         }
         // Not a failure: CreateSandboxLayer generates the template on first use,
         // so a store that has never produced a scratch simply has none yet.
@@ -288,11 +303,14 @@ internal static partial class Program
         HRESULT existsHr = WcLayer.Exists(layerPath, out bool driverSaysExists);
         Probe("legacy", "LayerExists", existsHr, $"driver reports exists={driverSaysExists}");
 
-        chain = ReadParentChain(layerPath, out string chainNote);
+        chain = ReadParentChain(layerPath, out ChainStatus chainStatus, out string chainNote);
         chain.Insert(0, layerPath);
-        Probe("store", "ReadLayerChain", default, chainNote);
+        Probe("store", "ReadLayerChain", ChainHr(chainStatus), chainNote);
 
-        readable = enumHr.Succeeded && filesHr.Succeeded;
+        // A chain we could not read makes every downstream call's parent list a
+        // guess, so the layer counts as unreadable even when the directory itself
+        // enumerated fine — a probe run against a guessed chain proves nothing.
+        readable = enumHr.Succeeded && filesHr.Succeeded && ChainHr(chainStatus).Succeeded;
     }
 
     private static void ProbeLegacyChain(string workDir, string containerId, IReadOnlyList<string> chain, bool idsOk)
@@ -446,10 +464,20 @@ internal static partial class Program
 
         try
         {
-            string? template = FindScratchTemplate(layerPath, out string searched);
+            string? template = FindScratchTemplate(layerPath, out string searched, out bool denied);
             if (template is null)
             {
-                Skip("xenon", "CopyScratchTemplate", $"no blank template found ({searched})");
+                // A denied template is a privilege result and belongs in the
+                // matrix as one; only a genuinely absent template is a SKIP.
+                if (denied)
+                {
+                    Probe("xenon", "FindScratchTemplate", new HRESULT(AccessDenied), searched);
+                }
+                else
+                {
+                    Skip("xenon", "FindScratchTemplate", $"no blank template exists ({searched})");
+                }
+                Skip("xenon", "CopyScratchTemplate", denied ? "template exists but could not be opened" : "no template to copy");
                 Skip("xenon", "HcsGrantVmAccess(scratch)", "no scratch to grant access to");
                 return;
             }
@@ -532,15 +560,45 @@ internal static partial class Program
     /// driver prefers them. These live at the STORE root, not inside a layer.</summary>
     private static readonly string[] ScratchTemplateNames = ["blank-base.vhdx", "blank.vhdx"];
 
-    private static string? FindScratchTemplate(string layerPath, out string searched)
+    /// <summary>Locates a blank scratch template, opening each candidate rather
+    /// than asking File.Exists — which reports a denied file as absent and would
+    /// turn a DENIED result into a "no template found" SKIP, silently converting
+    /// a privilege finding into a non-finding. <paramref name="denied"/> reports
+    /// that a candidate exists but could not be opened at this privilege level.</summary>
+    private static string? FindScratchTemplate(string layerPath, out string searched, out bool denied)
     {
         string storeRoot = Path.GetDirectoryName(layerPath) ?? layerPath;
         List<string> candidates = [
             .. ScratchTemplateNames.Select(n => Path.Combine(storeRoot, n)),
             .. ScratchTemplateNames.Select(n => Path.Combine(layerPath, n)),
         ];
-        searched = string.Join("; ", candidates);
-        return candidates.FirstOrDefault(File.Exists);
+
+        denied = false;
+        var notes = new List<string>();
+        foreach (string candidate in candidates)
+        {
+            try
+            {
+                using FileStream probe = File.OpenRead(candidate);
+                searched = string.Join("; ", notes.Append($"{candidate}: readable"));
+                return candidate;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                denied = true;
+                notes.Add($"{candidate}: ERROR_ACCESS_DENIED [0x{(uint)ex.HResult:X8}]");
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                notes.Add($"{candidate}: absent");
+            }
+            catch (IOException ex)
+            {
+                notes.Add($"{candidate}: {ex.GetType().Name}");
+            }
+        }
+        searched = string.Join("; ", notes);
+        return null;
     }
 
     private static string DefaultStoreRoot() =>
@@ -594,26 +652,92 @@ internal static partial class Program
         }
     }
 
-    private static List<string> ReadParentChain(string layerPath, out string note)
+    /// <summary>Why a parent chain came back the way it did. An empty parent list
+    /// is produced by four different situations that must never be conflated: a
+    /// genuine base layer, a denied read, an I/O error, and a malformed file. The
+    /// first is ground truth; the other three are "we do not know", and treating
+    /// them as "no parents" is precisely the access-denied-as-absent defect this
+    /// spike exists to remove — committed here originally, caught in review.</summary>
+    private enum ChainStatus
+    {
+        Parsed,
+        Absent,
+        Denied,
+        Unreadable,
+        Malformed,
+    }
+
+    private static List<string> ReadParentChain(string layerPath, out ChainStatus status, out string note)
     {
         string chainFile = Path.Combine(layerPath, "layerchain.json");
         try
         {
-            if (!File.Exists(chainFile))
+            string text;
+            try
             {
-                note = "no layerchain.json visible (base layer, or the caller cannot read it — File.Exists cannot tell them apart)";
+                text = File.ReadAllText(chainFile);
+            }
+            catch (FileNotFoundException)
+            {
+                // "File not found" is only evidence of ABSENCE if we are allowed
+                // to look. Win32 returns ERROR_FILE_NOT_FOUND for a file inside a
+                // directory the caller cannot list, so trusting it here would
+                // report Docker's ACLed store as a clean base layer — which is
+                // exactly what it did before this check was added. Corroborate
+                // against the containing directory before believing it.
+                HRESULT dirHr = TryEnumerate(layerPath, out _, out string dirDetail);
+                if (dirHr.Failed)
+                {
+                    status = dirHr.Value == AccessDenied ? ChainStatus.Denied : ChainStatus.Unreadable;
+                    note = $"layerchain.json reported absent, but its directory is not readable — absence " +
+                           $"cannot be concluded ({dirDetail})";
+                    return [];
+                }
+                status = ChainStatus.Absent;
+                note = "no layerchain.json (base layer; directory is readable, so this is genuine absence)";
                 return [];
             }
-            string[] parents = JsonSerializer.Deserialize<string[]>(File.ReadAllText(chainFile)) ?? [];
+            catch (DirectoryNotFoundException ex)
+            {
+                status = ChainStatus.Unreadable;
+                note = $"layerchain.json: ERROR_PATH_NOT_FOUND [0x{(uint)ex.HResult:X8}] — absent, " +
+                       "or a parent directory denies traverse; Win32 cannot distinguish these";
+                return [];
+            }
+
+            string[] parents = JsonSerializer.Deserialize<string[]>(text) ?? [];
+            status = ChainStatus.Parsed;
             note = $"layerchain.json: {parents.Length} parent layer(s)";
             return [.. parents];
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (UnauthorizedAccessException ex)
         {
-            note = $"layerchain.json unreadable ({ex.GetType().Name}: {ex.Message}); treating as base layer";
+            status = ChainStatus.Denied;
+            note = $"layerchain.json: ERROR_ACCESS_DENIED [0x{(uint)ex.HResult:X8}] {ex.Message}";
+            return [];
+        }
+        catch (JsonException ex)
+        {
+            status = ChainStatus.Malformed;
+            note = $"layerchain.json is readable but malformed ({ex.Message}) — the parent chain is UNKNOWN, not empty";
+            return [];
+        }
+        catch (IOException ex)
+        {
+            status = ChainStatus.Unreadable;
+            note = $"layerchain.json unreadable ({ex.GetType().Name}: {ex.Message})";
             return [];
         }
     }
+
+    /// <summary>Maps a chain read to a matrix HRESULT. Only Absent and Parsed are
+    /// successes; the rest must never show as an OK row.</summary>
+    private static HRESULT ChainHr(ChainStatus status) => status switch
+    {
+        ChainStatus.Parsed or ChainStatus.Absent => default,
+        ChainStatus.Denied => new HRESULT(AccessDenied),
+        _ => ProbeFailed,
+    };
 
     private static void PrecleanDirectory(string path, string what)
     {

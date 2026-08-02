@@ -299,10 +299,13 @@ internal static partial class Program
         }
 
         // The template lives at the store root, alongside the layer directories.
-        string? template = FindScratchTemplate(chain[0], out string searched);
+        string? template = FindScratchTemplate(chain[0], out string searched, out bool denied);
         if (template is null)
         {
-            Step("FindScratchTemplate", ProbeFailed, $"no blank template found ({searched})");
+            Step("FindScratchTemplate", denied ? new HRESULT(AccessDenied) : ProbeFailed,
+                denied
+                    ? $"a blank template exists but could not be opened at this privilege level ({searched})"
+                    : $"no blank template exists ({searched})");
             return false;
         }
         Step("FindScratchTemplate", default, template);

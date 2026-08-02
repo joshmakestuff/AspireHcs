@@ -46,21 +46,45 @@ internal static unsafe partial class ComputeStorage
         })]),
     }.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
 
+    /// <summary>HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND) — this DLL or entry point
+    /// is absent on the host. hcsshim marks every one of these imports optional
+    /// (the trailing `?` in its mkwinsyscall lines) precisely because older builds
+    /// lack them.</summary>
+    private static readonly HRESULT ProcNotFound = new(unchecked((int)0x8007007F));
+
+    /// <summary>Single chokepoint converting a missing DLL or export into an
+    /// HRESULT. Without it a host lacking these entry points would take an
+    /// unhandled EntryPointNotFoundException out of whatever call site ran first,
+    /// destroying the whole matrix — a probe harness whose job is to RECORD
+    /// outcomes must never crash on one. Every wrapper below routes through here,
+    /// so a future addition cannot forget it.</summary>
+    private static HRESULT Guarded(Func<int> call)
+    {
+        try
+        {
+            return new HRESULT(call());
+        }
+        catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException)
+        {
+            return ProcNotFound;
+        }
+    }
+
     /// <summary>Modern equivalent of CreateSandboxLayer. Options are documented
     /// as unused by the platform as of RS5; hcsshim passes "".</summary>
     public static HRESULT InitializeWritableLayer(string writableLayerPath, IReadOnlyList<(string Path, Guid Id)> parentLayers) =>
-        new(HcsInitializeWritableLayer(EnsureTrailingSlash(writableLayerPath), LayerData(parentLayers), ""));
+        Guarded(() => HcsInitializeWritableLayer(EnsureTrailingSlash(writableLayerPath), LayerData(parentLayers), ""));
 
     /// <summary>Modern equivalent of ActivateLayer + PrepareLayer.</summary>
     public static HRESULT AttachLayerStorageFilter(string writableLayerPath, IReadOnlyList<(string Path, Guid Id)> parentLayers) =>
-        new(HcsAttachLayerStorageFilter(EnsureTrailingSlash(writableLayerPath), LayerData(parentLayers)));
+        Guarded(() => HcsAttachLayerStorageFilter(EnsureTrailingSlash(writableLayerPath), LayerData(parentLayers)));
 
     /// <summary>Modern equivalent of UnprepareLayer + DeactivateLayer.</summary>
     public static HRESULT DetachLayerStorageFilter(string writableLayerPath) =>
-        new(HcsDetachLayerStorageFilter(EnsureTrailingSlash(writableLayerPath)));
+        Guarded(() => HcsDetachLayerStorageFilter(EnsureTrailingSlash(writableLayerPath)));
 
     public static HRESULT DestroyLayer(string layerPath) =>
-        new(HcsDestroyLayer(EnsureTrailingSlash(layerPath)));
+        Guarded(() => HcsDestroyLayer(EnsureTrailingSlash(layerPath)));
 
     /// <summary>hcsshim's doc comment for these entry points says the platform
     /// appends a trailing separator itself if absent. Depending on undocumented
