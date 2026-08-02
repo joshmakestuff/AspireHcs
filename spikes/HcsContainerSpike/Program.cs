@@ -65,6 +65,8 @@ internal static partial class Program
                     "cleanup" => Cleanup(args, containerId),
                     "list" => List(args),
                     "terminate" => Terminate(containerId),
+                    "export" => Export(args),
+                    "privilege" => Privilege(args),
                     _ => Usage(),
                 };
             }
@@ -96,6 +98,7 @@ internal static partial class Program
         string workDir = Opt(args, "--work") ?? Path.Combine(Path.GetTempPath(), "AspireHcsContainerSpike");
         string sandboxPath = Path.Combine(workDir, containerId);
         string isolation = IsolationOpt(args);
+        string scratch = ScratchOpt(args, isolation);
 
         // The read-only layer chain, topmost first. Docker's windowsfilter store
         // records parents in layerchain.json; a base image has none. Reading it
@@ -137,7 +140,7 @@ internal static partial class Program
 
         if (isolation == "hyperv")
         {
-            return RunXenon(containerId, chain, layerIds, command, budgetSeconds, workDir, orphan);
+            return RunXenon(containerId, chain, layerIds, command, budgetSeconds, workDir, orphan, scratch);
         }
 
         PrecleanSandbox(sandboxPath);
@@ -540,6 +543,12 @@ internal static partial class Program
 
     private static void PrintSummary()
     {
+        if (Results.Count == 0)
+        {
+            // privilege mode keeps its own record (the matrix); an empty summary
+            // printed under it would read as "nothing was probed".
+            return;
+        }
         Console.WriteLine();
         Console.WriteLine("=== Summary ===");
         foreach ((string step, HRESULT hr, string detail) in Results)
@@ -567,6 +576,24 @@ internal static partial class Program
         return isolation is "process" or "hyperv"
             ? isolation
             : throw new ArgumentException($"--isolation must be 'process' or 'hyperv', got '{isolation}'");
+    }
+
+    /// <summary>How the container scratch is produced (issue #33 experiment 2).
+    /// 'api' calls CreateSandboxLayer; 'template' copies the store's blank VHDX,
+    /// which involves no privilege-gated storage call at all. Only the xenon path
+    /// can use 'template' — an argon still needs the host to Activate/Prepare the
+    /// scratch, so accepting it there would silently test nothing.</summary>
+    private static string ScratchOpt(string[] args, string isolation)
+    {
+        string scratch = Opt(args, "--scratch") ?? "api";
+        if (scratch is not ("api" or "template"))
+        {
+            throw new ArgumentException($"--scratch must be 'api' or 'template', got '{scratch}'");
+        }
+        return scratch == "template" && isolation != "hyperv"
+            ? throw new ArgumentException("--scratch template requires --isolation hyperv: the process-isolated path " +
+                                          "prepares the scratch host-side, so a copied template cannot stand in for CreateSandboxLayer there")
+            : scratch;
     }
 
     private static string? Opt(string[] args, string name)
@@ -601,16 +628,25 @@ internal static partial class Program
     private static int Usage()
     {
         Console.WriteLine("""
-            usage: HcsContainerSpike <run|orphan|cleanup|list|terminate> [options]
+            usage: HcsContainerSpike <run|orphan|cleanup|list|terminate|export|privilege> [options]
               run       --layer <dir> [--id <containerId>] [--command <cmdline>] [--seconds <n>] [--work <dir>]
                         [--isolation <process|hyperv>]   process (default) boots a host silo (argon);
                                              hyperv boots the same layer inside a utility VM (xenon)
+                        [--scratch <api|template>]       api (default) calls CreateSandboxLayer; template
+                                             copies the store's blank VHDX instead — no privileged storage
+                                             call at all. Requires --isolation hyperv (#33).
               orphan    --layer <dir> ...   create+start then exit without terminating
               cleanup   [--work <dir>] [--id <containerId>] [--isolation <process|hyperv>]
                                              release a leftover sandbox layer (and UVM scratch for hyperv)
               list      [--absent <id>]      enumerate HCS compute systems; with --absent,
                                              fail (exit 5) if <id> is still enumerable
               terminate [--id <containerId>]   terminate a leftover spike container
+              export    --layer <dir> [--store <dir>] [--name <layerName>]   ELEVATED, one-time: lift a base
+                                             layer out of Docker's Administrators-ACLed store into a store
+                                             the developer owns, via ExportLayer/ImportLayer (#33)
+              privilege --layer <dir> [--work <dir>] [--id <containerId>]    record every layer-storage
+                                             call's own HRESULT at the current privilege level, continuing
+                                             past failures; SKIP marks calls never attempted (#33)
             """);
         return 64;
     }
