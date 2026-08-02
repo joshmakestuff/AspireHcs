@@ -52,5 +52,5 @@ Spike code lives under `spikes/` and is not part of the shipped package.
 ## Requirements
 
 - Windows 10 1809 / Windows Server 2019 or later, Hyper-V feature enabled.
-- Membership in **Hyper-V Administrators** — sufficient for the VM path; elevation is not required ([#1](https://github.com/joshmakestuff/AspireHcs/issues/1)). The container spikes are a different story and currently require full elevation ([#33](https://github.com/joshmakestuff/AspireHcs/issues/33)).
+- Membership in **Hyper-V Administrators** — sufficient for the VM path; elevation is not required ([#1](https://github.com/joshmakestuff/AspireHcs/issues/1)). The same membership is also sufficient to boot a **Hyper-V-isolated container** unelevated ([#33](https://github.com/joshmakestuff/AspireHcs/issues/33)), given a readable layer store; process-isolated containers additionally need a privilege that Hyper-V Administrators does not confer ([details](docs/container-privilege-matrix.md)).
 - Windows-only by nature; the package fails fast on other platforms.
