@@ -460,6 +460,7 @@ $provenance = [ordered]@{
         rdp                 = $sentinel.rdp
         rdpFirewallEnabled  = $sentinel.rdpFirewallEnabled
         rdpFirewallRules    = $sentinel.rdpFirewallRules
+        rdpFirewallProfiles = $sentinel.rdpFirewallProfiles
         completedUtc        = $sentinel.completedUtc
     }
     edits          = @(

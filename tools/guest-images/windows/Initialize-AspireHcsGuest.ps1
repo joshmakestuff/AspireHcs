@@ -86,9 +86,13 @@ try {
         New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' `
             -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Any | Out-Null
     }
+    # .ToString(), for the enum reason documented at the RDP block below.
     $sshRuleAfter = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP'
-    if (-not $sshRuleAfter.Enabled) {
+    if ($sshRuleAfter.Enabled.ToString() -ne 'True') {
         throw "OpenSSH-Server-In-TCP is still disabled after enabling it."
+    }
+    if ($sshRuleAfter.Profile.ToString() -ne 'Any') {
+        throw "OpenSSH-Server-In-TCP is on profile '$($sshRuleAfter.Profile)', not Any — the NAT network's profile classification would decide reachability."
     }
     $result.firewallRule = "OpenSSH-Server-In-TCP enabled=$($sshRuleAfter.Enabled), profile $($sshRuleAfter.Profile)"
 
@@ -127,14 +131,29 @@ try {
     # RE-QUERIED, not assumed. The previous version recorded how many rules were FOUND, which
     # cannot fail against a rule that failed to enable — and that is exactly the defect it
     # missed. A count of matches is not evidence of a state.
+    # NOTE the .ToString() comparisons. Get-NetFirewallRule's Enabled is an ENUM, not a boolean:
+    # True = 1 and False = 2, and every nonzero enum is truthy in PowerShell. Measured on the
+    # reference host — for a DISABLED rule, `[bool]$r.Enabled` is True, `-not $r.Enabled` is
+    # False, and `Where-Object Enabled` matches it. Written the natural way, this check would
+    # have counted disabled rules as enabled and could never have failed — the same
+    # cannot-fail-against-its-own-defect shape that let the unreachable images seal.
     $rdpAfter = @(Get-NetFirewallRule -Group '@FirewallAPI.dll,-28752')
-    $rdpDisabled = @($rdpAfter | Where-Object { -not $_.Enabled })
+    $rdpDisabled = @($rdpAfter | Where-Object { $_.Enabled.ToString() -ne 'True' })
     if ($rdpDisabled.Count -gt 0) {
         throw "Remote Desktop firewall rules still disabled after enabling: $(($rdpDisabled.Name) -join ', ')."
     }
+
+    # Profile is the other half of reachability: rules enabled but scoped to Domain/Private only
+    # would still drop the NAT network's traffic, which is the precise failure being fixed.
+    $rdpProfiles = (($rdpAfter | ForEach-Object { $_.Profile.ToString() }) | Sort-Object -Unique)
+    $wrongProfile = @($rdpAfter | Where-Object { $_.Profile.ToString() -ne 'Any' })
+    if ($wrongProfile.Count -gt 0) {
+        throw "Remote Desktop firewall rules are not on profile Any: $(($wrongProfile | ForEach-Object { "$($_.Name)=$($_.Profile)" }) -join ', ')."
+    }
+
     $result.rdpFirewallRules = $rdpAfter.Count
-    $result.rdpFirewallEnabled = @($rdpAfter | Where-Object Enabled).Count
-    $result.rdpFirewallProfiles = (($rdpAfter | ForEach-Object { $_.Profile.ToString() }) | Sort-Object -Unique) -join ','
+    $result.rdpFirewallEnabled = @($rdpAfter | Where-Object { $_.Enabled.ToString() -eq 'True' }).Count
+    $result.rdpFirewallProfiles = $rdpProfiles -join ','
 
     # Automatic rather than its default trigger-start, the intent being that the image serves
     # RDP on every boot rather than only when something pokes the trigger. NOTE that the
