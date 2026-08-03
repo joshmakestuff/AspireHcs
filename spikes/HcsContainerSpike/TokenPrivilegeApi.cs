@@ -119,13 +119,17 @@ internal static class TokenPrivileges
     /// <summary>Every privilege in the process token and whether it is enabled —
     /// the inventory that turns "a required privilege is not held" into a
     /// specific, checkable name.</summary>
-    public static unsafe IReadOnlyList<(string Name, bool Enabled)> ListProcessPrivileges()
+    /// <summary>Returns null when the token could not be READ. An empty list and
+    /// an unreadable token are completely different claims — "holds no
+    /// privileges" versus "we do not know" — and collapsing them would let a
+    /// read failure masquerade as evidence about the token's contents.</summary>
+    public static unsafe IReadOnlyList<(string Name, bool Enabled)>? ListProcessPrivileges()
     {
         var result = new List<(string, bool)>();
         using SafeFileHandle process = new(PInvoke.GetCurrentProcess(), ownsHandle: false);
         if (!PInvoke.OpenProcessToken(process, TOKEN_ACCESS_MASK.TOKEN_QUERY, out SafeFileHandle token))
         {
-            return result;
+            return null;
         }
         using (token)
         {
@@ -134,14 +138,14 @@ internal static class TokenPrivileges
             PInvoke.GetTokenInformation(handle, TOKEN_INFORMATION_CLASS.TokenPrivileges, null, 0, &size);
             if (size == 0)
             {
-                return result;
+                return null;
             }
             byte[] buffer = new byte[size];
             fixed (byte* p = buffer)
             {
                 if (!PInvoke.GetTokenInformation(handle, TOKEN_INFORMATION_CLASS.TokenPrivileges, p, size, &size))
                 {
-                    return result;
+                    return null;
                 }
                 // TOKEN_PRIVILEGES is a count followed by a variable-length
                 // LUID_AND_ATTRIBUTES array; walk it by offset rather than

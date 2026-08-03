@@ -48,6 +48,8 @@ param(
     # Internal: where the elevated phase performs a split
     # extract-then-finalize, the positive control for the extraction record.
     [string]$SplitEntry,
+    # Internal: four directories for the privilege-identification arms.
+    [string]$IdentifyEntries,
     [switch]$SkipPull
 )
 
@@ -216,6 +218,31 @@ if ($Phase -eq 'import') {
     if ($NoSecurityEntry) {
         [void](Invoke-Step -Title 'ElevatedFinalize(descriptor-free entry, extracted unelevated)' `
                 -CommandArgs @('finalize', '--entry', $NoSecurityEntry))
+    }
+
+    # Which privilege actually gates finalization (#33's open question). Needs
+    # four pristine trees, because ProcessBaseImage is not idempotent and each
+    # arm must meet an untouched entry; extraction is unprivileged and fast.
+    if ($IdentifyEntries) {
+        $armDirs = $IdentifyEntries -split ';'
+        $armsReady = $true
+        foreach ($dir in $armDirs) {
+            if (-not (Invoke-Step -Title "IdentifyArmExtract($(Split-Path $dir -Leaf))" `
+                        -CommandArgs @('import', '--metadata', ($MetadataPath -split ';')[0], '--entry', $dir, `
+                            '--no-security', '--skip-finalize'))) {
+                $armsReady = $false
+            }
+        }
+        if ($armsReady) {
+            # MustPass judges the EXPERIMENT's validity, not the arms: `identify`
+            # exits 0 whenever all four arms ran under the privilege state they
+            # intended, and a failing arm is the datum being collected.
+            [void](Invoke-Step -Title 'IdentifyFinalizePrivilege' -MustPass `
+                    -CommandArgs @('identify', '--entries', ($armDirs -join ',')))
+        }
+        else {
+            Write-Both 'Skipping IdentifyFinalizePrivilege: could not prepare four pristine entries.'
+        }
     }
 
     # The OTHER off-diagonal, and the positive control for the provenance fix:
@@ -394,6 +421,8 @@ $childArgs = @(
     '-MetadataPath', (& $q ($metadataPaths -join ';')),
     '-NoSecurityEntry', (& $q $noSecurityEntry),
     '-SplitEntry', (& $q (Join-Path $Store 'experiment-split-finalize')),
+    '-IdentifyEntries', (& $q (($('arm-neither', 'arm-backup', 'arm-restore', 'arm-both') |
+                ForEach-Object { Join-Path $Store "experiment-$_" }) -join ';')),
     '-LogPath', (& $q $LogPath)
 )
 $child = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
