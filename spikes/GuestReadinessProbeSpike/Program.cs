@@ -241,8 +241,15 @@ internal static class Program
                     int refused = notReadyRefusals.GetValueOrDefault("modify:memory-grown");
                     Check(refused > 0,
                         $"the guest-gated probe was refused with ERROR_NOT_READY before succeeding ({refused} refusals) — gated on the guest, not merely slow");
-                    Check(firstSuccess["modify:memory-same"] < balloonMs,
-                        "the idempotent resize answered before the guest was up; it is not a readiness signal");
+                    // The mirror of the >1s bar above; if the idempotent resize ever needs the
+                    // guest, it has stopped being the defect the finding records. The previous
+                    // shape (same < grown) could not fail: each iteration awaits memory-same
+                    // before memory-grown, so loop order alone guarantees the ordering.
+                    bool sameAnswered = firstSuccess.TryGetValue("modify:memory-same", out long sameMs);
+                    Check(sameAnswered && sameMs < 1_000,
+                        sameAnswered
+                            ? $"the idempotent resize answered in {sameMs} ms — without the guest; it is not a readiness signal"
+                            : "the idempotent resize never succeeded — it should answer instantly, without the guest");
                 }
 
                 return failures == 0 ? 0 : 1;
