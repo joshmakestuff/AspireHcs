@@ -284,19 +284,31 @@ privileges. The same token is the control that makes the reading airtight:
 through enabled in that very token — so the logon was fresh and group
 membership did apply. Only the sensitive group was neutered.
 
-Because filtering removes the privileges from any interactive standard token
-regardless of which group granted them, **no group membership can give an
-unelevated session `SeBackupPrivilege`.** Backup Operators would hold them only
-in an *elevated* token, which buys nothing over elevating directly while adding
-a standing ACL-bypass capability — a worse trade, not a better one.
+**Backup Operators specifically is measured; the generalization is reasoned.**
+UAC filtering is documented to strip this privilege *set* from the filtered
+token, and holding a filtered privilege is itself one of the triggers for
+filtering — so another grant path (a direct User Rights Assignment, say) is
+expected to be filtered identically. That expectation was **not separately
+probed**: one group was tested, and the rest follows from documented behaviour
+rather than measurement. Either way, Backup Operators would hold the privileges
+only in an *elevated* token, which buys nothing over elevating directly while
+adding a standing ACL-bypass capability — a worse trade, not a better one.
 
-**Conclusion, recorded as a decision rather than a limitation:** acquisition
-costs one UAC prompt per image. Everything else — pulling, verifying, creating
-per-container scratch layers, running containers — is unprivileged. The only
-way to remove that prompt is a privileged service on Docker's model, which is
-deliberately not pursued: it converts a visible, attributable, per-image
-elevation into a permanent one, and membership in the group that reaches such a
-service is effectively administrator-equivalent.
+**Conclusion, recorded as a decision rather than a limitation:** the elevation
+is needed by `import`, and by nothing else. `pull` is plain HTTPS plus writes
+into the user's own profile; verifying and running containers are unprivileged.
+
+The prompt is **per elevated session, not per image** — one elevation can import
+any number of images. The archived run witnesses exactly that: a single
+`=== Import (elevating: expect one UAC prompt) ===` phase containing two
+successful `ElevatedImport` steps, ltsc2025 and ltsc2022. So a developer
+bootstrapping a machine accepts one prompt and imports every base image they
+need in that session; the cost does not scale with the number of images.
+
+The only way to remove the prompt entirely is a privileged service on Docker's
+model, which is deliberately not pursued: it converts a visible, attributable,
+occasional elevation into a permanent one, and membership in the group that
+reaches such a service is effectively administrator-equivalent.
 
 ## Still open
 

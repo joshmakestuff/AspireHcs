@@ -185,22 +185,14 @@ internal static partial class Program
             Console.WriteLine("them can — CreateRestrictedToken with PrivilegesToDelete, or simply a different");
             Console.WriteLine("account.");
             Console.WriteLine();
-            Console.WriteLine("So two hypotheses remain live, and they differ in what they imply:");
-            Console.WriteLine("  (a) the gate is HOLDING SeBackup/SeRestore -> Backup Operators membership would");
-            Console.WriteLine("      make `import` work unelevated;");
-            Console.WriteLine("  (b) the gate is something else elevation supplies (another privilege, or an");
-            Console.WriteLine("      access check on Administrators) -> that route is closed.");
-            Console.WriteLine("The practical test is direct rather than more token surgery: have an account that");
-            Console.WriteLine("holds Backup Operators (and NOT Administrators) run `import` UNELEVATED. Note what");
-            Console.WriteLine("that does and does not show — `import` also enables privileges, restores security");
-            Console.WriteLine("descriptors and touches ACL-sensitive files, so it answers 'does acquisition work");
-            Console.WriteLine("for this account' rather than isolating which privilege ProcessBaseImage checks;");
-            Console.WriteLine("read the per-step HRESULTs to see WHICH gate stopped it, if any.");
-            Console.WriteLine();
-            Console.WriteLine("Group membership only enters a token at LOGON. Do not sign out to refresh it if");
-            Console.WriteLine("that would end the session you are working in (a remote one, say) — start a");
-            Console.WriteLine("SEPARATE logon instead: `runas /user:...`, or a second account created for the");
-            Console.WriteLine("test, both of which leave the current session intact.");
+            Console.WriteLine("The obvious follow-up — 'would Backup Operators membership make `import` work");
+            Console.WriteLine("unelevated?' — has ALREADY BEEN MEASURED, and the answer is NO. An account holding");
+            Console.WriteLine("Backup Operators and not Administrators failed at EnableBackupRestorePrivileges");
+            Console.WriteLine("(0x80070514), because UAC token filtering marks that group 'used for deny only' in");
+            Console.WriteLine("the standard token and strips these privileges from it. Hyper-V Administrators is");
+            Console.WriteLine("not a filtered group and came through enabled in the SAME token, which is what");
+            Console.WriteLine("rules out a stale logon. See docs/image-acquisition.md — do not re-run that test");
+            Console.WriteLine("expecting a different answer.");
             return;
         }
         if (neither.Value != PrivilegeNotHeld)
