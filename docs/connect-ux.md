@@ -127,15 +127,25 @@ other than who was asked for.
 - **The click itself.** That `Process.Start` puts a client window on the desktop needs a human to
   watch a window appear, so it is not asserted anywhere. The command line it would carry *is*
   asserted, live, above.
-- **RDP against our own fixture image.** The image builder now enables Remote Desktop and
-  refuses to seal an image unless TermService was observed listening on 3389 during burn-in —
-  but **no image has been built from that change yet**. The one on disk
-  (`winserver2025-core.vhdx`, built 2026-08-01) predates it, and its provenance `edits` list
-  records sshd and BCD/EMS changes and nothing else. So `WithRdpCommand` still has no guest here
-  to connect to. The host-side half (the generated file, the command line, the gating) is
-  unit-tested; the guest-side half is untested against any image we have.
-  **Do not read `WithRdpCommand` as "RDP works with the AspireHcs guest image".** It means "this
-  opens mstsc pointed at the guest", which is a claim about the host.
+- **RDP end to end.** Two images were built on 2026-08-03 with the RDP edit
+  (`winserver2025-core-rdp.vhdx` and `winserver2025-desktop.vhdx`), both sealing with
+  `burnIn.rdp: "Listening"`. **They are still not reachable on 3389 from the host.**
+  `Rdp_connect_command_reaches_a_guest_that_serves_remote_desktop` boots one and retries for two
+  minutes: every attempt times out, never refuses. A guest with nothing listening sends RST, so
+  a silent drop is the firewall — while SSH on 22 from the same guest works.
+
+  The cause and the lesson are the same thing: **a listener inside the guest is not
+  reachability.** Local sockets are visible regardless of the firewall, so the listener probe
+  could never have caught this, and the sentinel recorded how many firewall rules were *found*
+  rather than how many were *enabled* — a check that cannot fail against the defect it exists
+  for. The suspected mechanism is piping stale rule objects
+  (`$captured | Set-NetFirewallRule -Profile Any` after `Enable-NetFirewallRule`) re-applying
+  the captured `Enabled = False`; sshd's rule ships enabled, so the identical pattern was
+  harmless there and hid it. Fixed by addressing rules by group, enabling last, re-querying, and
+  gating the seal on the enabled count — **unproven until an image is built from it.**
+
+  So `WithRdpCommand` still means "this opens mstsc pointed at the guest", a claim about the
+  host. **Do not read it as "RDP works with the AspireHcs guest image."**
 
 ## Still open
 

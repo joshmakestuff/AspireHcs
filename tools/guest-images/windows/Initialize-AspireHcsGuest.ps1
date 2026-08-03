@@ -73,16 +73,24 @@ try {
 
     # The capability's inbox firewall rule when present; otherwise create an equivalent.
     # Profile Any: the NAT network's profile classification must not decide reachability.
+    # Addressed by name rather than by piping the captured object, for the same reason as the
+    # RDP rules below: a stale object piped into Set-NetFirewallRule can undo the enable. This
+    # rule ships enabled so the old pattern happened to work, which is precisely why it went
+    # unnoticed — closing it here too rather than leaving the sibling to fail later.
     $rule = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
     if ($rule) {
-        $rule | Enable-NetFirewallRule
-        $rule | Set-NetFirewallRule -Profile Any
+        Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Profile Any
+        Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP'
     }
     else {
         New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' `
             -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Any | Out-Null
     }
-    $result.firewallRule = 'OpenSSH-Server-In-TCP enabled, profile Any'
+    $sshRuleAfter = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP'
+    if (-not $sshRuleAfter.Enabled) {
+        throw "OpenSSH-Server-In-TCP is still disabled after enabling it."
+    }
+    $result.firewallRule = "OpenSSH-Server-In-TCP enabled=$($sshRuleAfter.Enabled), profile $($sshRuleAfter.Profile)"
 
     # Held to the same standard as RDP below — added when RDP's probe exposed that sshd's only
     # witness was its service state, which cannot distinguish "running" from "serving".
@@ -107,9 +115,26 @@ try {
         $because = if ($rdpRuleError) { " Get-NetFirewallRule failed: $($rdpRuleError[0].Exception.Message)" } else { '' }
         throw "No firewall rules found in the Remote Desktop group '@FirewallAPI.dll,-28752'; refusing to claim RDP is reachable.$because"
     }
-    $rdpRules | Enable-NetFirewallRule
-    $rdpRules | Set-NetFirewallRule -Profile Any
-    $result.rdpFirewallRules = $rdpRules.Count
+    # Addressed BY GROUP, never by piping the objects captured above. Piping a stale rule object
+    # into Set-NetFirewallRule can re-apply the state it was captured with — so
+    # `Enable-NetFirewallRule` followed by `$captured | Set-NetFirewallRule -Profile Any` can
+    # switch the rules straight back off. sshd's rule ships ENABLED, so the same pattern was
+    # harmless there and hid the problem; the RDP rules ship DISABLED, and the 2026-08-03
+    # images sealed with RDP listening in-guest but unreachable from the host.
+    Set-NetFirewallRule -Group '@FirewallAPI.dll,-28752' -Profile Any
+    Enable-NetFirewallRule -Group '@FirewallAPI.dll,-28752'
+
+    # RE-QUERIED, not assumed. The previous version recorded how many rules were FOUND, which
+    # cannot fail against a rule that failed to enable — and that is exactly the defect it
+    # missed. A count of matches is not evidence of a state.
+    $rdpAfter = @(Get-NetFirewallRule -Group '@FirewallAPI.dll,-28752')
+    $rdpDisabled = @($rdpAfter | Where-Object { -not $_.Enabled })
+    if ($rdpDisabled.Count -gt 0) {
+        throw "Remote Desktop firewall rules still disabled after enabling: $(($rdpDisabled.Name) -join ', ')."
+    }
+    $result.rdpFirewallRules = $rdpAfter.Count
+    $result.rdpFirewallEnabled = @($rdpAfter | Where-Object Enabled).Count
+    $result.rdpFirewallProfiles = (($rdpAfter | ForEach-Object { $_.Profile.ToString() }) | Sort-Object -Unique) -join ','
 
     # Automatic rather than its default trigger-start, the intent being that the image serves
     # RDP on every boot rather than only when something pokes the trigger. NOTE that the

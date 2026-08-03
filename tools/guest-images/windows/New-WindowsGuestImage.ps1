@@ -412,6 +412,13 @@ try {
     if ($sentinel.rdp -ne 'Listening') {
         throw "Bootstrap recorded rdp='$($sentinel.rdp)' — TermService was not accepting connections on 3389, so this image cannot back the Connect (RDP) command."
     }
+    # A listener inside the guest is NOT reachability: the 2026-08-03 images sealed with
+    # rdp='Listening' and were still unreachable from the host, because the firewall rules had
+    # been switched back off. Local sockets are visible regardless of the firewall, so the
+    # listener probe alone can never catch that.
+    if ($sentinel.rdpFirewallEnabled -lt 1 -or $sentinel.rdpFirewallEnabled -ne $sentinel.rdpFirewallRules) {
+        throw "Bootstrap recorded $($sentinel.rdpFirewallEnabled)/$($sentinel.rdpFirewallRules) Remote Desktop firewall rules enabled — the guest would listen on 3389 but drop inbound connections."
+    }
     Write-Step "Sentinel ok: sshd=$($sentinel.sshd)/$($sentinel.sshdListening), rdp=$($sentinel.rdp), completed $($sentinel.completedUtc)"
 }
 finally {
@@ -448,10 +455,12 @@ $provenance = [ordered]@{
     scriptCommit   = $scriptCommit
     worktreeDirty  = [bool]$dirty
     burnIn         = @{
-        sshd          = $sentinel.sshd
-        sshdListening = $sentinel.sshdListening
-        rdp           = $sentinel.rdp
-        completedUtc  = $sentinel.completedUtc
+        sshd                = $sentinel.sshd
+        sshdListening       = $sentinel.sshdListening
+        rdp                 = $sentinel.rdp
+        rdpFirewallEnabled  = $sentinel.rdpFirewallEnabled
+        rdpFirewallRules    = $sentinel.rdpFirewallRules
+        completedUtc        = $sentinel.completedUtc
     }
     edits          = @(
         'unattend: specialized, OOBE skipped, single autologon consumed by burn-in',
