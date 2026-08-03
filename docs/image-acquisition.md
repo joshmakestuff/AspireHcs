@@ -34,7 +34,7 @@ which had been carried as *untested, not true* since the xenon spike.
 | Acquire + boot, unelevated, no Docker | **PROVEN** — `cmd /c ver` → `10.0.26100.33158`, cold-to-exec 2124 ms |
 | Build-mismatched image under Hyper-V isolation | **PROVEN** — 20348 guest on 26200 host, cold-to-exec 1903 ms |
 | A store AspireHcs owns needs no ACL surgery | **PROVEN** — unelevated `verify` passes on both entries, no grant |
-| Elevation still required, and only here | `ProcessBaseImage` (finalize). Extraction and everything after are unprivileged |
+| Elevation needed for | **import only** — never for pulling, verifying, or running the container |
 
 ## Why not just copy the layer out of Docker's store
 
@@ -90,25 +90,35 @@ before trusting a file it did not download itself.
 them reach a URL — `..`, `?`, `#`, spaces and uppercase repository names are
 rejected at parse time rather than being interpolated into a request.
 
-### The privilege boundary is the FINALIZE call, not extraction
+### Where elevation is actually needed
+
+**`import` needs elevation. Nothing else does.** Being precise about *why*
+matters, because there are two independent gates inside `import` and it is easy
+to state one of them as if it were the whole story:
 
 | Call | Unelevated result | HRESULT |
 |---|---|---|
-| extraction (`NtCreateFile` + `BackupWrite`, 10 288 entries) | **OK** | `0x00000000` |
 | `AdjustTokenPrivileges` (SeBackup/SeRestore) | NOT HELD | `0x80070514` ERROR_NOT_ALL_ASSIGNED |
-| `ProcessBaseImage` | **FAILED** | `0x80070522` ERROR_PRIVILEGE_NOT_HELD |
+| extraction **with** descriptors (full fidelity) | never reached — fails fast above | — |
+| extraction **without** descriptors (`--no-security`, 10 288 entries) | **OK** | `0x00000000` |
+| `ProcessBaseImage` (finalize), on that extracted tree | **FAILED** | `0x80070522` ERROR_PRIVILEGE_NOT_HELD |
 
-So a developer can *download and unpack* an image with no elevation at all. What
-they cannot do unelevated is **finalize** it — and `0x80070522` is the same
-privilege-class gate that stops process-isolated containers at `ActivateLayer`
-(see [container-privilege-matrix.md](container-privilege-matrix.md)). A filtered
-token does not hold `SeBackupPrivilege`/`SeRestorePrivilege` at all, so they
-cannot simply be enabled.
+Read together: full-fidelity extraction needs `SeBackupPrivilege` and
+`SeRestorePrivilege` because it replays security descriptors through
+`BackupWrite`, and it fails fast at the token rather than part-way through a
+458 MB import. Finalize is gated **separately** — proven by getting past
+extraction via `--no-security` and watching `ProcessBaseImage` fail anyway. So
+neither gate is a consequence of the other, and it would be wrong to say "only
+finalize needs elevation".
 
-Note that unelevated extraction is only possible in `--no-security` mode, which
-does not replay security descriptors. Full-fidelity extraction needs the same
-two privileges, and fails fast at `AdjustTokenPrivileges` rather than part-way
-through a 458 MB import.
+`0x80070522` is the same privilege-class gate that stops process-isolated
+containers at `ActivateLayer` (see
+[container-privilege-matrix.md](container-privilege-matrix.md)). A filtered
+token holds neither privilege at all, so they cannot simply be enabled.
+
+What this buys in practice: acquisition is a one-time elevated step, and
+everything a developer does afterwards — verifying, running containers — is
+unprivileged.
 
 ### What the images actually contain
 
