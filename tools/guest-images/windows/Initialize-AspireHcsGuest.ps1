@@ -7,6 +7,32 @@ Start-Transcript -Path C:\Windows\Setup\Scripts\bootstrap-transcript.log
 
 $result = [ordered]@{ startedUtc = (Get-Date).ToUniversalTime().ToString('o') }
 
+# A service reporting Running is not the same as something accepting connections on its port —
+# the exact gap WithTcpHealthCheck exists to catch on the host side. Both fixtures this image
+# advertises are held to the listening standard, not the service-state one.
+function Wait-ForListener {
+    param(
+        [Parameter(Mandatory)][int]$Port,
+        # The service that must own the socket. Without this, any process squatting on the port
+        # would satisfy the probe.
+        [Parameter(Mandatory)][string]$ServiceName,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $expectedPid = (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'").ProcessId
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.OwningProcess -eq $expectedPid } | Select-Object -First 1
+        if ($listener) { return 'Listening' }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    # Distinguish "nothing there" from "something else there": they need different fixes.
+    $any = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    return $(if ($any.Count -gt 0) { "ListeningButNot$ServiceName" } else { 'NotListening' })
+}
+
 try {
     # OpenSSH server is the image's positive TCP health-check fixture: it must listen on 22
     # at every boot with no further configuration.
@@ -27,6 +53,10 @@ try {
     }
     $result.firewallRule = 'OpenSSH-Server-In-TCP enabled, profile Any'
 
+    # Held to the same standard as RDP below — added when RDP's probe exposed that sshd's only
+    # witness was its service state, which cannot distinguish "running" from "serving".
+    $result.sshdListening = Wait-ForListener -Port 22 -ServiceName 'sshd'
+
     # Remote Desktop, for the dashboard's Connect (RDP) command (#26). Server images ship with
     # it denied, so without this the image has nothing listening on 3389 and the command has
     # nowhere to connect.
@@ -37,9 +67,14 @@ try {
     # The canonical group resource string, NOT -DisplayGroup 'Remote Desktop': the display name
     # is localized, so on a non-English image that filter matches nothing and would silently
     # enable no rules at all while appearing to succeed.
-    $rdpRules = @(Get-NetFirewallRule -Group '@FirewallAPI.dll,-28752' -ErrorAction SilentlyContinue)
+    # The error is captured rather than discarded: SilentlyContinue alone would let a real
+    # failure (provider unavailable, access denied) be reported as "no rules found", which
+    # points at the wrong fix entirely.
+    $rdpRules = @(Get-NetFirewallRule -Group '@FirewallAPI.dll,-28752' `
+        -ErrorAction SilentlyContinue -ErrorVariable rdpRuleError)
     if ($rdpRules.Count -eq 0) {
-        throw "No firewall rules found in the Remote Desktop group '@FirewallAPI.dll,-28752'; refusing to claim RDP is reachable."
+        $because = if ($rdpRuleError) { " Get-NetFirewallRule failed: $($rdpRuleError[0].Exception.Message)" } else { '' }
+        throw "No firewall rules found in the Remote Desktop group '@FirewallAPI.dll,-28752'; refusing to claim RDP is reachable.$because"
     }
     $rdpRules | Enable-NetFirewallRule
     $rdpRules | Set-NetFirewallRule -Profile Any
@@ -55,16 +90,9 @@ try {
     }
 
     # A RUNTIME WITNESS, not "the registry value was set": the image may only advertise RDP if
-    # something is actually listening on 3389 while the burn-in is still running. The builder
+    # TermService is actually listening on 3389 while the burn-in is still running. The builder
     # turns this into a hard gate at seal time.
-    $deadline = (Get-Date).AddSeconds(60)
-    $listening = $null
-    do {
-        $listening = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
-        if ($listening) { break }
-        Start-Sleep -Seconds 2
-    } while ((Get-Date) -lt $deadline)
-    $result.rdp = if ($listening) { 'Listening' } else { 'NotListening' }
+    $result.rdp = Wait-ForListener -Port 3389 -ServiceName 'TermService'
 
     # The cached answer file carries the (redacted-by-setup, but still) admin credentials
     # config; the sealed base has no reason to keep it.

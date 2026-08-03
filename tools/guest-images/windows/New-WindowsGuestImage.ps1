@@ -299,12 +299,16 @@ try {
     if ($sentinel.sshd -ne 'Running') {
         throw "Bootstrap completed but recorded sshd='$($sentinel.sshd)' — the image's advertised SSH fixture was not serving at burn-in."
     }
-    # Same standard as sshd: the image may not advertise RDP unless something was observed
-    # listening on 3389 inside the guest. A registry value that was set proves nothing.
-    if ($sentinel.rdp -ne 'Listening') {
-        throw "Bootstrap completed but recorded rdp='$($sentinel.rdp)' — nothing was listening on 3389, so this image cannot back the Connect (RDP) command."
+    # Both fixtures are gated on an observed listener owned by the expected service. A service
+    # reporting Running proves it started, not that anything is accepting connections, and a
+    # registry value that was set proves less than that.
+    if ($sentinel.sshdListening -ne 'Listening') {
+        throw "Bootstrap recorded sshdListening='$($sentinel.sshdListening)' — sshd was not accepting connections on 22 at burn-in."
     }
-    Write-Step "Sentinel ok: sshd=$($sentinel.sshd), rdp=$($sentinel.rdp), completed $($sentinel.completedUtc)"
+    if ($sentinel.rdp -ne 'Listening') {
+        throw "Bootstrap recorded rdp='$($sentinel.rdp)' — TermService was not accepting connections on 3389, so this image cannot back the Connect (RDP) command."
+    }
+    Write-Step "Sentinel ok: sshd=$($sentinel.sshd)/$($sentinel.sshdListening), rdp=$($sentinel.rdp), completed $($sentinel.completedUtc)"
 }
 finally {
     Dismount-VHD -Path $OutputVhdx
@@ -335,7 +339,12 @@ $provenance = [ordered]@{
     builtBy        = "$env:USERDOMAIN\$env:USERNAME"
     scriptCommit   = $scriptCommit
     worktreeDirty  = [bool]$dirty
-    burnIn         = @{ sshd = $sentinel.sshd; rdp = $sentinel.rdp; completedUtc = $sentinel.completedUtc }
+    burnIn         = @{
+        sshd          = $sentinel.sshd
+        sshdListening = $sentinel.sshdListening
+        rdp           = $sentinel.rdp
+        completedUtc  = $sentinel.completedUtc
+    }
     edits          = @(
         'unattend: specialized, OOBE skipped, single autologon consumed by burn-in',
         'sshd: StartupType Automatic, firewall OpenSSH-Server-In-TCP profile Any',
