@@ -53,11 +53,21 @@ and a single combined step would have reported one gate's result for both.
 | `pull` ltsc2022 | **OK** | 120 277 280 bytes, sha256 verified while streaming |
 | `pull` re-run | **OK** | existing blob re-hashed and kept (content-addressed store) |
 | `pull` servercore | **refused, exit 2** | 2 layers — chain import is out of scope, by design |
-| `import --no-security --skip-finalize` ltsc2025 | **OK** | **10 288 entries, 458 MB, 5.2 s**, diffID matches the image config |
+| `import --no-security --skip-finalize` ltsc2025 | **OK** | **10 288 entries, 458 MB, 5.2 s**; compressed blob matches the manifest digest AND the unpacked stream matches the config's diffID |
 
 MCR needs no token: `GET /v2/` answers 200 anonymously, and both nanoserver tags
 serve plain `application/vnd.docker.image.rootfs.diff.tar.gzip` layers with no
 foreign-layer `urls` indirection.
+
+Digests are re-checked at every hand-off rather than once: a manifest fetched by
+tag is bound to the registry's `Docker-Content-Digest` (and the fetch fails
+closed if that header is absent or not sha256), a manifest fetched by digest must
+hash to it, and `import` re-hashes the compressed blob against the manifest
+before trusting a file it did not download itself.
+
+`--image` values are validated against the OCI reference grammar before any of
+them reach a URL — `..`, `?`, `#`, spaces and uppercase repository names are
+rejected at parse time rather than being interpolated into a request.
 
 ### The privilege boundary is the FINALIZE call, not extraction
 
