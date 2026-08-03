@@ -127,19 +127,24 @@ other than who was asked for.
 - **The click itself.** That `Process.Start` puts a client window on the desktop needs a human to
   watch a window appear, so it is not asserted anywhere. The command line it would carry *is*
   asserted, live, above.
-- **RDP against our own fixture image.** `tools/guest-images/windows` does not enable Remote
-  Desktop — its provenance `edits` list records sshd and BCD/EMS changes and nothing else — so
-  `WithRdpCommand` has no guest here to connect to. The host-side half (the generated file, the
-  command line, the gating) is unit-tested; the guest-side half is untested against our image.
+- **RDP against our own fixture image.** The image builder now enables Remote Desktop and
+  refuses to seal an image unless TermService was observed listening on 3389 during burn-in —
+  but **no image has been built from that change yet**. The one on disk
+  (`winserver2025-core.vhdx`, built 2026-08-01) predates it, and its provenance `edits` list
+  records sshd and BCD/EMS changes and nothing else. So `WithRdpCommand` still has no guest here
+  to connect to. The host-side half (the generated file, the command line, the gating) is
+  unit-tested; the guest-side half is untested against any image we have.
   **Do not read `WithRdpCommand` as "RDP works with the AspireHcs guest image".** It means "this
   opens mstsc pointed at the guest", which is a claim about the host.
 
 ## Still open
 
-- Enabling Remote Desktop in the guest image bootstrap (`fDenyTSConnections=0` plus the firewall
-  group), with a burn-in assertion in `New-WindowsGuestImage.ps1` next to the existing sshd one.
-  That change only takes effect in a rebuilt image, so it should land together with a rebuild and
-  a live RDP run — not before.
+- **Building an image from the RDP change and proving it live.** The bootstrap now sets
+  `fDenyTSConnections=0`, opens the Remote Desktop firewall group by its canonical resource
+  string, and records a listener witness that `New-WindowsGuestImage.ps1` gates sealing on. None
+  of that is worth anything until an image is built from it and a host-side connection to 3389
+  is observed. Until then the sample AppHost stays deliberately un-wired for RDP — shipping a
+  button that cannot connect is the thing this is meant to fix.
 - Credentials beyond a prefilled user name. mstsc prompts for the password and ssh prompts for
   everything; `IInteractionService` could supply them, at the cost of the AppHost holding guest
   credentials.
