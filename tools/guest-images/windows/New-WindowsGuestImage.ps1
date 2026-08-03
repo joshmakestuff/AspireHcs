@@ -28,6 +28,20 @@
     Hyper-V PowerShell module (build-time tooling; the AspireHcs runtime needs no such thing).
 
 .EXAMPLE
+    # See which editions an ISO offers (Core, Desktop Experience, ...) before choosing.
+    .\New-WindowsGuestImage.ps1 -IsoPath E:\isos\server2025.iso -ListImages
+
+.EXAMPLE
+    # Desktop Experience, selected by name rather than by a per-ISO index.
+    $pw = Read-Host -AsSecureString 'Guest Administrator password'
+    .\New-WindowsGuestImage.ps1 `
+        -IsoPath E:\isos\server2025.iso -SkipIsoHashCheck `
+        -ImageName 'Windows Server 2025 Standard (Desktop Experience)' `
+        -SizeGB 60 `
+        -OutputVhdx D:\HV\VHD\aspirehcs-guests\winserver2025-desktop.vhdx `
+        -AdminPassword $pw
+
+.EXAMPLE
     $pw = Read-Host -AsSecureString 'Guest Administrator password'
     .\New-WindowsGuestImage.ps1 `
         -IsoPath E:\isos\en-us_windows_server_2025_updated_sep_2025_x64_dvd_6d1ad20d.iso `
@@ -60,16 +74,28 @@ param(
     [ValidatePattern('^$|^[0-9a-fA-F]{64}$')]
     [string]$FodIsoSha256,
 
-    [Parameter(Mandatory)]
+    # Not Mandatory only so -ListImages can run without them; still required to build.
     [string]$OutputVhdx,
 
     # Baked into the image's Administrator account. This is a TEST FIXTURE image for an
     # isolated NAT network, not a production credential store.
-    [Parameter(Mandatory)]
     [SecureString]$AdminPassword,
 
     [int]$SizeGB = 40,
+
+    # Which edition to install. A Server ISO carries several — Server Core and Desktop
+    # Experience variants of each SKU — and the index differs between ISOs, so selecting by
+    # name is the safer habit. Run -ListImages against your ISO to see what it offers.
+    # Matched EXACTLY, because 'Windows Server 2025 Standard' is a prefix of
+    # '...Standard (Desktop Experience)' and a substring match would silently pick one of them.
+    [string]$ImageName,
+
     [int]$ImageIndex = 1,          # 1 = Server Core Standard on the Server 2025 ISO
+
+    # Prints the editions in the ISO and exits. Needs elevation, because reading the WIM means
+    # mounting the ISO.
+    [switch]$ListImages,
+
     [int]$BurnInTimeoutMinutes = 20,
     [string]$BurnInVmName = 'AspireHcsImageBurnIn'
 )
@@ -77,9 +103,35 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Both name the edition. Silently preferring one would make the ignored parameter look
+# honoured, which is worse than refusing.
+if ($ImageName -and $PSBoundParameters.ContainsKey('ImageIndex')) {
+    throw "-ImageName and -ImageIndex both select the edition. Pass one, not both."
+}
+
+if ($ListImages) {
+    Write-Host "Editions in $IsoPath"
+    $listMount = Mount-DiskImage -ImagePath (Resolve-Path $IsoPath).Path -PassThru
+    try {
+        $listDrive = ($listMount | Get-Volume).DriveLetter
+        $listWim = "${listDrive}:\sources\install.wim"
+        if (-not (Test-Path $listWim)) { throw "install.wim not found at $listWim" }
+        Get-WindowsImage -ImagePath $listWim |
+            Select-Object ImageIndex, ImageName, @{n = 'SizeGB'; e = { [math]::Round($_.ImageSize / 1GB, 2) } } |
+            Format-Table -AutoSize | Out-String | Write-Host
+        Write-Host "Select one with -ImageName '<exact name>' (or -ImageIndex <n>)."
+    }
+    finally {
+        Dismount-DiskImage -ImagePath (Resolve-Path $IsoPath).Path | Out-Null
+    }
+    return
+}
+
 if (-not $SkipIsoHashCheck -and -not $IsoSha256) {
     throw "-IsoSha256 is required. Pass the ISO's pinned SHA-256, or -SkipIsoHashCheck to build an explicitly unpinned iteration image."
 }
+if (-not $OutputVhdx) { throw "-OutputVhdx is required (omit it only with -ListImages)." }
+if (-not $AdminPassword) { throw "-AdminPassword is required (omit it only with -ListImages)." }
 if (Test-Path $OutputVhdx) {
     throw "Output already exists: $OutputVhdx. Delete it first; this script never overwrites."
 }
@@ -140,14 +192,32 @@ try {
     $wimPath = "${isoDrive}:\sources\install.wim"
     if (-not (Test-Path $wimPath)) { throw "install.wim not found at $wimPath" }
 
+    if ($ImageName) {
+        $available = @(Get-WindowsImage -ImagePath $wimPath)
+        # Exact, not -like: 'Windows Server 2025 Standard' is a PREFIX of the Desktop
+        # Experience name, so a substring match would quietly install the wrong edition.
+        $selected = @($available | Where-Object { $_.ImageName -eq $ImageName })
+        if ($selected.Count -eq 0) {
+            $catalogue = ($available | ForEach-Object { "  [$($_.ImageIndex)] $($_.ImageName)" }) -join "`n"
+            throw "No edition named '$ImageName' in $wimPath. Available:`n$catalogue"
+        }
+        if ($selected.Count -gt 1) {
+            throw "'$ImageName' matches $($selected.Count) indexes in $wimPath; select by -ImageIndex instead."
+        }
+        $ImageIndex = $selected[0].ImageIndex
+        Write-Step "Edition '$ImageName' resolved to WIM index $ImageIndex."
+    }
+
     $wimInfo = Get-WindowsImage -ImagePath $wimPath -Index $ImageIndex
     Write-Step "WIM index ${ImageIndex}: $($wimInfo.ImageName), version $($wimInfo.Version)"
 
-    # The image this tool advertises is Server 2025 CORE; a pinned hash does not prove the
-    # caller pinned the right ISO or picked a Core index, so the claim is asserted against
-    # what the WIM says about itself (Desktop indexes carry a '(Desktop Experience)' suffix).
-    if ($wimInfo.ImageName -notmatch 'Server 2025' -or $wimInfo.ImageName -match 'Desktop Experience') {
-        throw "WIM index $ImageIndex is '$($wimInfo.ImageName)', not a Server 2025 Core edition — refusing to label the output as one."
+    # Asserts only what this script actually supports — Server 2025, whose unattend, EMS
+    # settings and bootstrap this tooling is written against. It deliberately does NOT insist on
+    # Server Core any more: Desktop Experience is a legitimate choice (and the more useful one
+    # over RDP), and the output is labelled from the WIM's own ImageName, so whichever edition
+    # is selected describes itself honestly in the provenance rather than being mislabelled.
+    if ($wimInfo.ImageName -notmatch 'Server 2025') {
+        throw "WIM index $ImageIndex is '$($wimInfo.ImageName)', which is not a Windows Server 2025 edition. This script's unattend and EMS configuration are written for Server 2025."
     }
 
     Write-Step "Creating VHDX ($SizeGB GB dynamic)..."
