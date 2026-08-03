@@ -43,11 +43,14 @@ The rejected alternatives, both from the issue:
 fixture image:
 
 ```
-guest leased 172.31.17.56:22
-connect command: ssh.exe -p 22 -l Administrator 172.31.17.56
-ssh exit 255; stderr: Warning: Permanently added '172.31.17.56' (ED25519) to the list of known hosts.
-Administrator@172.31.17.56: Permission denied (publickey,password,keyboard-interactive).
+guest leased 172.31.21.16:22
+CurrentState("appliance") -> Running
+connect command: ssh.exe -p 22 -l Administrator 172.31.21.16
+ssh exit 255; stderr: Warning: Permanently added '172.31.21.16' (ED25519) to the list of known hosts.
+Administrator@172.31.21.16: Permission denied (publickey,password,keyboard-interactive).
 ```
+
+(The address is whatever the Default Switch leases that run; it differs between runs.)
 
 Boot to that line: 10 s.
 
