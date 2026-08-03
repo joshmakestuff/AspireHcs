@@ -28,9 +28,17 @@ function Wait-ForListener {
         Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $deadline)
 
-    # Distinguish "nothing there" from "something else there": they need different fixes.
+    # Distinguish "nothing there" from "something else there": they need different fixes. The
+    # owner is NAMED rather than just flagged, because a burn-in is a ~30-minute round trip and
+    # "who has the port" should not cost a second one.
     $any = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-    return $(if ($any.Count -gt 0) { "ListeningButNot$ServiceName" } else { 'NotListening' })
+    if ($any.Count -eq 0) { return 'NotListening' }
+
+    $owners = $any | ForEach-Object {
+        $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+        "$($proc.ProcessName)(pid $($_.OwningProcess))"
+    }
+    return "ListeningButNot${ServiceName}: expected pid $expectedPid, found $($owners -join ', ')"
 }
 
 try {
@@ -80,14 +88,19 @@ try {
     $rdpRules | Set-NetFirewallRule -Profile Any
     $result.rdpFirewallRules = $rdpRules.Count
 
+    # Automatic rather than its default trigger-start, so the image serves RDP on every boot
+    # without waiting for something to poke the trigger.
     Set-Service -Name TermService -StartupType Automatic
+
+    # NOT Restart-Service. TermService cannot be stopped — Windows denies the stop even to
+    # Administrator ("Cannot open TermService service on computer '.': Access is denied"), so a
+    # restart can never succeed here and no privilege would change that. It is also unnecessary:
+    # fDenyTSConnections is honoured dynamically, and enabling the firewall rules above is
+    # itself TermService's start trigger. Starting it is allowed; stopping it is not.
     if ((Get-Service TermService).Status -ne 'Running') {
         Start-Service -Name TermService
     }
-    else {
-        # Already running: restart so it picks up fDenyTSConnections.
-        Restart-Service -Name TermService -Force
-    }
+    $result.termService = (Get-Service TermService).Status.ToString()
 
     # A RUNTIME WITNESS, not "the registry value was set": the image may only advertise RDP if
     # TermService is actually listening on 3389 while the burn-in is still running. The builder
