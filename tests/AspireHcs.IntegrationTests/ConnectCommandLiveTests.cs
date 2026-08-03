@@ -114,8 +114,10 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
 
             Assert.True(connected,
                 $"{allocated.Address}:{allocated.Port} never accepted a connection within {rdpTimeout}. " +
-                $"The image's provenance records burnIn.rdp='{burnInRdp}', so RDP was listening INSIDE the guest at " +
-                $"build time — a timeout here points at the guest firewall rather than at the service. " +
+                $"The image's provenance records burnIn.rdp='{burnInRdp}', but that witnessed TermService during the " +
+                "IMAGE BUILD boot only. A timeout rather than a refusal narrows it to something dropping packets — the " +
+                "guest firewall, the host firewall, or the HCN path — and does not by itself distinguish those from a " +
+                "service that failed to start on this boot. Check the guest directly over SSH. " +
                 $"Last failure: {lastFailure?.GetType().Name}: {lastFailure?.Message}");
             output.WriteLine($"TCP {allocated.Address}:{allocated.Port} -> connected after {reachable.Elapsed.TotalSeconds:0.0}s");
 
