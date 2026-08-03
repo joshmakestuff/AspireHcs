@@ -48,6 +48,8 @@ param(
     # Internal: where the elevated phase performs a split
     # extract-then-finalize, the positive control for the extraction record.
     [string]$SplitEntry,
+    # Internal: four directories for the privilege-identification arms.
+    [string]$IdentifyEntries,
     [switch]$SkipPull
 )
 
@@ -216,6 +218,38 @@ if ($Phase -eq 'import') {
     if ($NoSecurityEntry) {
         [void](Invoke-Step -Title 'ElevatedFinalize(descriptor-free entry, extracted unelevated)' `
                 -CommandArgs @('finalize', '--entry', $NoSecurityEntry))
+    }
+
+    # Which privilege actually gates finalization (#33's open question). Needs
+    # four pristine trees, because ProcessBaseImage is not idempotent and each
+    # arm must meet an untouched entry; extraction is unprivileged and fast.
+    if ($IdentifyEntries) {
+        $armDirs = $IdentifyEntries -split ';'
+        $armsReady = $true
+        foreach ($dir in $armDirs) {
+            if (-not (Invoke-Step -Title "IdentifyArmExtract($(Split-Path $dir -Leaf))" `
+                        -CommandArgs @('import', '--metadata', ($MetadataPath -split ';')[0], '--entry', $dir, `
+                            '--no-security', '--skip-finalize'))) {
+                $armsReady = $false
+            }
+        }
+        if ($armsReady) {
+            # MustPass judges the EXPERIMENT's validity, not the arms: `identify`
+            # exits 0 whenever all four arms ran under the privilege state they
+            # intended, and a failing arm is the datum being collected.
+            #
+            # The exit code therefore cannot pin the OUTCOME, and the docs now
+            # state one ("all four arms succeeded, including both-disabled").
+            # The output assertion is what makes that claim falsifiable — if the
+            # both-disabled arm ever starts failing, this row goes red instead of
+            # the document quietly going stale.
+            [void](Invoke-Step -Title 'IdentifyFinalizePrivilege' -MustPass `
+                    -ExpectOutputMatch 'does NOT depend on these privileges being ENABLED' `
+                    -CommandArgs @('identify', '--entries', ($armDirs -join ',')))
+        }
+        else {
+            Write-Both 'Skipping IdentifyFinalizePrivilege: could not prepare four pristine entries.'
+        }
     }
 
     # The OTHER off-diagonal, and the positive control for the provenance fix:
@@ -394,6 +428,8 @@ $childArgs = @(
     '-MetadataPath', (& $q ($metadataPaths -join ';')),
     '-NoSecurityEntry', (& $q $noSecurityEntry),
     '-SplitEntry', (& $q (Join-Path $Store 'experiment-split-finalize')),
+    '-IdentifyEntries', (& $q (($('arm-neither', 'arm-backup', 'arm-restore', 'arm-both') |
+                ForEach-Object { Join-Path $Store "experiment-$_" }) -join ';')),
     '-LogPath', (& $q $LogPath)
 )
 $child = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
@@ -448,6 +484,14 @@ $mismatched = ($entries | Where-Object { -not $_.Image.Compatible })[0]
 [void](Invoke-Step -Title 'UnelevatedXenonBoot(BUILD-MISMATCHED ltsc2022)' -ExpectedExit 0 `
         -ExpectOutputMatch 'guest build=10\.0\.20348\.' `
         -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $mismatched.Path, '--id', $containerId))
+
+# The docs claim per-container scratch creation is unprivileged. That was
+# measured against DOCKER's store (the #33 matrix), never against ours, so the
+# adjacent mode gets its own row: CreateSandboxLayer against an entry we
+# imported, unelevated.
+[void](Invoke-Step -Title 'UnelevatedXenonBoot(own store, --scratch api)' -ExpectedExit 0 `
+        -ExpectOutputMatch 'CreateSandboxLayer: hr=0x00000000' `
+        -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'api', '--layer', $compatible.Path, '--id', $containerId))
 
 # MEASURED: argon on our own store. Expected to gate at ActivateLayer exactly as
 # it does on Docker's store — which would show the gate is a privilege, not

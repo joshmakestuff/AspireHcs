@@ -24,5 +24,7 @@ BackupRead
 BackupWrite
 LookupPrivilegeValue
 AdjustTokenPrivileges
+GetTokenInformation
+LookupPrivilegeName
 SetFileInformationByHandle
 FILE_BASIC_INFO

@@ -36,6 +36,66 @@ which had been carried as *untested, not true* since the xenon spike.
 | A store AspireHcs owns needs no ACL surgery | **PROVEN** — unelevated `verify` passes on both entries, no grant |
 | Elevation needed for | **import only** — never for pulling, verifying, or running the container |
 
+## What a developer actually does
+
+`pull` and `import` are separate commands on purpose, and the split is the whole
+privilege story: **`pull` is fetch, `import` is install.**
+
+`pull` talks to the registry, verifies digests, and leaves a compressed tarball
+plus metadata in the store. Bytes on disk; Windows knows nothing about them yet.
+`import` unpacks that tarball into a real filesystem tree — replaying security
+descriptors, hard links and EAs through `BackupWrite` — and then finalizes it,
+which builds the registry hive bases, rewrites the utility VM's boot
+configuration, and generates the scratch VHDX templates. Its output is a
+*bootable image*. Creating containers from that image is a third thing again,
+and it is unprivileged: every `run` makes its own scratch layer over the image.
+
+| Step | Frequency | Elevation |
+|---|---|---|
+| `pull` | per image | no |
+| `import` | once per image | **yes** — one session imports any number of images |
+| `verify` | whenever | no |
+| `run` a **Hyper-V-isolated** container | every time | no |
+| `run` a **process-isolated** container | every time | yes — gated at `ActivateLayer` (`0x80070522`) |
+
+Process isolation is the exception, and it is a runtime gate rather than an
+acquisition one. It is also the spike's `--isolation` default, so an unqualified
+`run` will hit it; pass `--isolation hyperv` for the unprivileged path. On
+client SKUs process isolation is officially dev/test-only and version-locked
+anyway, so Hyper-V isolation is both the supported mode and the unprivileged
+one.
+
+So the shape is a **setup step, not a workflow tax**:
+
+1. *Once per developer:* be a member of **Hyper-V Administrators** — the same
+   prerequisite the VM path has documented since #1/#3, so containers add no new
+   one. (Group membership only reaches a token at logon.)
+2. *Once per store, in a single elevated session:* `import` the base images the
+   team uses. The store defaults to `%LOCALAPPDATA%\AspireHcs\layers`, which is
+   **per user profile** — so on a shared machine that is once per developer,
+   unless `--store` points everyone at a common location, which has not been
+   exercised here. Re-running a completed import is a genuine no-op: the
+   completion sentinel is checked before any privilege is requested, so a
+   repeat exits 0 even unelevated (verified).
+3. *Every day after that:* pull, verify, and run containers with **no prompt and
+   no elevation** — including Hyper-V-isolated containers, which is the mode
+   that matters on developer machines.
+
+Why not zero elevation? Two routes out were examined, and they are closed to
+different standards, which is worth keeping straight. Skipping finalization is
+**measured** shut — it rewrites the UVM's BCD, and a non-finalized layer fails
+to boot. The group-membership route is **measured for Backup Operators**
+(filtered to "deny only", so the privileges never reach the token) and
+**reasoned** for other grant paths, since holding a filtered privilege is itself
+a filtering trigger — that generalization was not separately probed. The full
+evidence is in
+[Can the UAC prompt be removed?](#can-the-uac-prompt-be-removed-no--and-the-reason-is-structural)
+below. Docker's `docker pull` appears to need nothing only because `dockerd`
+runs permanently as LocalSystem and does the install half on the caller's
+behalf — the elevation still happens, it has just been made invisible and
+permanent. Keeping it visible, attributable and occasional is the deliberate
+trade here.
+
 ## Why not just copy the layer out of Docker's store
 
 Because a base layer cannot be moved that way. Measured in #33: `ExportLayer`
@@ -242,15 +302,89 @@ HcsContainerSpike finalize --entry <store>\<diffID>
 HcsContainerSpike run --isolation hyperv --scratch template --layer <store>\<diffID>
 ```
 
+## Can the UAC prompt be removed? No — and the reason is structural
+
+Docker gets away with an unelevated `docker pull` because `dockerd` runs as a
+**LocalSystem service** (`dockerd.exe --run-service -G docker-users`, verified on
+this host) and does the layer work with privileges it acquired at boot; the CLI
+just talks to it over `\\.\pipe\docker_engine`. The elevation did not disappear,
+it moved into a daemon and became permanent, gated by an ACL on that pipe.
+
+Short of building such a service, two routes were examined and both are closed.
+
+**Skipping finalization: impossible.** A layer that is extracted but not
+finalized fails `CreateSandboxLayer` with `0x80070003`, and grafting in
+`blank-base.vhdx` + `SystemTemplate.vhdx` still fails at UVM start with
+`0x80370106` (guest-initiated exit). `ProcessUtilityImage` **rewrites the UVM's
+BCD** — which is why hcsshim backs those exact files up before import. Finalize
+also builds `Hives\*_BASE` from the image's registry and writes `layout`. It is
+load-bearing, not bookkeeping.
+
+**Holding the privilege without elevating: impossible for an interactive user.**
+`SeBackupPrivilege`/`SeRestorePrivilege` are granted by the Backup Operators
+group, so the obvious hypothesis was that membership would make `import` work
+unelevated — a one-time grant like the Hyper-V Administrators prerequisite.
+Measured directly, with a purpose-made account holding Backup Operators and
+**not** Administrators:
+
+```
+identity=EKAJATI\hcsbackuptest elevated=False hyperVAdministrators=True
+[FAIL] EnableBackupRestorePrivileges: hr=0x80070514 (ERROR_NOT_ALL_ASSIGNED)
+```
+
+```
+whoami /groups
+BUILTIN\Backup Operators   Alias  S-1-5-32-551  Group used for deny only
+```
+
+That is **UAC token filtering**. Windows issues a filtered standard-user token
+to members of privileged groups, and the filtering strips precisely these
+privileges. The same token is the control that makes the reading airtight:
+`Hyper-V Administrators` (S-1-5-32-578) is *not* a filtered group and came
+through enabled in that very token — so the logon was fresh and group
+membership did apply. Only the sensitive group was neutered.
+
+**Backup Operators specifically is measured; the generalization is reasoned.**
+UAC filtering is documented to strip this privilege *set* from the filtered
+token, and holding a filtered privilege is itself one of the triggers for
+filtering — so another grant path (a direct User Rights Assignment, say) is
+expected to be filtered identically. That expectation was **not separately
+probed**: one group was tested, and the rest follows from documented behaviour
+rather than measurement. Either way, Backup Operators would hold the privileges
+only in an *elevated* token, which buys nothing over elevating directly while
+adding a standing ACL-bypass capability — a worse trade, not a better one.
+
+**Conclusion, recorded as a decision rather than a limitation:** the elevation
+is needed by `import`, and by nothing else. `pull` is plain HTTPS plus writes
+into the user's own profile; verifying and running containers are unprivileged.
+
+The prompt is **per elevated session, not per image** — one elevation can import
+any number of images. The archived run witnesses exactly that: a single
+`=== Import (elevating: expect one UAC prompt) ===` phase containing two
+successful `ElevatedImport` steps, ltsc2025 and ltsc2022. So a developer
+bootstrapping a machine accepts one prompt and imports every base image they
+need in that session; the cost does not scale with the number of images.
+
+The only way to remove the prompt entirely is a privileged service on Docker's
+model, which is deliberately not pursued: it converts a visible, attributable,
+occasional elevation into a permanent one, and membership in the group that
+reaches such a service is effectively administrator-equivalent.
+
 ## Still open
 
 - **Descriptor-free finalize** — see above; the question survived the run, the
   obstacle did not.
 - **Chain import** (multi-layer images). Unchanged and unstarted.
-- **Which privilege `ProcessBaseImage` wants.** It is the same
-  `ERROR_PRIVILEGE_NOT_HELD` class as argon's `ActivateLayer`, and an
-  unelevated token holds neither `SeBackupPrivilege` nor `SeRestorePrivilege`
-  to enable — but which specific privilege the call checks is still unidentified.
+- **Which privilege `ProcessBaseImage` wants** — narrowed, not settled. The
+  `identify` command runs the call four times over identical pristine trees
+  varying only which privileges are enabled; elevated, **all four arms
+  succeeded, including with both disabled**. So the call does not require them
+  to be *enabled by the caller*. That is weaker than it sounds: disabling does
+  not remove a privilege from the token, and a callee holding one may enable it
+  for itself, so enabled-state cannot discriminate. Settling it would need a
+  token that does not *hold* them (`CreateRestrictedToken` with
+  `PrivilegesToDelete`). Largely moot in practice — per the section above, an
+  interactive standard token cannot hold them at all.
 - **Whether `--no-security` layers behave correctly in a guest** even if they do
   finalize. Host-side descriptors are not replayed, so guest services that check
   specific SIDs might misbehave; nothing here tests that.
