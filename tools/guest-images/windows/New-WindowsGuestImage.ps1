@@ -299,7 +299,12 @@ try {
     if ($sentinel.sshd -ne 'Running') {
         throw "Bootstrap completed but recorded sshd='$($sentinel.sshd)' — the image's advertised SSH fixture was not serving at burn-in."
     }
-    Write-Step "Sentinel ok: sshd=$($sentinel.sshd), completed $($sentinel.completedUtc)"
+    # Same standard as sshd: the image may not advertise RDP unless something was observed
+    # listening on 3389 inside the guest. A registry value that was set proves nothing.
+    if ($sentinel.rdp -ne 'Listening') {
+        throw "Bootstrap completed but recorded rdp='$($sentinel.rdp)' — nothing was listening on 3389, so this image cannot back the Connect (RDP) command."
+    }
+    Write-Step "Sentinel ok: sshd=$($sentinel.sshd), rdp=$($sentinel.rdp), completed $($sentinel.completedUtc)"
 }
 finally {
     Dismount-VHD -Path $OutputVhdx
@@ -330,10 +335,11 @@ $provenance = [ordered]@{
     builtBy        = "$env:USERDOMAIN\$env:USERNAME"
     scriptCommit   = $scriptCommit
     worktreeDirty  = [bool]$dirty
-    burnIn         = @{ sshd = $sentinel.sshd; completedUtc = $sentinel.completedUtc }
+    burnIn         = @{ sshd = $sentinel.sshd; rdp = $sentinel.rdp; completedUtc = $sentinel.completedUtc }
     edits          = @(
         'unattend: specialized, OOBE skipped, single autologon consumed by burn-in',
         'sshd: StartupType Automatic, firewall OpenSSH-Server-In-TCP profile Any',
+        'RDP: fDenyTSConnections=0, TermService Automatic, firewall group @FirewallAPI.dll,-28752 enabled profile Any',
         'BCD: ems on, emssettings COM1 115200',
         'sealed: Optimize-VHD Full, file marked read-only'
     )
