@@ -68,6 +68,15 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
                 ?? throw new TimeoutException("The guest never leased an address, so there was nothing to connect to.");
             output.WriteLine($"guest leased {allocated.Address}:{allocated.Port}");
 
+            // The state guard's lookup is the part with a real chance of being wrong: it asks
+            // ResourceNotificationService for a resource by NAME, and the id it indexes by is
+            // not guaranteed to equal the name. If that lookup always missed, the guard would
+            // silently never fire and every unit test would still pass, because they inject the
+            // state directly. So exercise the production path here, against the live host.
+            string? observed = ConnectCommands.CurrentState(app.Services, "appliance");
+            output.WriteLine($"CurrentState(\"appliance\") -> {observed ?? "<null>"}");
+            Assert.Equal(KnownResourceStates.Running, observed);
+
             // The button must actually be live at this moment. Evaluated against the real
             // snapshot, not a synthesized one.
             ResourceCommandAnnotation command = vm.Annotations.OfType<ResourceCommandAnnotation>()

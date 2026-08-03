@@ -274,7 +274,12 @@ public class ConnectCommandTests
     [InlineData("Exited")]
     [InlineData("FailedToStart")]
     [InlineData("Finished")]
-    public void A_click_on_a_stopped_vm_is_refused_even_though_the_allocation_survives(string state)
+    // Not terminal, but not connectable either — and Starting is precisely when a restart still
+    // carries the previous run's allocation, which is the stale-address case the guard exists
+    // for. A "reject only terminal states" predicate let both of these through.
+    [InlineData("Starting")]
+    [InlineData("Stopping")]
+    public void A_click_on_a_vm_that_is_not_running_is_refused_even_though_the_allocation_survives(string state)
     {
         // UpdateState only governs what the dashboard offers; the command is still reachable
         // through Aspire's command APIs, and HcsVmOrchestrator never clears AllocatedEndpoint —

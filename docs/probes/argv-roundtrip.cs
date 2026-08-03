@@ -36,6 +36,11 @@ if (args.Length > 0)
     return 0;
 }
 
+// Printed because "does ProcessPath point at the probe or at dotnet.exe?" is the first thing
+// anyone will doubt about this method. A file-based app is compiled to a real apphost, so this
+// is the probe's own executable — shown rather than asserted in prose.
+Console.WriteLine($"relaunching: {Environment.ProcessPath}");
+
 File.Delete(outFile);
 ProcessStartInfo psi = new(Environment.ProcessPath!)
 {

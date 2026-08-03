@@ -28,7 +28,8 @@ internal static class ConnectCommands
             "Connect (SSH)",
             // Interactivity and state are read per click, not captured at model-build time.
             context => Task.FromResult(Execute(
-                resource, endpointName, "an SSH session", Environment.UserInteractive, CurrentState(context),
+                resource, endpointName, "an SSH session", Environment.UserInteractive,
+                CurrentState(context.ServiceProvider, context.ResourceName),
                 allocated => BuildSshStartInfo(allocated.Address, allocated.Port, userName),
                 ShellExecute)),
             new CommandOptions
@@ -50,7 +51,8 @@ internal static class ConnectCommands
             RdpCommandName,
             "Connect (RDP)",
             context => Task.FromResult(Execute(
-                resource, endpointName, "a Remote Desktop session", Environment.UserInteractive, CurrentState(context),
+                resource, endpointName, "a Remote Desktop session", Environment.UserInteractive,
+                CurrentState(context.ServiceProvider, context.ResourceName),
                 allocated => BuildRdpStartInfo(resource, endpointName, allocated.Address, allocated.Port, userName),
                 ShellExecute)),
             new CommandOptions
@@ -81,14 +83,17 @@ internal static class ConnectCommands
         // through Aspire's command APIs regardless, and an allocation outlives the VM that
         // earned it (HcsVmOrchestrator assigns AllocatedEndpoint and never clears it). Without
         // this, invoking the command on a stopped VM would launch a client at last run's
-        // address. Unknown state is allowed through rather than refused: the resource id this
-        // is looked up by is not guaranteed to equal the resource name, and a lookup miss must
-        // not turn into a feature that silently stops working.
-        if (currentState is not null && KnownResourceStates.TerminalStates.Contains(currentState))
+        // address.
+        //
+        // The predicate is "Running", not "not terminal", so it agrees with Availability.
+        // Rejecting only terminal states left Starting and Stopping through, and Starting is
+        // exactly when a restart still carries the previous run's allocation — the stale-address
+        // case this guard exists for.
+        if (!StateAllowsConnect(currentState))
         {
             return Failure(
                 $"The virtual machine is {currentState}, so there is nothing to connect to. " +
-                "Start it first.");
+                "Wait for it to be running.");
         }
 
         // Session 0 has no desktop to put the client on. Process.Start would still "succeed"
@@ -218,17 +223,33 @@ internal static class ConnectCommands
     }
 
     /// <summary>
-    /// Best-effort current state for the terminal-state guard. Returns null when it cannot be
-    /// determined — see <see cref="Execute"/> for why that is allowed through rather than
-    /// refused.
+    /// Whether the state permits connecting. <c>null</c> — state unknown — is permitted rather
+    /// than refused: the resource id <see cref="CurrentState"/> looks up by is not guaranteed to
+    /// equal the resource name, and a lookup miss must not turn into a feature that silently
+    /// stops working. <c>Availability</c> has a real snapshot in hand and so requires Running
+    /// outright; this is the only place the two differ, deliberately.
     /// </summary>
-    private static string? CurrentState(ExecuteCommandContext context)
+    private static bool StateAllowsConnect(string? currentState)
+        => currentState is null || currentState == KnownResourceStates.Running;
+
+    /// <summary>
+    /// Best-effort current state for the guard above. Returns null when it cannot be determined.
+    /// </summary>
+    /// <remarks>
+    /// Internal and taking the service provider directly, rather than reading it off
+    /// <see cref="ExecuteCommandContext"/> inside a lambda, so the live test can exercise the
+    /// part that has a real chance of being wrong: whether the notification service resolves
+    /// this resource by the name the command passes it. Injecting the state into
+    /// <c>Execute</c> alone would leave that lookup covered by nothing, and a lookup that always
+    /// missed would disable the guard without failing a single test.
+    /// </remarks>
+    internal static string? CurrentState(IServiceProvider services, string resourceName)
     {
         try
         {
             ResourceNotificationService notifications =
-                context.ServiceProvider.GetRequiredService<ResourceNotificationService>();
-            return notifications.TryGetCurrentState(context.ResourceName, out ResourceEvent? resourceEvent)
+                services.GetRequiredService<ResourceNotificationService>();
+            return notifications.TryGetCurrentState(resourceName, out ResourceEvent? resourceEvent)
                 ? resourceEvent.Snapshot.State?.Text
                 : null;
         }
