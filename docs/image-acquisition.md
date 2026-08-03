@@ -242,15 +242,77 @@ HcsContainerSpike finalize --entry <store>\<diffID>
 HcsContainerSpike run --isolation hyperv --scratch template --layer <store>\<diffID>
 ```
 
+## Can the UAC prompt be removed? No — and the reason is structural
+
+Docker gets away with an unelevated `docker pull` because `dockerd` runs as a
+**LocalSystem service** (`dockerd.exe --run-service -G docker-users`, verified on
+this host) and does the layer work with privileges it acquired at boot; the CLI
+just talks to it over `\\.\pipe\docker_engine`. The elevation did not disappear,
+it moved into a daemon and became permanent, gated by an ACL on that pipe.
+
+Short of building such a service, two routes were examined and both are closed.
+
+**Skipping finalization: impossible.** A layer that is extracted but not
+finalized fails `CreateSandboxLayer` with `0x80070003`, and grafting in
+`blank-base.vhdx` + `SystemTemplate.vhdx` still fails at UVM start with
+`0x80370106` (guest-initiated exit). `ProcessUtilityImage` **rewrites the UVM's
+BCD** — which is why hcsshim backs those exact files up before import. Finalize
+also builds `Hives\*_BASE` from the image's registry and writes `layout`. It is
+load-bearing, not bookkeeping.
+
+**Holding the privilege without elevating: impossible for an interactive user.**
+`SeBackupPrivilege`/`SeRestorePrivilege` are granted by the Backup Operators
+group, so the obvious hypothesis was that membership would make `import` work
+unelevated — a one-time grant like the Hyper-V Administrators prerequisite.
+Measured directly, with a purpose-made account holding Backup Operators and
+**not** Administrators:
+
+```
+identity=<HOST>\<account> elevated=False hyperVAdministrators=True
+[FAIL] EnableBackupRestorePrivileges: hr=0x80070514 (ERROR_NOT_ALL_ASSIGNED)
+```
+
+```
+whoami /groups
+BUILTIN\Backup Operators   Alias  S-1-5-32-551  Group used for deny only
+```
+
+That is **UAC token filtering**. Windows issues a filtered standard-user token
+to members of privileged groups, and the filtering strips precisely these
+privileges. The same token is the control that makes the reading airtight:
+`Hyper-V Administrators` (S-1-5-32-578) is *not* a filtered group and came
+through enabled in that very token — so the logon was fresh and group
+membership did apply. Only the sensitive group was neutered.
+
+Because filtering removes the privileges from any interactive standard token
+regardless of which group granted them, **no group membership can give an
+unelevated session `SeBackupPrivilege`.** Backup Operators would hold them only
+in an *elevated* token, which buys nothing over elevating directly while adding
+a standing ACL-bypass capability — a worse trade, not a better one.
+
+**Conclusion, recorded as a decision rather than a limitation:** acquisition
+costs one UAC prompt per image. Everything else — pulling, verifying, creating
+per-container scratch layers, running containers — is unprivileged. The only
+way to remove that prompt is a privileged service on Docker's model, which is
+deliberately not pursued: it converts a visible, attributable, per-image
+elevation into a permanent one, and membership in the group that reaches such a
+service is effectively administrator-equivalent.
+
 ## Still open
 
 - **Descriptor-free finalize** — see above; the question survived the run, the
   obstacle did not.
 - **Chain import** (multi-layer images). Unchanged and unstarted.
-- **Which privilege `ProcessBaseImage` wants.** It is the same
-  `ERROR_PRIVILEGE_NOT_HELD` class as argon's `ActivateLayer`, and an
-  unelevated token holds neither `SeBackupPrivilege` nor `SeRestorePrivilege`
-  to enable — but which specific privilege the call checks is still unidentified.
+- **Which privilege `ProcessBaseImage` wants** — narrowed, not settled. The
+  `identify` command runs the call four times over identical pristine trees
+  varying only which privileges are enabled; elevated, **all four arms
+  succeeded, including with both disabled**. So the call does not require them
+  to be *enabled by the caller*. That is weaker than it sounds: disabling does
+  not remove a privilege from the token, and a callee holding one may enable it
+  for itself, so enabled-state cannot discriminate. Settling it would need a
+  token that does not *hold* them (`CreateRestrictedToken` with
+  `PrivilegesToDelete`). Largely moot in practice — per the section above, an
+  interactive standard token cannot hold them at all.
 - **Whether `--no-security` layers behave correctly in a guest** even if they do
   finalize. Host-side descriptors are not replayed, so guest services that check
   specific SIDs might misbehave; nothing here tests that.
