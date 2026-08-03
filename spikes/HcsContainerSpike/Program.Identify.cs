@@ -156,9 +156,24 @@ internal static partial class Program
 
         if (neither.Succeeded)
         {
-            Console.WriteLine("NOT a SeBackup/SeRestore gate: the call succeeded with BOTH disabled, so elevation");
-            Console.WriteLine("supplies something else — another privilege, or an access check. Bisect the remaining");
-            Console.WriteLine("enabled privileges listed above.");
+            Console.WriteLine("The call does NOT depend on these privileges being ENABLED: it succeeded with both");
+            Console.WriteLine("disabled. That is a narrower result than it looks, and it does NOT establish that");
+            Console.WriteLine("SeBackup/SeRestore are irrelevant.");
+            Console.WriteLine();
+            Console.WriteLine("The confound: disabling a privilege does not REMOVE it from the token, and a callee");
+            Console.WriteLine("that holds a privilege may enable it for itself (the RtlAcquirePrivilege pattern).");
+            Console.WriteLine("vmcompute doing that would make this arm succeed whether or not the privilege");
+            Console.WriteLine("matters, so enabled-state cannot discriminate here. Only a token that does not HOLD");
+            Console.WriteLine("them can — CreateRestrictedToken with PrivilegesToDelete, or simply a different");
+            Console.WriteLine("account.");
+            Console.WriteLine();
+            Console.WriteLine("So two hypotheses remain live, and they differ in what they imply:");
+            Console.WriteLine("  (a) the gate is HOLDING SeBackup/SeRestore -> Backup Operators membership would");
+            Console.WriteLine("      make `import` work unelevated;");
+            Console.WriteLine("  (b) the gate is something else elevation supplies (another privilege, or an");
+            Console.WriteLine("      access check on Administrators) -> that route is closed.");
+            Console.WriteLine("The cheapest decisive test is direct, not more token surgery: put an account in");
+            Console.WriteLine("Backup Operators, sign out and back in, and run `import` UNELEVATED.");
             return;
         }
         if (neither.Value != PrivilegeNotHeld)
