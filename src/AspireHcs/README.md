@@ -37,6 +37,23 @@ DCP owns, so AspireHcs registers its own: Stop attempts a graceful guest shutdow
 terminating and releases the VM's HCN endpoint, and Start boots a fresh differencing disk, so a
 restart discards the previous run's writes the way a container restart does.
 
+`WithSshCommand()` and `WithRdpCommand()` add opt-in **Connect** buttons that open a client on the
+host, already pointed at the address the guest leased:
+
+```csharp
+builder.AddHcsVm("appliance")
+    .WithNatNetwork()
+    .WithEndpoint(name: "ssh", targetPort: 22)
+    .WithSshCommand(userName: "Administrator");
+```
+
+They launch the client host-side, which is sound in run mode because the AppHost and the browser
+showing the dashboard are on the same machine — so the guest cooperates with nothing beyond
+serving SSH or RDP. Each button stays disabled until the VM is running *and* its endpoint has
+resolved: a guest reaches Running before its DHCP lease surfaces, and connecting in that window
+would fail rather than wait. They are opt-in because they start processes on the developer's
+desktop, and because only the AppHost author knows which account the guest image actually has.
+
 ## Requirements
 
 - Windows 10 1809 / Windows Server 2019 or later with the Hyper-V feature enabled. The package throws `PlatformNotSupportedException` on other platforms.
