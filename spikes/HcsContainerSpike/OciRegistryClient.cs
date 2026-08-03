@@ -160,9 +160,13 @@ internal sealed class OciRegistryClient : IDisposable
     public async Task<byte[]> GetSmallBlobAsync(OciImageReference image, string digest, int maxBytes, CancellationToken ct)
     {
         OciDigest.RequireSha256(digest);
+        // ResponseHeadersRead, NOT ResponseContentRead: buffering the whole body
+        // before returning would allocate the very thing the bound below claims
+        // to prevent. (Round-1 review added the bound; round 2 caught that the
+        // completion option made it decorative.)
         using HttpResponseMessage response = await SendWithOneRetryAsync(
             () => new HttpRequestMessage(HttpMethod.Get, $"https://{image.Registry}/v2/{image.Repository}/blobs/{digest}"),
-            HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+            HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(response, $"blob {digest}", ct).ConfigureAwait(false);
 
         // Checked BEFORE reading, or the "bound" would only report an allocation

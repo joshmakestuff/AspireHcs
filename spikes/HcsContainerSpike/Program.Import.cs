@@ -109,7 +109,7 @@ internal static partial class Program
                 {
                     return 2;
                 }
-                WriteCompletionRecords(entryPath, metadata, noSecurity);
+                WriteCompletionRecords(entryPath, metadata, securityDescriptorsRestored: !noSecurity);
                 completed = true;
             }
             else
@@ -167,18 +167,20 @@ internal static partial class Program
             // extracted with --no-security and finalized elevated would
             // otherwise be recorded as descriptor-complete, which is precisely
             // backwards.
-            WriteCompletionRecords(entryPath, new JsonObject { ["image"] = "(unknown — finalized standalone)" },
-                noSecurity: !ExtractionRestoredSecurity(entryPath, out string extractionNote));
+            bool? restored = ExtractionRestoredSecurity(entryPath, out string extractionNote);
             Console.WriteLine($"[finalize] extraction record: {extractionNote}");
+            WriteCompletionRecords(entryPath, new JsonObject { ["image"] = "(unknown — finalized standalone)" }, restored);
         }
         _ = privHr; // measured above and printed; deliberately not a gate here
         return Results.Any(r => r.Hr.Failed) ? 2 : 0;
     }
 
-    /// <summary>Reads the extraction record left by <c>import</c>. A missing or
-    /// unreadable record means UNKNOWN, and unknown must not be recorded as
-    /// "restored" — the conservative answer is the honest one.</summary>
-    private static bool ExtractionRestoredSecurity(string entryPath, out string note)
+    /// <summary>Reads the extraction record left by <c>import</c>. Returns NULL
+    /// for unknown — a missing or unreadable record must not be reported as
+    /// either "restored" or "not restored". Both are claims about the artifact,
+    /// and an entry produced before this record existed would be slandered by
+    /// the false one just as badly as it would be flattered by the true one.</summary>
+    private static bool? ExtractionRestoredSecurity(string entryPath, out string note)
     {
         string path = Path.Combine(entryPath, ExtractionRecordFileName);
         try
@@ -187,16 +189,16 @@ internal static partial class Program
             bool? restored = (bool?)record?["securityDescriptorsRestored"];
             if (restored is null)
             {
-                note = $"{ExtractionRecordFileName} has no securityDescriptorsRestored field — recording UNKNOWN as not-restored";
-                return false;
+                note = $"{ExtractionRecordFileName} has no securityDescriptorsRestored field — recording UNKNOWN";
+                return null;
             }
             note = $"{ExtractionRecordFileName}: securityDescriptorsRestored={restored}";
             return restored.Value;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            note = $"{ExtractionRecordFileName} unreadable ({ex.GetType().Name}) — recording UNKNOWN as not-restored";
-            return false;
+            note = $"{ExtractionRecordFileName} unreadable ({ex.GetType().Name}) — recording UNKNOWN";
+            return null;
         }
     }
 
@@ -472,9 +474,16 @@ internal static partial class Program
         // (nanoserver tars carry no ctime at all). PRESENT-but-malformed is a
         // corrupt record, and the two are kept distinguishable: only the first
         // returns zero quietly.
-        if (!pax.TryGetValue(key, out string? raw) || raw.Length == 0)
+        if (!pax.TryGetValue(key, out string? raw))
         {
             return 0;
+        }
+        if (raw.Length == 0)
+        {
+            // Present-but-empty is a malformed record, not an absent one. Quietly
+            // returning zero here would have contradicted the distinction this
+            // function exists to make.
+            throw new InvalidOperationException($"PAX '{key}' is present but empty");
         }
         string secondsText = raw;
         long ticksFromFraction = 0;
@@ -531,6 +540,19 @@ internal static partial class Program
 
     private static HRESULT FinalizeEntry(string entryPath, bool hasUtilityVm)
     {
+        // Presence AFTER the call proves production only if the file was absent
+        // BEFORE it. An interrupted earlier finalize (or a re-run) leaves these
+        // files behind, and a post-only check would credit this invocation with
+        // producing what it merely found.
+        bool scratchPreexisted = ProbeEntryFile(entryPath, ScratchTemplateNames, out string scratchBefore).Succeeded;
+        bool uvmPreexisted = hasUtilityVm
+            && ProbeEntryFile(Path.Combine(entryPath, "UtilityVM"), ["SystemTemplate.vhdx"], out _).Succeeded;
+        if (scratchPreexisted || uvmPreexisted)
+        {
+            Console.WriteLine($"[finalize] NOTE: finalize outputs already present before this call " +
+                              $"(scratch={scratchPreexisted} systemTemplate={uvmPreexisted}); {scratchBefore}");
+        }
+
         HRESULT hr = WcLayer.ProcessBase(entryPath);
         Step("ProcessBaseImage", hr, entryPath);
         if (hr.Failed)
@@ -574,12 +596,18 @@ internal static partial class Program
         // check without ProcessBaseImage having produced anything — a verifier
         // that cannot fail for the reason it claims to test. Only the entry's
         // own files can witness what finalize did.
-        Step("FinalizeProducedScratchTemplate", ProbeEntryFile(entryPath, ScratchTemplateNames, out string scratchDetail), scratchDetail);
+        // The step NAME states what it witnessed: "Produced" only where this call
+        // turned absence into presence, "Present" where the file predated it and
+        // this invocation therefore proves nothing about its origin.
+        HRESULT scratchHr = ProbeEntryFile(entryPath, ScratchTemplateNames, out string scratchDetail);
+        Step(scratchPreexisted ? "FinalizeScratchTemplatePresent(pre-existing)" : "FinalizeProducedScratchTemplate",
+            scratchHr, scratchPreexisted ? $"{scratchDetail} — predates this call, origin unwitnessed" : scratchDetail);
 
         if (hasUtilityVm)
         {
-            Step("FinalizeProducedSystemTemplate",
-                ProbeEntryFile(Path.Combine(entryPath, "UtilityVM"), ["SystemTemplate.vhdx"], out string uvmDetail), uvmDetail);
+            HRESULT uvmHr = ProbeEntryFile(Path.Combine(entryPath, "UtilityVM"), ["SystemTemplate.vhdx"], out string uvmDetail);
+            Step(uvmPreexisted ? "FinalizeSystemTemplatePresent(pre-existing)" : "FinalizeProducedSystemTemplate",
+                uvmHr, uvmPreexisted ? $"{uvmDetail} — predates this call, origin unwitnessed" : uvmDetail);
         }
         return Results.Any(r => r.Hr.Failed) ? ProbeFailed : default;
     }
@@ -620,7 +648,10 @@ internal static partial class Program
         return ProbeFailed;
     }
 
-    private static void WriteCompletionRecords(string entryPath, JsonNode metadata, bool noSecurity)
+    /// <summary><paramref name="securityDescriptorsRestored"/> is tri-state:
+    /// null records UNKNOWN rather than guessing, and lands in the provenance
+    /// as JSON null.</summary>
+    private static void WriteCompletionRecords(string entryPath, JsonNode metadata, bool? securityDescriptorsRestored)
     {
         // moby's encoding for "base layer, no parents" — the spike's own
         // ReadParentChain already treats JSON null as authoritative.
@@ -634,7 +665,8 @@ internal static partial class Program
             ["osVersion"] = (string?)metadata["osVersion"],
             ["importedUtc"] = DateTime.UtcNow.ToString("o"),
             ["importedElevated"] = IsElevated(),
-            ["securityDescriptorsRestored"] = !noSecurity,
+            // JSON null where the extraction mode could not be established.
+            ["securityDescriptorsRestored"] = securityDescriptorsRestored,
             ["hostOs"] = Environment.OSVersion.VersionString,
             ["spikeCommit"] = TryGitCommit(),
         };

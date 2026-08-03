@@ -231,9 +231,12 @@ internal static partial class Program
     /// and the ref is what a human asks for again.
     ///
     /// Sanitizing alone is NOT injective — `nanoserver:foo_bar` and
-    /// `nanoserver_foo:bar` both collapse to the same characters — so a short
-    /// hash of the exact reference is appended. Two different images can then
-    /// never overwrite each other's metadata, while the name stays readable.</summary>
+    /// `nanoserver_foo:bar` both collapse to the same characters — so a hash of
+    /// the exact reference is appended. That makes a collision require a
+    /// 64-bit hash collision rather than a trivially constructible name clash;
+    /// it is a large reduction in collision probability, not a proof of
+    /// uniqueness, and consumers look these files up by their recorded `image`
+    /// field rather than trusting the name.</summary>
     private static string MetadataPath(string store, OciImageReference image)
     {
         string reference = image.ToString();
@@ -242,7 +245,7 @@ internal static partial class Program
         {
             key = key.Replace(c, '_');
         }
-        string discriminator = OciDigest.Sha256(System.Text.Encoding.UTF8.GetBytes(reference))["sha256:".Length..][..8];
+        string discriminator = OciDigest.Sha256(System.Text.Encoding.UTF8.GetBytes(reference))["sha256:".Length..][..16];
         return Path.Combine(store, "images", $"{key}-{discriminator}.json");
     }
 

@@ -45,6 +45,9 @@ param(
     # Internal: the descriptor-free entry left by the unelevated extraction, so
     # the elevated phase can measure the off-diagonal "no SDs + finalize" mode.
     [string]$NoSecurityEntry,
+    # Internal: where the elevated phase performs a split
+    # extract-then-finalize, the positive control for the extraction record.
+    [string]$SplitEntry,
     [switch]$SkipPull
 )
 
@@ -189,6 +192,21 @@ if ($Phase -eq 'import') {
                 -CommandArgs @('finalize', '--entry', $NoSecurityEntry))
     }
 
+    # The OTHER off-diagonal, and the positive control for the provenance fix:
+    # a FULL-FIDELITY extraction finalized by a separate `finalize` call. It is
+    # the only path that exercises the extraction record's true branch, i.e. the
+    # one that must report securityDescriptorsRestored=true. Without it, the
+    # record could report false for every entry and nothing would notice.
+    if ($SplitEntry) {
+        $firstMetadata = ($MetadataPath -split ';')[0]
+        if (Invoke-Step -Title 'ElevatedExtract(full fidelity, --skip-finalize)' -MustPass `
+                -CommandArgs @('import', '--metadata', $firstMetadata, '--entry', $SplitEntry, '--skip-finalize')) {
+            [void](Invoke-Step -Title 'ElevatedFinalize(full-fidelity entry)' -MustPass `
+                    -ExpectOutputMatch 'securityDescriptorsRestored=True' `
+                    -CommandArgs @('finalize', '--entry', $SplitEntry))
+        }
+    }
+
     Write-Both ''
     Write-Both '=== Import phase verdict ==='
     $script:steps | ForEach-Object { Write-Both ("  {0}  elevated={1} exit={2}" -f $_.Step, $_.Elevated, $_.Exit) }
@@ -318,6 +336,7 @@ $childArgs = @(
     '-Store', (& $q $Store),
     '-MetadataPath', (& $q ($metadataPaths -join ';')),
     '-NoSecurityEntry', (& $q $noSecurityEntry),
+    '-SplitEntry', (& $q (Join-Path $Store 'experiment-split-finalize')),
     '-LogPath', (& $q $LogPath)
 )
 $child = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
@@ -379,15 +398,38 @@ $mismatched = ($entries | Where-Object { -not $_.Image.Matched })[0]
 # MEASURED: does a layer whose security descriptors were NEVER restored boot?
 # Only meaningful if the elevated phase managed to finalize it; the guard keeps
 # a skipped step from reading as a passing one.
-if (Test-Path (Join-Path $noSecurityEntry 'UtilityVM\SystemTemplate.vhdx')) {
+# Test-Path reports a file the caller cannot READ as absent — the same
+# denied-as-absent lie the C# probes were just fixed for, and the class sweep
+# has to reach PowerShell too. Opening it distinguishes the two, and a DENIED
+# result is reported as itself rather than silently becoming "nothing to boot".
+function Test-FileReadable([string]$Path, [ref]$Reason) {
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        $stream.Dispose()
+        $Reason.Value = 'readable'
+        return $true
+    }
+    catch [UnauthorizedAccessException] {
+        $Reason.Value = "present but ACCESS DENIED to this session ($($_.Exception.Message))"
+        return $false
+    }
+    catch [IO.FileNotFoundException] { $Reason.Value = 'absent'; return $false }
+    catch [IO.DirectoryNotFoundException] { $Reason.Value = 'absent (or a parent denies traverse — Win32 cannot distinguish)'; return $false }
+    catch { $Reason.Value = "$($_.Exception.GetType().Name): $($_.Exception.Message)"; return $false }
+}
+
+$uvmReason = ''
+if (Test-FileReadable (Join-Path $noSecurityEntry 'UtilityVM\SystemTemplate.vhdx') ([ref]$uvmReason)) {
     [void](Invoke-Step -Title 'UnelevatedXenonBoot(descriptor-free entry)' `
             -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $noSecurityEntry, '--id', $containerId))
 }
 else {
     Write-Both ''
-    Write-Both 'SKIPPED UnelevatedXenonBoot(descriptor-free entry): the elevated phase did not produce'
-    Write-Both "SystemTemplate.vhdx under $noSecurityEntry, so there is nothing to boot. Read the"
-    Write-Both 'ElevatedFinalize(descriptor-free entry) row above for why — that is the finding.'
+    Write-Both "SKIPPED UnelevatedXenonBoot(descriptor-free entry): SystemTemplate.vhdx under"
+    Write-Both "$noSecurityEntry is $uvmReason."
+    Write-Both 'A SKIP is not a pass. If the reason is "absent", read the ElevatedFinalize'
+    Write-Both '(descriptor-free entry) row above — that is the finding. If it is ACCESS DENIED,'
+    Write-Both 'the descriptor-free tree is unreadable to this session, which is itself a result.'
 }
 
 Write-Both ''
