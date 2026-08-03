@@ -55,24 +55,40 @@ and it is unprivileged: every `run` makes its own scratch layer over the image.
 | `pull` | per image | no |
 | `import` | once per image | **yes** — one session imports any number of images |
 | `verify` | whenever | no |
-| `run` a container | every time | no |
+| `run` a **Hyper-V-isolated** container | every time | no |
+| `run` a **process-isolated** container | every time | yes — gated at `ActivateLayer` (`0x80070522`) |
+
+Process isolation is the exception, and it is a runtime gate rather than an
+acquisition one. It is also the spike's `--isolation` default, so an unqualified
+`run` will hit it; pass `--isolation hyperv` for the unprivileged path. On
+client SKUs process isolation is officially dev/test-only and version-locked
+anyway, so Hyper-V isolation is both the supported mode and the unprivileged
+one.
 
 So the shape is a **setup step, not a workflow tax**:
 
 1. *Once per developer:* be a member of **Hyper-V Administrators** — the same
    prerequisite the VM path has documented since #1/#3, so containers add no new
    one. (Group membership only reaches a token at logon.)
-2. *Once per machine, in a single elevated session:* `import` the base images
-   the team uses. Re-running a completed import is a no-op, so this is safe to
-   repeat and cheap to script.
+2. *Once per store, in a single elevated session:* `import` the base images the
+   team uses. The store defaults to `%LOCALAPPDATA%\AspireHcs\layers`, which is
+   **per user profile** — so on a shared machine that is once per developer,
+   unless `--store` points everyone at a common location, which has not been
+   exercised here. Re-running a completed import is a genuine no-op: the
+   completion sentinel is checked before any privilege is requested, so a
+   repeat exits 0 even unelevated (verified).
 3. *Every day after that:* pull, verify, and run containers with **no prompt and
    no elevation** — including Hyper-V-isolated containers, which is the mode
    that matters on developer machines.
 
-Why not zero elevation? Because both routes out are closed, measured rather than
-assumed: finalization cannot be skipped (it rewrites the UVM's BCD), and UAC
-token filtering means no group membership can hand an unelevated session the
-privileges it needs. The full evidence is in
+Why not zero elevation? Two routes out were examined, and they are closed to
+different standards, which is worth keeping straight. Skipping finalization is
+**measured** shut — it rewrites the UVM's BCD, and a non-finalized layer fails
+to boot. The group-membership route is **measured for Backup Operators**
+(filtered to "deny only", so the privileges never reach the token) and
+**reasoned** for other grant paths, since holding a filtered privilege is itself
+a filtering trigger — that generalization was not separately probed. The full
+evidence is in
 [Can the UAC prompt be removed?](#can-the-uac-prompt-be-removed-no--and-the-reason-is-structural)
 below. Docker's `docker pull` appears to need nothing only because `dockerd`
 runs permanently as LocalSystem and does the install half on the caller's
