@@ -8,6 +8,8 @@
 
     1. Pin:        the ISO's SHA-256 must match -IsoSha256 or the build fails — same inputs,
                    same image; a different ISO must be a loud decision, not a drift.
+                   -SkipIsoHashCheck opts out for bootstrap iteration; the resulting image is
+                   NOT reproducibly pinned and its provenance records isoHashVerified = false.
     2. Provision:  New-VHD -> GPT (EFI 200 MB FAT32 / MSR 16 MB / NTFS) -> Expand-WindowsImage
                    -> unattend + bootstrap into the image -> ensure OpenSSH.Server capability
                    (in-box on Server 2025; added from the LOF ISO only if absent) -> bcdboot

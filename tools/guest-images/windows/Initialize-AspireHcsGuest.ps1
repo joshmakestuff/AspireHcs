@@ -33,8 +33,13 @@ function Wait-ForListener {
     } while ((Get-Date) -lt $deadline)
 
     # Get-NetTCPConnection errors when nothing matches, so an error alone does not mean the
-    # probe broke — only one that is not the no-matching-object case does.
-    $realFailure = $probeError | Where-Object { $_.Exception.Message -notmatch 'No matching MSFT_NetTCPConnection' } | Select-Object -First 1
+    # probe broke — only one that is not the no-matching-object case does. Classified by ERROR
+    # CATEGORY, never by message text: this file rejects the localized firewall display name a
+    # few lines below for exactly this reason, and matching an English substring here would be
+    # the same mistake, mislabelling an idle port as a broken probe on a localized image.
+    $realFailure = $probeError |
+        Where-Object { $_.CategoryInfo.Category -ne [System.Management.Automation.ErrorCategory]::ObjectNotFound } |
+        Select-Object -First 1
     if ($realFailure) {
         return "ProbeFailed: $($realFailure.Exception.Message)"
     }
@@ -42,7 +47,14 @@ function Wait-ForListener {
     # Distinguish "nothing there" from "something else there": they need different fixes. The
     # owner is NAMED rather than just flagged, because a burn-in is a ~30-minute round trip and
     # "who has the port" should not cost a second one.
-    $any = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    # Same treatment as the loop above — this second call can fail on its own account, and a
+    # masked failure here would report 'NotListening' just as misleadingly.
+    $any = @(Get-NetTCPConnection -LocalPort $Port -State Listen `
+        -ErrorAction SilentlyContinue -ErrorVariable ownerProbeError)
+    $ownerFailure = $ownerProbeError |
+        Where-Object { $_.CategoryInfo.Category -ne [System.Management.Automation.ErrorCategory]::ObjectNotFound } |
+        Select-Object -First 1
+    if ($ownerFailure) { return "ProbeFailed: $($ownerFailure.Exception.Message)" }
     if ($any.Count -eq 0) { return 'NotListening' }
 
     $owners = $any | ForEach-Object {
