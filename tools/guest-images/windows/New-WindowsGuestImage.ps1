@@ -90,7 +90,10 @@ param(
     # '...Standard (Desktop Experience)' and a substring match would silently pick one of them.
     [string]$ImageName,
 
-    [int]$ImageIndex = 1,          # 1 = Server Core Standard on the Server 2025 ISO
+    # 1 was 'Windows Server 2025 Standard' (Core) on the reference ISO — recorded in that
+    # image's provenance, not assumed. Layout differs between ISOs, so -ListImages rather than
+    # trusting this number.
+    [int]$ImageIndex = 1,
 
     # Prints the editions in the ISO and exits. Needs elevation, because reading the WIM means
     # mounting the ISO.
@@ -105,8 +108,13 @@ $ErrorActionPreference = 'Stop'
 
 # Both name the edition. Silently preferring one would make the ignored parameter look
 # honoured, which is worse than refusing.
-if ($ImageName -and $PSBoundParameters.ContainsKey('ImageIndex')) {
+if ($PSBoundParameters.ContainsKey('ImageName') -and $PSBoundParameters.ContainsKey('ImageIndex')) {
     throw "-ImageName and -ImageIndex both select the edition. Pass one, not both."
+}
+# Supplied-but-empty is a mistake, not "unspecified": without this, -ImageName '' falls through
+# to the index path and silently builds whatever index 1 happens to be.
+if ($PSBoundParameters.ContainsKey('ImageName') -and [string]::IsNullOrWhiteSpace($ImageName)) {
+    throw "-ImageName is empty. Pass an exact edition name (see -ListImages), or omit it to select by index."
 }
 
 if ($ListImages) {
@@ -192,13 +200,16 @@ try {
     $wimPath = "${isoDrive}:\sources\install.wim"
     if (-not (Test-Path $wimPath)) { throw "install.wim not found at $wimPath" }
 
+    # Read once and use for both selection paths, so a bad index gets the same catalogue a bad
+    # name does instead of a raw DISM error.
+    $available = @(Get-WindowsImage -ImagePath $wimPath)
+    $catalogue = ($available | ForEach-Object { "  [$($_.ImageIndex)] $($_.ImageName)" }) -join "`n"
+
     if ($ImageName) {
-        $available = @(Get-WindowsImage -ImagePath $wimPath)
         # Exact, not -like: 'Windows Server 2025 Standard' is a PREFIX of the Desktop
         # Experience name, so a substring match would quietly install the wrong edition.
         $selected = @($available | Where-Object { $_.ImageName -eq $ImageName })
         if ($selected.Count -eq 0) {
-            $catalogue = ($available | ForEach-Object { "  [$($_.ImageIndex)] $($_.ImageName)" }) -join "`n"
             throw "No edition named '$ImageName' in $wimPath. Available:`n$catalogue"
         }
         if ($selected.Count -gt 1) {
@@ -206,6 +217,9 @@ try {
         }
         $ImageIndex = $selected[0].ImageIndex
         Write-Step "Edition '$ImageName' resolved to WIM index $ImageIndex."
+    }
+    elseif ($ImageIndex -notin $available.ImageIndex) {
+        throw "WIM index $ImageIndex does not exist in $wimPath. Available:`n$catalogue"
     }
 
     $wimInfo = Get-WindowsImage -ImagePath $wimPath -Index $ImageIndex
@@ -413,8 +427,9 @@ $outputHash = (Get-FileHash -Algorithm SHA256 -Path $OutputVhdx).Hash
 Set-ItemProperty -Path $OutputVhdx -Name IsReadOnly -Value $true
 
 $provenance = [ordered]@{
-    # Derived from the WIM's own metadata (asserted Server 2025 Core at provisioning time),
-    # never an independent claim that could drift from the input.
+    # Derived from the WIM's own metadata — whichever edition was selected, so the label cannot
+    # drift from what was actually installed. Provisioning asserts Server 2025; the edition
+    # within it is the caller's choice.
     image          = "$($wimInfo.ImageName) (AspireHcs guest base)"
     isoPath        = (Resolve-Path $IsoPath).Path
     # Null when unverified. An image whose input was never checked must not carry a hash that

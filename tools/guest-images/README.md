@@ -43,8 +43,12 @@ variants of each SKU — and the index differs between ISOs, so ask the ISO rath
 Then select by exact name, `-ImageName 'Windows Server 2025 Standard (Desktop Experience)'`, or
 by `-ImageIndex`. Passing both is refused rather than resolved, since the ignored one would look
 honoured. Names are matched exactly because `Windows Server 2025 Standard` is a *prefix* of the
-Desktop Experience name. Desktop Experience wants more room than Core — pass a larger `-SizeGB`
-(60 is comfortable; the VHDX is dynamic, so the ceiling costs nothing until used).
+Desktop Experience name. Desktop Experience needs more room than Core, so raise `-SizeGB`; the
+VHDX is dynamic, so a generous ceiling costs nothing until used.
+
+Only Server Core has actually been built and booted by this tooling so far. Desktop Experience
+is *permitted* and its name is what the provenance will record, but no image has been built from
+it — treat the first one as a test, not a routine build.
 
 `New-WindowsGuestImage.ps1` (requires an elevated shell and the Hyper-V module — build-time
 only): pins the ISO by SHA-256, provisions offline (GPT EFI/MSR/NTFS → `Expand-WindowsImage`
