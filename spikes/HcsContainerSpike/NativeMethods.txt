@@ -16,3 +16,13 @@ HcsGetProcessProperties
 HcsCloseProcess
 CloseHandle
 LocalFree
+GetCurrentProcess
+OpenProcessToken
+CreateFile
+GetFileInformationByHandleEx
+BackupRead
+BackupWrite
+LookupPrivilegeValue
+AdjustTokenPrivileges
+SetFileInformationByHandle
+FILE_BASIC_INFO
