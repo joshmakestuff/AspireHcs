@@ -171,11 +171,12 @@ public static class HcsVirtualMachineBuilderExtensions
     /// </remarks>
     public static IResourceBuilder<HcsVirtualMachineResource> WithSshCommand(
         this IResourceBuilder<HcsVirtualMachineResource> builder,
-        string endpointName = "ssh",
+        [EndpointName] string endpointName = "ssh",
         string? userName = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointName);
+        RequireUsableUserName(userName);
 
         RequireEndpoint(builder.Resource, endpointName, nameof(WithSshCommand));
         ConnectCommands.RegisterSsh(builder, endpointName, userName);
@@ -197,11 +198,12 @@ public static class HcsVirtualMachineBuilderExtensions
     /// </remarks>
     public static IResourceBuilder<HcsVirtualMachineResource> WithRdpCommand(
         this IResourceBuilder<HcsVirtualMachineResource> builder,
-        string endpointName = "rdp",
+        [EndpointName] string endpointName = "rdp",
         string? userName = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointName);
+        RequireUsableUserName(userName);
 
         RequireEndpoint(builder.Resource, endpointName, nameof(WithRdpCommand));
 
@@ -215,6 +217,22 @@ public static class HcsVirtualMachineBuilderExtensions
 
         ConnectCommands.RegisterRdp(builder, endpointName, userName);
         return builder;
+    }
+
+    /// <summary>
+    /// <c>null</c> means "not specified" and is a supported choice. An empty or whitespace
+    /// string is a different thing: somebody meant to supply a user and supplied nothing, and
+    /// silently falling back to the host account (ssh) or the last cached one (mstsc) would
+    /// connect as somebody other than who was asked for.
+    /// </summary>
+    private static void RequireUsableUserName(string? userName)
+    {
+        if (userName is not null && string.IsNullOrWhiteSpace(userName))
+        {
+            throw new ArgumentException(
+                "The user name is empty. Pass null to leave it unspecified, or a real account name.",
+                nameof(userName));
+        }
     }
 
     private static void RequireEndpoint(HcsVirtualMachineResource resource, string endpointName, string caller)

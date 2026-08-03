@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AspireHcs.Hosting;
 
@@ -25,9 +26,9 @@ internal static class ConnectCommands
         builder.WithCommand(
             SshCommandName,
             "Connect (SSH)",
-            // Interactivity is read per click, not captured at model-build time.
-            _ => Task.FromResult(Execute(
-                resource, endpointName, "an SSH session", Environment.UserInteractive,
+            // Interactivity and state are read per click, not captured at model-build time.
+            context => Task.FromResult(Execute(
+                resource, endpointName, "an SSH session", Environment.UserInteractive, CurrentState(context),
                 allocated => BuildSshStartInfo(allocated.Address, allocated.Port, userName),
                 ShellExecute)),
             new CommandOptions
@@ -48,8 +49,8 @@ internal static class ConnectCommands
         builder.WithCommand(
             RdpCommandName,
             "Connect (RDP)",
-            _ => Task.FromResult(Execute(
-                resource, endpointName, "a Remote Desktop session", Environment.UserInteractive,
+            context => Task.FromResult(Execute(
+                resource, endpointName, "a Remote Desktop session", Environment.UserInteractive, CurrentState(context),
                 allocated => BuildRdpStartInfo(resource, endpointName, allocated.Address, allocated.Port, userName),
                 ShellExecute)),
             new CommandOptions
@@ -72,9 +73,24 @@ internal static class ConnectCommands
         string endpointName,
         string sessionDescription,
         bool userInteractive,
+        string? currentState,
         Func<AllocatedEndpoint, ProcessStartInfo> build,
         Action<ProcessStartInfo> launch)
     {
+        // UpdateState only governs what the dashboard *offers*; the command itself is reachable
+        // through Aspire's command APIs regardless, and an allocation outlives the VM that
+        // earned it (HcsVmOrchestrator assigns AllocatedEndpoint and never clears it). Without
+        // this, invoking the command on a stopped VM would launch a client at last run's
+        // address. Unknown state is allowed through rather than refused: the resource id this
+        // is looked up by is not guaranteed to equal the resource name, and a lookup miss must
+        // not turn into a feature that silently stops working.
+        if (currentState is not null && KnownResourceStates.TerminalStates.Contains(currentState))
+        {
+            return Failure(
+                $"The virtual machine is {currentState}, so there is nothing to connect to. " +
+                "Start it first.");
+        }
+
         // Session 0 has no desktop to put the client on. Process.Start would still "succeed"
         // there, leaving an invisible process and a dashboard reporting success — so this is
         // checked rather than discovered. Passed in rather than read here so the branch is
@@ -87,7 +103,7 @@ internal static class ConnectCommands
                 "share a desktop.");
         }
 
-        if (Allocation(resource, endpointName) is not { } allocated)
+        if (EndpointAllocations.Find(resource, endpointName) is not { } allocated)
         {
             return Failure(
                 $"Endpoint '{endpointName}' has no address yet. The guest gets one when its DHCP " +
@@ -183,7 +199,46 @@ internal static class ConnectCommands
     /// be a race, and it holds nothing secret — an address and a user name.
     /// </summary>
     internal static string RdpFilePath(HcsVirtualMachineResource resource, string endpointName)
-        => Path.Combine(Path.GetTempPath(), "AspireHcs", "connect", $"{resource.VmId}-{endpointName}.rdp");
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "AspireHcs", "connect");
+        string path = Path.GetFullPath(Path.Combine(directory, $"{resource.VmId}-{endpointName}.rdp"));
+
+        // The endpoint name is interpolated into a file name, so it crosses into path syntax.
+        // Rather than reimplementing Aspire's own name rules (which it owns, and enforces
+        // through the [EndpointName] analyzer), this asserts the property that actually
+        // matters to this method: the file lands inside the directory it was meant to.
+        string root = Path.GetFullPath(directory) + Path.DirectorySeparatorChar;
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Endpoint name '{endpointName}' would place the .rdp file outside '{directory}'.");
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// Best-effort current state for the terminal-state guard. Returns null when it cannot be
+    /// determined — see <see cref="Execute"/> for why that is allowed through rather than
+    /// refused.
+    /// </summary>
+    private static string? CurrentState(ExecuteCommandContext context)
+    {
+        try
+        {
+            ResourceNotificationService notifications =
+                context.ServiceProvider.GetRequiredService<ResourceNotificationService>();
+            return notifications.TryGetCurrentState(context.ResourceName, out ResourceEvent? resourceEvent)
+                ? resourceEvent.Snapshot.State?.Text
+                : null;
+        }
+        catch (InvalidOperationException)
+        {
+            // The service is not registered in this host (a bare model in a test, say). Not
+            // knowing the state is not a reason to refuse to connect.
+            return null;
+        }
+    }
 
     private static void ShellExecute(ProcessStartInfo startInfo)
     {
@@ -204,15 +259,10 @@ internal static class ConnectCommands
             return ResourceCommandState.Disabled;
         }
 
-        return Allocation(resource, endpointName) is null
+        return EndpointAllocations.Find(resource, endpointName) is null
             ? ResourceCommandState.Disabled
             : ResourceCommandState.Enabled;
     }
-
-    private static AllocatedEndpoint? Allocation(HcsVirtualMachineResource resource, string endpointName)
-        => resource.Annotations.OfType<EndpointAnnotation>()
-            .FirstOrDefault(e => string.Equals(e.Name, endpointName, StringComparison.OrdinalIgnoreCase))
-            ?.AllocatedEndpoint;
 
     private static ExecuteCommandResult Failure(string message)
         => new() { Success = false, Message = message };
