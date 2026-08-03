@@ -122,13 +122,31 @@ internal static partial class Program
                 }
             }
 
-            // Witness the state actually in force, rather than assuming the
-            // adjust calls did what they reported.
+            // Witness the state actually in force — and ENFORCE it. Printing a
+            // witness without checking it is the defect this whole command
+            // exists to avoid: an arm that silently ran with the wrong
+            // privileges enabled would be attributed to the state it intended,
+            // and the verdict built on it would be false.
             IReadOnlyList<(string Name, bool Enabled)>? now = TokenPrivileges.ListProcessPrivileges();
-            string witnessed = now is null
-                ? "(token unreadable)"
-                : $"backup={now.Any(p => p.Name == TokenPrivileges.SeBackupPrivilege && p.Enabled)} " +
-                  $"restore={now.Any(p => p.Name == TokenPrivileges.SeRestorePrivilege && p.Enabled)}";
+            if (now is null)
+            {
+                Step("IdentifyArmWitness", ProbeFailed,
+                    $"arm '{label}': the token could not be read, so the privilege state in force is unknown — " +
+                    "refusing to attribute a result to an unverified state");
+                return 2;
+            }
+            bool backupOn = now.Any(p => p.Name == TokenPrivileges.SeBackupPrivilege && p.Enabled);
+            bool restoreOn = now.Any(p => p.Name == TokenPrivileges.SeRestorePrivilege && p.Enabled);
+            bool backupWanted = enable.Contains(TokenPrivileges.SeBackupPrivilege);
+            bool restoreWanted = enable.Contains(TokenPrivileges.SeRestorePrivilege);
+            string witnessed = $"backup={backupOn} restore={restoreOn}";
+            if (backupOn != backupWanted || restoreOn != restoreWanted)
+            {
+                Step("IdentifyArmWitness", ProbeFailed,
+                    $"arm '{label}': intended backup={backupWanted} restore={restoreWanted} but the token reports " +
+                    $"{witnessed} — the adjust calls did not take effect, so this arm would measure the wrong state");
+                return 2;
+            }
 
             HRESULT result = WcLayer.ProcessBase(entries[i]);
             Arms.Add((label, result, $"enabled: {witnessed}; entry={entries[i]}"));
@@ -172,8 +190,17 @@ internal static partial class Program
             Console.WriteLine("      make `import` work unelevated;");
             Console.WriteLine("  (b) the gate is something else elevation supplies (another privilege, or an");
             Console.WriteLine("      access check on Administrators) -> that route is closed.");
-            Console.WriteLine("The cheapest decisive test is direct, not more token surgery: put an account in");
-            Console.WriteLine("Backup Operators, sign out and back in, and run `import` UNELEVATED.");
+            Console.WriteLine("The practical test is direct rather than more token surgery: have an account that");
+            Console.WriteLine("holds Backup Operators (and NOT Administrators) run `import` UNELEVATED. Note what");
+            Console.WriteLine("that does and does not show — `import` also enables privileges, restores security");
+            Console.WriteLine("descriptors and touches ACL-sensitive files, so it answers 'does acquisition work");
+            Console.WriteLine("for this account' rather than isolating which privilege ProcessBaseImage checks;");
+            Console.WriteLine("read the per-step HRESULTs to see WHICH gate stopped it, if any.");
+            Console.WriteLine();
+            Console.WriteLine("Group membership only enters a token at LOGON. Do not sign out to refresh it if");
+            Console.WriteLine("that would end the session you are working in (a remote one, say) — start a");
+            Console.WriteLine("SEPARATE logon instead: `runas /user:...`, or a second account created for the");
+            Console.WriteLine("test, both of which leave the current session intact.");
             return;
         }
         if (neither.Value != PrivilegeNotHeld)
