@@ -35,10 +35,7 @@ internal sealed class TcpEndpointHealthCheck(
     public async Task<HealthCheckResult> CheckHealthAsync(
         HealthCheckContext context, CancellationToken cancellationToken = default)
     {
-        AllocatedEndpoint? allocated = resource.Annotations
-            .OfType<EndpointAnnotation>()
-            .FirstOrDefault(e => string.Equals(e.Name, endpointName, StringComparison.OrdinalIgnoreCase))
-            ?.AllocatedEndpoint;
+        AllocatedEndpoint? allocated = EndpointAllocations.Find(resource, endpointName);
 
         if (allocated is null)
         {

@@ -139,12 +139,7 @@ public static class HcsVirtualMachineBuilderExtensions
 
         // Checked here rather than at check time so a typo fails the build of the model, not a
         // health report nobody reads.
-        if (!builder.Resource.Annotations.OfType<EndpointAnnotation>()
-                .Any(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
-        {
-            throw new InvalidOperationException(
-                $"Resource '{builder.Resource.Name}' has no endpoint named '{name}'. Declare it with WithEndpoint(\"{name}\", targetPort) first.");
-        }
+        RequireEndpoint(builder.Resource, name, nameof(WithTcpHealthCheck));
 
         string key = $"{builder.Resource.Name}_{name}_tcp_check";
         TimeSpan connectTimeout = timeout ?? TimeSpan.FromSeconds(3);
@@ -156,5 +151,98 @@ public static class HcsVirtualMachineBuilderExtensions
             tags: null));
 
         return builder.WithHealthCheck(key);
+    }
+
+    /// <summary>
+    /// Adds a <c>Connect (SSH)</c> command to the resource in the dashboard, which opens an SSH
+    /// client on the host pointed at the guest's leased address. Offered only while the VM is
+    /// running and <paramref name="endpointName"/> has resolved to an address.
+    /// </summary>
+    /// <param name="builder">The VM to add the command to.</param>
+    /// <param name="endpointName">The endpoint carrying SSH; must already be declared with <see cref="WithEndpoint"/>.</param>
+    /// <param name="userName">
+    /// Prefilled as <c>ssh -l</c>. Left unset, ssh falls back to the host user name, which is
+    /// rarely the right one for a guest — pass the account the image actually has.
+    /// </param>
+    /// <remarks>
+    /// Host-side by design: in run mode the AppHost and the browser showing the dashboard are on
+    /// the same machine, so "one click into the guest" is a process launch rather than anything
+    /// the guest has to cooperate with beyond serving SSH.
+    /// </remarks>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithSshCommand(
+        this IResourceBuilder<HcsVirtualMachineResource> builder,
+        [EndpointName] string endpointName = "ssh",
+        string? userName = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endpointName);
+        RequireUsableUserName(userName);
+
+        RequireEndpoint(builder.Resource, endpointName, nameof(WithSshCommand));
+        ConnectCommands.RegisterSsh(builder, endpointName, userName);
+        return builder;
+    }
+
+    /// <summary>
+    /// Adds a <c>Connect (RDP)</c> command to the resource in the dashboard, which opens mstsc
+    /// on the host pointed at the guest's leased address. Offered only while the VM is running
+    /// and <paramref name="endpointName"/> has resolved to an address.
+    /// </summary>
+    /// <param name="builder">The VM to add the command to.</param>
+    /// <param name="endpointName">The endpoint carrying RDP; must already be declared with <see cref="WithEndpoint"/>.</param>
+    /// <param name="userName">Prefilled in the generated <c>.rdp</c>; mstsc still prompts for the password.</param>
+    /// <remarks>
+    /// The guest must actually serve RDP. Windows Server images do not by default — Remote
+    /// Desktop needs enabling and its firewall group opening — so this command connecting is a
+    /// statement about the image, not about the integration.
+    /// </remarks>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithRdpCommand(
+        this IResourceBuilder<HcsVirtualMachineResource> builder,
+        [EndpointName] string endpointName = "rdp",
+        string? userName = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endpointName);
+        RequireUsableUserName(userName);
+
+        RequireEndpoint(builder.Resource, endpointName, nameof(WithRdpCommand));
+
+        // Rejected now rather than at click time, by the same check that guards the write: a
+        // user name the .rdp format cannot represent is a mistake in the AppHost, and the
+        // dashboard is a poor place to discover it.
+        if (!string.IsNullOrEmpty(userName))
+        {
+            RdpFile.ValidateValue("username", userName);
+        }
+
+        ConnectCommands.RegisterRdp(builder, endpointName, userName);
+        return builder;
+    }
+
+    /// <summary>
+    /// <c>null</c> means "not specified" and is a supported choice. An empty or whitespace
+    /// string is a different thing: somebody meant to supply a user and supplied nothing, and
+    /// silently falling back to the host account (ssh) or the last cached one (mstsc) would
+    /// connect as somebody other than who was asked for.
+    /// </summary>
+    private static void RequireUsableUserName(string? userName)
+    {
+        if (userName is not null && string.IsNullOrWhiteSpace(userName))
+        {
+            throw new ArgumentException(
+                "The user name is empty. Pass null to leave it unspecified, or a real account name.",
+                nameof(userName));
+        }
+    }
+
+    private static void RequireEndpoint(HcsVirtualMachineResource resource, string endpointName, string caller)
+    {
+        if (!resource.Annotations.OfType<EndpointAnnotation>()
+                .Any(e => string.Equals(e.Name, endpointName, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"Resource '{resource.Name}' has no endpoint named '{endpointName}'. " +
+                $"Declare it with WithEndpoint(\"{endpointName}\", targetPort) before calling {caller}().");
+        }
     }
 }

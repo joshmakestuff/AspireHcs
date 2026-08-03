@@ -11,7 +11,10 @@ variants from it reproducibly.
   suite's base (`HCS_TEST_VHDX`) is usually the only bootable image on a machine; mutating
   it would invalidate every result after that point.
 - **Provenance or it didn't happen.** Every built image gets a `.provenance.json` beside it:
-  source image and its SHA-256, edits applied, script commit, UTC build time. An image that
+  source image and its SHA-256, edits applied, script commit, UTC build time. The one exception
+  is `-SkipIsoHashCheck`, for iterating on the bootstrap: it records `isoSha256: null` and
+  `isoHashVerified: false` rather than a hash nothing verified, so an unpinned image is
+  self-identifying and must not be published as a fixture. An image that
   can't be traced to its inputs can't back a test result.
 - **Verify the result, not the step.** Build scripts assert the post-condition of each edit
   (the config line is present) rather than trusting that the edit command matched anything.
@@ -29,6 +32,26 @@ Requirements: WSL 2 with a default Linux distro (edits run via `wsl --mount` aga
 copy's ext4 root — the Kali root filesystem is not mountable from Windows directly).
 
 ## windows/ — Server 2025 base image builder
+
+**Choosing an edition.** A Server ISO carries several — Server Core and Desktop Experience
+variants of each SKU — and the index differs between ISOs, so ask the ISO rather than guessing:
+
+```powershell
+.\New-WindowsGuestImage.ps1 -IsoPath E:\isos\server2025.iso -ListImages
+```
+
+Then select by exact name, `-ImageName 'Windows Server 2025 Standard (Desktop Experience)'`, or
+by `-ImageIndex`. Passing both is refused rather than resolved, since the ignored one would look
+honoured. Names are matched exactly because `Windows Server 2025 Standard` is a *prefix* of the
+Desktop Experience name. Desktop Experience needs more room than Core, so raise `-SizeGB`; the
+VHDX is dynamic, so a generous ceiling costs nothing until used.
+
+Both editions have been built on the reference host (2026-08-03): Core at index 1 and Desktop
+Experience at index 2 (~14 GB), each recording its own edition in its provenance sidecar. Those
+images are local build artifacts, not repo contents, so treat the specifics as a build log rather
+than something this repository can prove. SSH served on every image generated that day; RDP did
+**not** reach the guest from the host — see [docs/connect-ux.md](../../docs/connect-ux.md). The
+bootstrap has been changed, but no image has been built from the change.
 
 `New-WindowsGuestImage.ps1` (requires an elevated shell and the Hyper-V module — build-time
 only): pins the ISO by SHA-256, provisions offline (GPT EFI/MSR/NTFS → `Expand-WindowsImage`

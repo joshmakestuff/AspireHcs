@@ -8,6 +8,8 @@
 
     1. Pin:        the ISO's SHA-256 must match -IsoSha256 or the build fails — same inputs,
                    same image; a different ISO must be a loud decision, not a drift.
+                   -SkipIsoHashCheck opts out for bootstrap iteration; the resulting image is
+                   NOT reproducibly pinned and its provenance records isoHashVerified = false.
     2. Provision:  New-VHD -> GPT (EFI 200 MB FAT32 / MSR 16 MB / NTFS) -> Expand-WindowsImage
                    -> unattend + bootstrap into the image -> ensure OpenSSH.Server capability
                    (in-box on Server 2025; added from the LOF ISO only if absent) -> bcdboot
@@ -26,6 +28,20 @@
     Hyper-V PowerShell module (build-time tooling; the AspireHcs runtime needs no such thing).
 
 .EXAMPLE
+    # See which editions an ISO offers (Core, Desktop Experience, ...) before choosing.
+    .\New-WindowsGuestImage.ps1 -IsoPath E:\isos\server2025.iso -ListImages
+
+.EXAMPLE
+    # Desktop Experience, selected by name rather than by a per-ISO index.
+    $pw = Read-Host -AsSecureString 'Guest Administrator password'
+    .\New-WindowsGuestImage.ps1 `
+        -IsoPath E:\isos\server2025.iso -SkipIsoHashCheck `
+        -ImageName 'Windows Server 2025 Standard (Desktop Experience)' `
+        -SizeGB 60 `
+        -OutputVhdx D:\HV\VHD\aspirehcs-guests\winserver2025-desktop.vhdx `
+        -AdminPassword $pw
+
+.EXAMPLE
     $pw = Read-Host -AsSecureString 'Guest Administrator password'
     .\New-WindowsGuestImage.ps1 `
         -IsoPath E:\isos\en-us_windows_server_2025_updated_sep_2025_x64_dvd_6d1ad20d.iso `
@@ -41,9 +57,14 @@ param(
     [string]$IsoPath,
 
     # SHA-256 the ISO must have. Get it once with Get-FileHash and pin it in your build notes.
-    [Parameter(Mandatory)]
-    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    # Not Mandatory only so -SkipIsoHashCheck can stand alone; still required without it.
+    [ValidatePattern('^$|^[0-9a-fA-F]{64}$')]
     [string]$IsoSha256,
+
+    # Skips the ~7 GB read that verifies the ISO, for iterating on the bootstrap where the same
+    # ISO is rebuilt repeatedly. The resulting image is NOT reproducibly pinned and its
+    # provenance records that, so the shortcut cannot silently outlive the iteration.
+    [switch]$SkipIsoHashCheck,
 
     [ValidateScript({ -not $_ -or (Test-Path $_ -PathType Leaf) })]
     [string]$FodIsoPath,
@@ -53,16 +74,31 @@ param(
     [ValidatePattern('^$|^[0-9a-fA-F]{64}$')]
     [string]$FodIsoSha256,
 
-    [Parameter(Mandatory)]
+    # Not Mandatory only so -ListImages can run without them; still required to build.
     [string]$OutputVhdx,
 
     # Baked into the image's Administrator account. This is a TEST FIXTURE image for an
     # isolated NAT network, not a production credential store.
-    [Parameter(Mandatory)]
     [SecureString]$AdminPassword,
 
     [int]$SizeGB = 40,
-    [int]$ImageIndex = 1,          # 1 = Server Core Standard on the Server 2025 ISO
+
+    # Which edition to install. A Server ISO carries several — Server Core and Desktop
+    # Experience variants of each SKU — and the index differs between ISOs, so selecting by
+    # name is the safer habit. Run -ListImages against your ISO to see what it offers.
+    # Matched EXACTLY, because 'Windows Server 2025 Standard' is a prefix of
+    # '...Standard (Desktop Experience)' and a substring match would silently pick one of them.
+    [string]$ImageName,
+
+    # 1 was 'Windows Server 2025 Standard' (Core) on the reference ISO — recorded in that
+    # image's provenance, not assumed. Layout differs between ISOs, so -ListImages rather than
+    # trusting this number.
+    [int]$ImageIndex = 1,
+
+    # Prints the editions in the ISO and exits. Needs elevation, because reading the WIM means
+    # mounting the ISO.
+    [switch]$ListImages,
+
     [int]$BurnInTimeoutMinutes = 20,
     [string]$BurnInVmName = 'AspireHcsImageBurnIn'
 )
@@ -70,6 +106,40 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Both name the edition. Silently preferring one would make the ignored parameter look
+# honoured, which is worse than refusing.
+if ($PSBoundParameters.ContainsKey('ImageName') -and $PSBoundParameters.ContainsKey('ImageIndex')) {
+    throw "-ImageName and -ImageIndex both select the edition. Pass one, not both."
+}
+# Supplied-but-empty is a mistake, not "unspecified": without this, -ImageName '' falls through
+# to the index path and silently builds whatever index 1 happens to be.
+if ($PSBoundParameters.ContainsKey('ImageName') -and [string]::IsNullOrWhiteSpace($ImageName)) {
+    throw "-ImageName is empty. Pass an exact edition name (see -ListImages), or omit it to select by index."
+}
+
+if ($ListImages) {
+    Write-Host "Editions in $IsoPath"
+    $listMount = Mount-DiskImage -ImagePath (Resolve-Path $IsoPath).Path -PassThru
+    try {
+        $listDrive = ($listMount | Get-Volume).DriveLetter
+        $listWim = "${listDrive}:\sources\install.wim"
+        if (-not (Test-Path $listWim)) { throw "install.wim not found at $listWim" }
+        Get-WindowsImage -ImagePath $listWim |
+            Select-Object ImageIndex, ImageName, @{n = 'SizeGB'; e = { [math]::Round($_.ImageSize / 1GB, 2) } } |
+            Format-Table -AutoSize | Out-String | Write-Host
+        Write-Host "Select one with -ImageName '<exact name>' (or -ImageIndex <n>)."
+    }
+    finally {
+        Dismount-DiskImage -ImagePath (Resolve-Path $IsoPath).Path | Out-Null
+    }
+    return
+}
+
+if (-not $SkipIsoHashCheck -and -not $IsoSha256) {
+    throw "-IsoSha256 is required. Pass the ISO's pinned SHA-256, or -SkipIsoHashCheck to build an explicitly unpinned iteration image."
+}
+if (-not $OutputVhdx) { throw "-OutputVhdx is required (omit it only with -ListImages)." }
+if (-not $AdminPassword) { throw "-AdminPassword is required (omit it only with -ListImages)." }
 if (Test-Path $OutputVhdx) {
     throw "Output already exists: $OutputVhdx. Delete it first; this script never overwrites."
 }
@@ -92,12 +162,22 @@ function Write-Step([string]$Message) { Write-Host "  -> $Message" }
 
 # ---------------------------------------------------------------- Phase 1: pin the input
 Write-Host "Phase 1: verifying ISO identity"
-Write-Step "Hashing $IsoPath ..."
-$actualIsoHash = (Get-FileHash -Algorithm SHA256 -Path $IsoPath).Hash
-if ($actualIsoHash -ne $IsoSha256.ToUpperInvariant()) {
-    throw "ISO SHA-256 mismatch.`n  expected: $($IsoSha256.ToUpperInvariant())`n  actual:   $actualIsoHash`nRefusing to build from an unpinned input."
+if ($SkipIsoHashCheck) {
+    # Loud, and permanently attached to the artifact: provenance records isoSha256 = null with
+    # isoHashVerified = false, so an image built this way can never be mistaken later for one
+    # whose input was pinned. Recording the EXPECTED hash here instead would be a lie — nothing
+    # checked it.
+    Write-Warning "-SkipIsoHashCheck: the ISO is NOT being verified. This image is for iteration only; its provenance will say so."
+    $actualIsoHash = $null
 }
-Write-Step "ISO hash verified."
+else {
+    Write-Step "Hashing $IsoPath ..."
+    $actualIsoHash = (Get-FileHash -Algorithm SHA256 -Path $IsoPath).Hash
+    if ($actualIsoHash -ne $IsoSha256.ToUpperInvariant()) {
+        throw "ISO SHA-256 mismatch.`n  expected: $($IsoSha256.ToUpperInvariant())`n  actual:   $actualIsoHash`nRefusing to build from an unpinned input."
+    }
+    Write-Step "ISO hash verified."
+}
 
 # ---------------------------------------------------------------- Phase 2: provision offline
 Write-Host "Phase 2: offline provisioning"
@@ -120,14 +200,38 @@ try {
     $wimPath = "${isoDrive}:\sources\install.wim"
     if (-not (Test-Path $wimPath)) { throw "install.wim not found at $wimPath" }
 
+    # Read once and use for both selection paths, so a bad index gets the same catalogue a bad
+    # name does instead of a raw DISM error.
+    $available = @(Get-WindowsImage -ImagePath $wimPath)
+    $catalogue = ($available | ForEach-Object { "  [$($_.ImageIndex)] $($_.ImageName)" }) -join "`n"
+
+    if ($ImageName) {
+        # Exact, not -like: 'Windows Server 2025 Standard' is a PREFIX of the Desktop
+        # Experience name, so a substring match would quietly install the wrong edition.
+        $selected = @($available | Where-Object { $_.ImageName -eq $ImageName })
+        if ($selected.Count -eq 0) {
+            throw "No edition named '$ImageName' in $wimPath. Available:`n$catalogue"
+        }
+        if ($selected.Count -gt 1) {
+            throw "'$ImageName' matches $($selected.Count) indexes in $wimPath; select by -ImageIndex instead."
+        }
+        $ImageIndex = $selected[0].ImageIndex
+        Write-Step "Edition '$ImageName' resolved to WIM index $ImageIndex."
+    }
+    elseif ($ImageIndex -notin $available.ImageIndex) {
+        throw "WIM index $ImageIndex does not exist in $wimPath. Available:`n$catalogue"
+    }
+
     $wimInfo = Get-WindowsImage -ImagePath $wimPath -Index $ImageIndex
     Write-Step "WIM index ${ImageIndex}: $($wimInfo.ImageName), version $($wimInfo.Version)"
 
-    # The image this tool advertises is Server 2025 CORE; a pinned hash does not prove the
-    # caller pinned the right ISO or picked a Core index, so the claim is asserted against
-    # what the WIM says about itself (Desktop indexes carry a '(Desktop Experience)' suffix).
-    if ($wimInfo.ImageName -notmatch 'Server 2025' -or $wimInfo.ImageName -match 'Desktop Experience') {
-        throw "WIM index $ImageIndex is '$($wimInfo.ImageName)', not a Server 2025 Core edition — refusing to label the output as one."
+    # Asserts only what this script actually supports — Server 2025, whose unattend, EMS
+    # settings and bootstrap this tooling is written against. It deliberately does NOT insist on
+    # Server Core any more: Desktop Experience is a legitimate choice (and the more useful one
+    # over RDP), and the output is labelled from the WIM's own ImageName, so whichever edition
+    # is selected describes itself honestly in the provenance rather than being mislabelled.
+    if ($wimInfo.ImageName -notmatch 'Server 2025') {
+        throw "WIM index $ImageIndex is '$($wimInfo.ImageName)', which is not a Windows Server 2025 edition. This script's unattend and EMS configuration are written for Server 2025."
     }
 
     Write-Step "Creating VHDX ($SizeGB GB dynamic)..."
@@ -299,7 +403,23 @@ try {
     if ($sentinel.sshd -ne 'Running') {
         throw "Bootstrap completed but recorded sshd='$($sentinel.sshd)' — the image's advertised SSH fixture was not serving at burn-in."
     }
-    Write-Step "Sentinel ok: sshd=$($sentinel.sshd), completed $($sentinel.completedUtc)"
+    # Both fixtures are gated on an observed listener owned by the expected service. A service
+    # reporting Running proves it started, not that anything is accepting connections, and a
+    # registry value that was set proves less than that.
+    if ($sentinel.sshdListening -ne 'Listening') {
+        throw "Bootstrap recorded sshdListening='$($sentinel.sshdListening)' — sshd was not accepting connections on 22 at burn-in."
+    }
+    if ($sentinel.rdp -ne 'Listening') {
+        throw "Bootstrap recorded rdp='$($sentinel.rdp)' — TermService was not accepting connections on 3389, so this image cannot back the Connect (RDP) command."
+    }
+    # A listener inside the guest is NOT reachability: the 2026-08-03 images sealed with
+    # rdp='Listening' and were still unreachable from the host, because the firewall rules had
+    # been switched back off. Local sockets are visible regardless of the firewall, so the
+    # listener probe alone can never catch that.
+    if ($sentinel.rdpFirewallEnabled -lt 1 -or $sentinel.rdpFirewallEnabled -ne $sentinel.rdpFirewallRules) {
+        throw "Bootstrap recorded $($sentinel.rdpFirewallEnabled)/$($sentinel.rdpFirewallRules) Remote Desktop firewall rules enabled — the guest would listen on 3389 but drop inbound connections."
+    }
+    Write-Step "Sentinel ok: sshd=$($sentinel.sshd)/$($sentinel.sshdListening), rdp=$($sentinel.rdp), completed $($sentinel.completedUtc)"
 }
 finally {
     Dismount-VHD -Path $OutputVhdx
@@ -314,11 +434,15 @@ $outputHash = (Get-FileHash -Algorithm SHA256 -Path $OutputVhdx).Hash
 Set-ItemProperty -Path $OutputVhdx -Name IsReadOnly -Value $true
 
 $provenance = [ordered]@{
-    # Derived from the WIM's own metadata (asserted Server 2025 Core at provisioning time),
-    # never an independent claim that could drift from the input.
+    # Derived from the WIM's own metadata — whichever edition was selected, so the label cannot
+    # drift from what was actually installed. Provisioning asserts Server 2025; the edition
+    # within it is the caller's choice.
     image          = "$($wimInfo.ImageName) (AspireHcs guest base)"
     isoPath        = (Resolve-Path $IsoPath).Path
-    isoSha256      = $actualIsoHash
+    # Null when unverified. An image whose input was never checked must not carry a hash that
+    # looks like evidence.
+    isoSha256        = $actualIsoHash
+    isoHashVerified  = -not $SkipIsoHashCheck
     wimIndex       = $ImageIndex
     wimImageName   = $wimInfo.ImageName
     wimVersion     = $wimInfo.Version.ToString()
@@ -330,10 +454,19 @@ $provenance = [ordered]@{
     builtBy        = "$env:USERDOMAIN\$env:USERNAME"
     scriptCommit   = $scriptCommit
     worktreeDirty  = [bool]$dirty
-    burnIn         = @{ sshd = $sentinel.sshd; completedUtc = $sentinel.completedUtc }
+    burnIn         = @{
+        sshd                = $sentinel.sshd
+        sshdListening       = $sentinel.sshdListening
+        rdp                 = $sentinel.rdp
+        rdpFirewallEnabled  = $sentinel.rdpFirewallEnabled
+        rdpFirewallRules    = $sentinel.rdpFirewallRules
+        rdpFirewallProfiles = $sentinel.rdpFirewallProfiles
+        completedUtc        = $sentinel.completedUtc
+    }
     edits          = @(
         'unattend: specialized, OOBE skipped, single autologon consumed by burn-in',
         'sshd: StartupType Automatic, firewall OpenSSH-Server-In-TCP profile Any',
+        'RDP: fDenyTSConnections=0, TermService Automatic, firewall group @FirewallAPI.dll,-28752 enabled profile Any',
         'BCD: ems on, emssettings COM1 115200',
         'sealed: Optimize-VHD Full, file marked read-only'
     )
