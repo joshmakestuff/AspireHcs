@@ -11,7 +11,10 @@ variants from it reproducibly.
   suite's base (`HCS_TEST_VHDX`) is usually the only bootable image on a machine; mutating
   it would invalidate every result after that point.
 - **Provenance or it didn't happen.** Every built image gets a `.provenance.json` beside it:
-  source image and its SHA-256, edits applied, script commit, UTC build time. An image that
+  source image and its SHA-256, edits applied, script commit, UTC build time. The one exception
+  is `-SkipIsoHashCheck`, for iterating on the bootstrap: it records `isoSha256: null` and
+  `isoHashVerified: false` rather than a hash nothing verified, so an unpinned image is
+  self-identifying and must not be published as a fixture. An image that
   can't be traced to its inputs can't back a test result.
 - **Verify the result, not the step.** Build scripts assert the post-condition of each edit
   (the config line is present) rather than trusting that the edit command matched anything.
