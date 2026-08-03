@@ -36,6 +36,50 @@ which had been carried as *untested, not true* since the xenon spike.
 | A store AspireHcs owns needs no ACL surgery | **PROVEN** — unelevated `verify` passes on both entries, no grant |
 | Elevation needed for | **import only** — never for pulling, verifying, or running the container |
 
+## What a developer actually does
+
+`pull` and `import` are separate commands on purpose, and the split is the whole
+privilege story: **`pull` is fetch, `import` is install.**
+
+`pull` talks to the registry, verifies digests, and leaves a compressed tarball
+plus metadata in the store. Bytes on disk; Windows knows nothing about them yet.
+`import` unpacks that tarball into a real filesystem tree — replaying security
+descriptors, hard links and EAs through `BackupWrite` — and then finalizes it,
+which builds the registry hive bases, rewrites the utility VM's boot
+configuration, and generates the scratch VHDX templates. Its output is a
+*bootable image*. Creating containers from that image is a third thing again,
+and it is unprivileged: every `run` makes its own scratch layer over the image.
+
+| Step | Frequency | Elevation |
+|---|---|---|
+| `pull` | per image | no |
+| `import` | once per image | **yes** — one session imports any number of images |
+| `verify` | whenever | no |
+| `run` a container | every time | no |
+
+So the shape is a **setup step, not a workflow tax**:
+
+1. *Once per developer:* be a member of **Hyper-V Administrators** — the same
+   prerequisite the VM path has documented since #1/#3, so containers add no new
+   one. (Group membership only reaches a token at logon.)
+2. *Once per machine, in a single elevated session:* `import` the base images
+   the team uses. Re-running a completed import is a no-op, so this is safe to
+   repeat and cheap to script.
+3. *Every day after that:* pull, verify, and run containers with **no prompt and
+   no elevation** — including Hyper-V-isolated containers, which is the mode
+   that matters on developer machines.
+
+Why not zero elevation? Because both routes out are closed, measured rather than
+assumed: finalization cannot be skipped (it rewrites the UVM's BCD), and UAC
+token filtering means no group membership can hand an unelevated session the
+privileges it needs. The full evidence is in
+[Can the UAC prompt be removed?](#can-the-uac-prompt-be-removed-no--and-the-reason-is-structural)
+below. Docker's `docker pull` appears to need nothing only because `dockerd`
+runs permanently as LocalSystem and does the install half on the caller's
+behalf — the elevation still happens, it has just been made invisible and
+permanent. Keeping it visible, attributable and occasional is the deliberate
+trade here.
+
 ## Why not just copy the layer out of Docker's store
 
 Because a base layer cannot be moved that way. Measured in #33: `ExportLayer`
