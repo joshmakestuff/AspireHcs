@@ -243,6 +243,17 @@ internal static class ReparseBuffer
         // header: the four USHORT name fields (8), optional flags, both names.
         int dataLength = 8 + flagsBytes + substituteBytes + printBytes;
 
+        // Every length below is written as a USHORT. Bounded HERE, against the
+        // limit the Windows consumer actually enforces, because an unchecked
+        // cast would WRAP a long target into a small length and emit a
+        // structurally valid but wrong record instead of failing.
+        const int MaximumReparseDataBufferSize = 16 * 1024;
+        if (8 + dataLength > MaximumReparseDataBufferSize || substituteBytes > ushort.MaxValue || printBytes > ushort.MaxValue)
+        {
+            throw new InvalidOperationException(
+                $"reparse target is too long to encode: {8 + dataLength} bytes exceeds MAXIMUM_REPARSE_DATA_BUFFER_SIZE ({MaximumReparseDataBufferSize})");
+        }
+
         byte[] buffer = new byte[8 + dataLength];
         Span<byte> span = buffer;
         BinaryPrimitives.WriteUInt32LittleEndian(span, isMountPoint ? MountPointTag : SymlinkTag);
