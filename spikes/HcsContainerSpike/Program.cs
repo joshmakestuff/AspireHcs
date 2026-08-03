@@ -75,6 +75,7 @@ internal static partial class Program
                     "inspect" => Inspect(args),
                     "import" => Import(args),
                     "finalize" => Finalize(args),
+                    "identify" => Identify(args),
                     _ => Usage(),
                 };
             }
