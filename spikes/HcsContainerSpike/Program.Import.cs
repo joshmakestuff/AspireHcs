@@ -569,8 +569,20 @@ internal static partial class Program
             && ProbeEntryFile(Path.Combine(entryPath, "UtilityVM"), ["SystemTemplate.vhdx"], out _).Succeeded;
         if (scratchPreexisted || uvmPreexisted)
         {
-            Console.WriteLine($"[finalize] NOTE: finalize outputs already present before this call " +
+            // MEASURED 2026-08-02: ProcessBaseImage is neither idempotent nor
+            // atomic. A finalize that failed part-way (e.g. the unelevated
+            // privilege gate) leaves a PARTIAL blank-base.vhdx behind — 4 MB
+            // where a complete one is 38 MB — and the retry then dies
+            // 0x80070050 ERROR_FILE_EXISTS, which reads as a problem with the
+            // retry rather than with the leftovers. Refuse up front with the
+            // actual remedy instead of letting that happen.
+            Console.WriteLine($"[finalize] finalize outputs already present before this call " +
                               $"(scratch={scratchPreexisted} systemTemplate={uvmPreexisted}); {scratchBefore}");
+            Step("FinalizeOutputsPreexist", ProbeFailed,
+                "ProcessBaseImage is not idempotent: it fails 0x80070050 ERROR_FILE_EXISTS against leftovers from an " +
+                "earlier attempt, and those leftovers may be partial. Re-import the entry (import destroys a torn " +
+                "entry automatically) rather than finalizing over them.");
+            return ProbeFailed;
         }
 
         HRESULT hr = WcLayer.ProcessBase(entryPath);
