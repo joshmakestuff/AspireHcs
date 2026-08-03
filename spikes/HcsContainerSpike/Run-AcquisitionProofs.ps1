@@ -237,7 +237,10 @@ if (-not (Test-Path $exe)) {
 }
 Write-Both "exe: $exe (built $((Get-Item $exe).LastWriteTime.ToString('o')))"
 
-[void](Invoke-Step -Title 'SelfTest(native building blocks)' -CommandArgs @('selftest'))
+# REQUIRED, not measured: docs/image-acquisition.md leans on these probes for the
+# reparse/ADS/EA record shapes that no image fixture exercises. If they can fail
+# without failing the run, the document is citing a check that never had to pass.
+[void](Invoke-Step -Title 'SelfTest(native building blocks)' -MustPass -CommandArgs @('selftest'))
 
 # --- 1. Acquire, unelevated -------------------------------------------------
 # REQUIRED: pulling is plain HTTPS plus file writes into the user's own profile.
@@ -292,8 +295,14 @@ foreach ($i in 0..($images.Count - 1)) {
 $script:steps += [pscustomobject]@{ Step = 'BuildMatchWitness'; Elevated = $isElevated; Exit = 0; MustPass = $true; Ok = $true }
 
 # What the images actually contain, on the record: the port's handling of
-# symlinks/junctions/ADS is only exercised if the fixtures carry them.
-[void](Invoke-Step -Title 'Inspect(ltsc2025)' -CommandArgs @('inspect', '--metadata', $metadataPaths[0]))
+# symlinks/junctions/ADS is only exercised if the fixtures carry them. BOTH tags
+# are inspected because the document makes a claim about both — inspecting one
+# would leave the other's "zero symlinks" quantifier with no durable witness.
+foreach ($i in 0..($images.Count - 1)) {
+    [void](Invoke-Step -Title "Inspect($($images[$i].Name))" -MustPass `
+            -ExpectOutputMatch 'InspectWhiteoutFree: hr=0x00000000' `
+            -CommandArgs @('inspect', '--metadata', $metadataPaths[$i]))
+}
 
 # The documented scope guard, exercised rather than asserted in prose: a
 # multi-layer image must be refused, naming chain import as the follow-up.

@@ -96,7 +96,9 @@ internal static partial class Program
         bool completed = false;
         try
         {
-            HRESULT hr = ExtractLayer(blobPath, entryPath, expectedDiffId, noSecurity, out bool hasUtilityVm);
+            string layerDigest = (string?)metadata["layerDigest"]
+                ?? throw new InvalidOperationException($"{metadataPath} has no layerDigest");
+            HRESULT hr = ExtractLayer(blobPath, entryPath, layerDigest, expectedDiffId, noSecurity, out bool hasUtilityVm);
             if (hr.Failed)
             {
                 return 2;
@@ -205,7 +207,7 @@ internal static partial class Program
     // ------------------------------------------------------------ extraction --
 
     private static HRESULT ExtractLayer(
-        string blobPath, string entryPath, string expectedDiffId, bool noSecurity, out bool hasUtilityVm)
+        string blobPath, string entryPath, string expectedLayerDigest, string expectedDiffId, bool noSecurity, out bool hasUtilityVm)
     {
         hasUtilityVm = false;
         Directory.CreateDirectory(entryPath);
@@ -227,7 +229,15 @@ internal static partial class Program
         using (root)
         {
             using FileStream compressed = File.OpenRead(blobPath);
-            using var gzip = new GZipStream(compressed, CompressionMode.Decompress);
+            // The COMPRESSED bytes are re-hashed against the manifest's layer
+            // digest as they are read. `pull` verified them once, but import is a
+            // separate invocation against a file on disk: without this, a blob
+            // that was replaced or corrupted after the pull would be imported on
+            // the strength of its file name alone. Costs one hash over a stream
+            // already being read.
+            using var layerSha = SHA256.Create();
+            using var hashingCompressed = new CryptoStream(compressed, layerSha, CryptoStreamMode.Read, leaveOpen: true);
+            using var gzip = new GZipStream(hashingCompressed, CompressionMode.Decompress);
             // The diffID is the hash of the WHOLE uncompressed tar, including the
             // end-of-archive zero blocks TarReader stops before — hence the
             // explicit drain after the loop.
@@ -258,12 +268,22 @@ internal static partial class Program
             // stream. Reading a CryptoStream to EOF finalizes the hash itself —
             // calling FlushFinalBlock as well throws "called twice".
             hashing.CopyTo(Stream.Null);
+            // Draining the gzip stream also drains the compressed stream beneath
+            // it, so both hashes are final here.
+            hashingCompressed.CopyTo(Stream.Null);
+
+            string actualLayerDigest = "sha256:" + Convert.ToHexStringLower(
+                layerSha.Hash ?? throw new InvalidOperationException("compressed hash unavailable"));
+            bool layerMatch = string.Equals(actualLayerDigest, expectedLayerDigest, StringComparison.Ordinal);
+            Step("VerifyLayerDigest", layerMatch ? default : ProbeFailed,
+                layerMatch ? $"{actualLayerDigest} matches the manifest" : $"expected {expectedLayerDigest}, got {actualLayerDigest}");
+
             string actualDiffId = "sha256:" + Convert.ToHexStringLower(
                 sha.Hash ?? throw new InvalidOperationException("hash unavailable after draining the stream"));
             bool diffIdMatch = string.Equals(actualDiffId, expectedDiffId, StringComparison.Ordinal);
             Step("VerifyDiffId", diffIdMatch ? default : ProbeFailed,
                 diffIdMatch ? $"{actualDiffId} matches the image config" : $"expected {expectedDiffId}, got {actualDiffId}");
-            if (!diffIdMatch)
+            if (!diffIdMatch || !layerMatch)
             {
                 return ProbeFailed;
             }

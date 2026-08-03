@@ -35,8 +35,11 @@ internal sealed record OciImageReference(string Registry, string Repository, str
         if (at >= 0)
         {
             string repository = rest[..at];
-            string digest = rest[(at + 1)..];
-            OciDigest.RequireSha256(digest);
+            // Normalized to lowercase at the boundary. RequireSha256 accepts
+            // either case, but every later comparison is ordinal against a
+            // lowercase computed digest — so an uppercase digest that parsed
+            // fine would fail only after the fetch, blaming the registry.
+            string digest = "sha256:" + OciDigest.RequireSha256(rest[(at + 1)..]);
             return Validated(registry, repository, digest, referenceIsDigest: true);
         }
 
@@ -50,10 +53,73 @@ internal sealed record OciImageReference(string Registry, string Repository, str
 
     private static OciImageReference Validated(string registry, string repository, string reference, bool referenceIsDigest)
     {
-        return repository.Length == 0 || reference.Length == 0
-            ? throw new ArgumentException($"--image has an empty repository or reference ('{registry}', '{repository}', '{reference}')")
-            : new OciImageReference(registry, repository, reference, referenceIsDigest);
+        // Every component is interpolated into a URL, so the grammar is enforced
+        // HERE rather than trusting the value to be inert downstream: a '?', '#',
+        // '@' or '..' reaching the request would change the authority, path,
+        // query or fragment instead of naming an image. The rules mirror the OCI
+        // distribution spec's own character classes, which is what the registry
+        // actually enforces.
+        if (repository.Length == 0 || reference.Length == 0)
+        {
+            throw new ArgumentException($"--image has an empty repository or reference ('{registry}', '{repository}', '{reference}')");
+        }
+        if (!IsValidRegistry(registry))
+        {
+            throw new ArgumentException($"--image registry '{registry}' is not a bare host[:port]");
+        }
+        if (!IsValidRepository(repository))
+        {
+            throw new ArgumentException(
+                $"--image repository '{repository}' is not a valid OCI name (lowercase alphanumerics, separators . _ - , '/'-delimited, no '..')");
+        }
+        if (!referenceIsDigest && !IsValidTag(reference))
+        {
+            throw new ArgumentException($"--image tag '{reference}' is not a valid OCI tag");
+        }
+        return new OciImageReference(registry, repository, reference, referenceIsDigest);
     }
+
+    private static bool IsValidRegistry(string registry)
+    {
+        string host = registry;
+        int colon = registry.LastIndexOf(':');
+        if (colon >= 0)
+        {
+            if (!ushort.TryParse(registry[(colon + 1)..], out _))
+            {
+                return false;
+            }
+            host = registry[..colon];
+        }
+        return host.Length > 0
+            && host.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-')
+            && !host.StartsWith('.') && !host.EndsWith('.') && !host.Contains("..", StringComparison.Ordinal);
+    }
+
+    private static bool IsValidRepository(string repository)
+    {
+        if (repository.StartsWith('/') || repository.EndsWith('/') || repository.Contains("//", StringComparison.Ordinal))
+        {
+            return false;
+        }
+        foreach (string component in repository.Split('/'))
+        {
+            if (component.Length == 0
+                || component == ".." || component == "."
+                || !char.IsAsciiLetterOrDigit(component[0])
+                || !char.IsAsciiLetterOrDigit(component[^1])
+                || !component.All(c => (char.IsAsciiLetterOrDigit(c) && !char.IsAsciiLetterUpper(c)) || c is '.' or '_' or '-'))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool IsValidTag(string tag) =>
+        tag.Length <= 128
+        && (char.IsAsciiLetterOrDigit(tag[0]) || tag[0] == '_')
+        && tag.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.' or '-');
 
     public override string ToString() => $"{Registry}/{Repository}{(ReferenceIsDigest ? '@' : ':')}{Reference}";
 }
