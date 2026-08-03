@@ -480,3 +480,7 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Agent skill trees dropped by the aspire CLI; regenerated on demand, not source.
+.agents/
+.claude/
