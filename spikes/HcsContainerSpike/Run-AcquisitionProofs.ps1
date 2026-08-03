@@ -206,18 +206,16 @@ if ($Phase -eq 'import') {
     # this run exercises it. MEASURED — whether ProcessBaseImage tolerates a
     # descriptor-free tree is exactly the unknown.
     #
-    # It must be RE-EXTRACTED first. The unelevated finalize earlier in the run
-    # is asserted to fail, and it fails PART-WAY — leaving a partial
-    # blank-base.vhdx that makes any later finalize die 0x80070050
-    # ERROR_FILE_EXISTS. Finalizing the leftovers would measure the leftovers,
-    # not the descriptor-free question (observed exactly that on 2026-08-02).
+    # It finalizes a SECOND, pristine descriptor-free entry — one extracted
+    # UNELEVATED and never finalized before — rather than the one the asserted
+    # unelevated finalize already touched. That failure gets far enough to leave
+    # a partial blank-base.vhdx, and finalizing over it measures the debris
+    # (observed exactly that on 2026-08-02: 0x80070050 ERROR_FILE_EXISTS).
+    # Re-extracting here instead would also miss the point: the extraction has
+    # to be the unelevated one for this to be the off-diagonal it claims to be.
     if ($NoSecurityEntry) {
-        if (Invoke-Step -Title 'ElevatedRe-extract(descriptor-free, clean)' `
-                -CommandArgs @('import', '--metadata', ($MetadataPath -split ';')[0], '--entry', $NoSecurityEntry, `
-                    '--no-security', '--skip-finalize')) {
-            [void](Invoke-Step -Title 'ElevatedFinalize(descriptor-free entry)' `
-                    -CommandArgs @('finalize', '--entry', $NoSecurityEntry))
-        }
+        [void](Invoke-Step -Title 'ElevatedFinalize(descriptor-free entry, extracted unelevated)' `
+                -CommandArgs @('finalize', '--entry', $NoSecurityEntry))
     }
 
     # The OTHER off-diagonal, and the positive control for the provenance fix:
@@ -359,16 +357,27 @@ foreach ($i in 0..($images.Count - 1)) {
 # a test that can fail. It lands in its OWN directory, not the canonical
 # content-addressed entry, so the elevated import below cannot destroy it: the
 # descriptor-free tree is itself a fixture for the off-diagonal measurement.
-$noSecurityEntry = Join-Path $Store 'experiment-no-security'
+$gateEntry = Join-Path $Store 'experiment-privilege-gate'
 [void](Invoke-Step -Title 'UnelevatedExtract(--no-security --skip-finalize)' -ExpectedExit 0 `
         -ExpectOutputMatch 'VerifyDiffId: hr=0x00000000' `
-        -CommandArgs @('import', '--metadata', $metadataPaths[0], '--entry', $noSecurityEntry, '--no-security', '--skip-finalize'))
+        -CommandArgs @('import', '--metadata', $metadataPaths[0], '--entry', $gateEntry, '--no-security', '--skip-finalize'))
 
-# Finalize alone on that same entry: the OTHER gate. Asserted to FAIL with
+# Finalize alone on that entry: the OTHER gate. Asserted to FAIL with
 # ERROR_PRIVILEGE_NOT_HELD — an unexpected pass would mean the boundary moved.
+# This CONTAMINATES the entry (the failure leaves a partial blank-base.vhdx),
+# which is why it is deliberately not the entry the elevated phase finalizes.
 [void](Invoke-Step -Title 'UnelevatedFinalize' -ExpectedExit 2 `
         -ExpectOutputMatch 'ProcessBaseImage: hr=0x80070522' `
-        -CommandArgs @('finalize', '--entry', $noSecurityEntry))
+        -CommandArgs @('finalize', '--entry', $gateEntry))
+
+# A pristine descriptor-free tree, extracted UNELEVATED and never finalized, for
+# the elevated phase to finalize. Keeping it separate is what makes that step a
+# real off-diagonal (unelevated extraction + elevated finalize) rather than a
+# measurement of the previous step's debris.
+$noSecurityEntry = Join-Path $Store 'experiment-no-security'
+[void](Invoke-Step -Title 'UnelevatedExtract(descriptor-free, pristine)' -ExpectedExit 0 `
+        -ExpectOutputMatch 'VerifyDiffId: hr=0x00000000' `
+        -CommandArgs @('import', '--metadata', $metadataPaths[0], '--entry', $noSecurityEntry, '--no-security', '--skip-finalize'))
 
 # --- 3. Import for real, elevated -------------------------------------------
 Write-Both ''
@@ -430,11 +439,14 @@ $compatible = ($entries | Where-Object { $_.Image.Compatible })[0]
         -ExpectOutputMatch 'GuestExecProof\(stdout\): hr=0x00000000' `
         -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $compatible.Path, '--id', $containerId))
 
-# MEASURED, and the headline unknown: a 20348 guest on a 26200 host. The claim
-# that Hyper-V isolation lifts the build-match constraint has never been tested
-# on this host, so this row carries no expectation in either direction.
+# ASSERTED as of 2026-08-02, when this stopped being an unknown: a 20348 guest
+# DID boot on this 26200 host, and README/docs now state that Hyper-V isolation
+# lifts the build-match constraint. A documented claim with no failing test is
+# just a claim, so the guest's own reported build is asserted too — a boot that
+# silently ran the wrong image would otherwise pass on exit code alone.
 $mismatched = ($entries | Where-Object { -not $_.Image.Compatible })[0]
-[void](Invoke-Step -Title 'UnelevatedXenonBoot(BUILD-MISMATCHED ltsc2022)' `
+[void](Invoke-Step -Title 'UnelevatedXenonBoot(BUILD-MISMATCHED ltsc2022)' -ExpectedExit 0 `
+        -ExpectOutputMatch 'guest build=10\.0\.20348\.' `
         -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $mismatched.Path, '--id', $containerId))
 
 # MEASURED: argon on our own store. Expected to gate at ActivateLayer exactly as

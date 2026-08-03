@@ -564,9 +564,18 @@ internal static partial class Program
         // BEFORE it. An interrupted earlier finalize (or a re-run) leaves these
         // files behind, and a post-only check would credit this invocation with
         // producing what it merely found.
-        bool scratchPreexisted = ProbeEntryFile(entryPath, ScratchTemplateNames, out string scratchBefore).Succeeded;
-        bool uvmPreexisted = hasUtilityVm
-            && ProbeEntryFile(Path.Combine(entryPath, "UtilityVM"), ["SystemTemplate.vhdx"], out _).Succeeded;
+        // "Not definitely absent" is the bar, NOT "readable". A denied or
+        // erroring probe means the file may well be there — treating that as
+        // absence would walk straight into ProcessBaseImage's ERROR_FILE_EXISTS,
+        // which is the denied-as-absent lie this spike keeps having to unlearn.
+        // ProbeEntryFile returns ProbeFailed only when every candidate was
+        // genuinely absent; every other outcome is present-or-unknown.
+        HRESULT scratchProbe = ProbeEntryFile(entryPath, ScratchTemplateNames, out string scratchBefore);
+        bool scratchPreexisted = scratchProbe.Value != ProbeFailed.Value;
+        HRESULT uvmProbe = hasUtilityVm
+            ? ProbeEntryFile(Path.Combine(entryPath, "UtilityVM"), ["SystemTemplate.vhdx"], out _)
+            : ProbeFailed;
+        bool uvmPreexisted = hasUtilityVm && uvmProbe.Value != ProbeFailed.Value;
         if (scratchPreexisted || uvmPreexisted)
         {
             // MEASURED 2026-08-02: ProcessBaseImage is neither idempotent nor
