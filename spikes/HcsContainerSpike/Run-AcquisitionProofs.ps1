@@ -42,6 +42,9 @@ param(
     [string]$LogPath,
     [ValidateSet('import')][string]$Phase,
     [string]$MetadataPath,
+    # Internal: the descriptor-free entry left by the unelevated extraction, so
+    # the elevated phase can measure the off-diagonal "no SDs + finalize" mode.
+    [string]$NoSecurityEntry,
     [switch]$SkipPull
 )
 
@@ -87,7 +90,12 @@ function Get-MetadataPath([string]$ImageRef) {
                 return $file.FullName
             }
         }
-        catch { continue }  # a torn/partial metadata file is not the one we want
+        catch {
+            # A torn metadata file is not the one we want, but swallowing it
+            # silently would hide a real torn write behind "no such image".
+            Write-Both "WARNING: unreadable metadata file $($file.FullName): $($_.Exception.Message)"
+            continue
+        }
     }
     return $null
 }
@@ -104,6 +112,13 @@ function Invoke-Step {
         # output to witness it.
         [string]$ExpectOutputMatch
     )
+    # An output assertion on a step with no expected exit would be recorded and
+    # then ignored: Ok stays $null for MEAS rows, so the regex could fail while
+    # the verdict table still printed MEAS. A check that cannot fail is worse
+    # than no check, so this combination is refused outright.
+    if ($ExpectOutputMatch -and -not ($MustPass -or ($ExpectedExit -ge 0))) {
+        throw "Invoke-Step '$Title': -ExpectOutputMatch requires -MustPass or -ExpectedExit, or the assertion cannot fail the run."
+    }
     Write-Both ''
     Write-Both "=== $Title (elevated=$isElevated) ==="
     Write-Both "> HcsContainerSpike $($CommandArgs -join ' ')"
@@ -162,6 +177,16 @@ if ($Phase -eq 'import') {
             Write-Both 'Import failed elevated. Nothing downstream can be interpreted — stopping.'
             exit 1
         }
+    }
+
+    # The off-diagonal mode: extract WITHOUT security descriptors, then finalize
+    # WITH privileges. Neither half is novel, but the combination is what an
+    # unprivileged-extraction design would actually produce, and nothing else in
+    # this run exercises it. MEASURED — whether ProcessBaseImage tolerates a
+    # descriptor-free tree is exactly the unknown.
+    if ($NoSecurityEntry) {
+        [void](Invoke-Step -Title 'ElevatedFinalize(descriptor-free entry)' `
+                -CommandArgs @('finalize', '--entry', $NoSecurityEntry))
     }
 
     Write-Both ''
@@ -224,9 +249,39 @@ foreach ($image in $images) {
     $metadataPaths += $found
 }
 
+# The build-matched / build-mismatched LABELS are claims, so they are witnessed
+# at runtime against the pulled metadata and this host rather than trusted from
+# the table above. If MCR ever retags ltsc2022 onto a 26100 build, the
+# "build-mismatch" experiment below would silently be testing nothing — the
+# vacuous-verifier failure this check exists to prevent.
+$hostBuild = [Environment]::OSVersion.Version.Build
+Write-Both ''
+Write-Both "=== Build-match witness (host build $hostBuild) ==="
+foreach ($i in 0..($images.Count - 1)) {
+    $osVersion = (Get-Content $metadataPaths[$i] -Raw | ConvertFrom-Json).osVersion
+    $imageBuild = [int](($osVersion -split '\.')[2])
+    $actuallyMatched = ($imageBuild -eq $hostBuild)
+    Write-Both ("  {0,-9} osVersion={1,-18} imageBuild={2} declaredMatched={3} actualMatched={4}" -f `
+            $images[$i].Name, $osVersion, $imageBuild, $images[$i].Matched, $actuallyMatched)
+    if ($actuallyMatched -ne $images[$i].Matched) {
+        Write-Both ''
+        Write-Both "MISLABELLED FIXTURE: $($images[$i].Name) is declared Matched=$($images[$i].Matched) but its build"
+        Write-Both "$imageBuild vs host $hostBuild says otherwise. The boot steps below would test something other"
+        Write-Both 'than what their names claim. Stopping rather than recording a result under the wrong label.'
+        exit 2
+    }
+}
+$script:steps += [pscustomobject]@{ Step = 'BuildMatchWitness'; Elevated = $isElevated; Exit = 0; MustPass = $true; Ok = $true }
+
 # What the images actually contain, on the record: the port's handling of
 # symlinks/junctions/ADS is only exercised if the fixtures carry them.
 [void](Invoke-Step -Title 'Inspect(ltsc2025)' -CommandArgs @('inspect', '--metadata', $metadataPaths[0]))
+
+# The documented scope guard, exercised rather than asserted in prose: a
+# multi-layer image must be refused, naming chain import as the follow-up.
+[void](Invoke-Step -Title 'MultiLayerImageRefused(servercore)' -ExpectedExit 2 `
+        -ExpectOutputMatch 'multi-layer \(chain\) import is out of this spike' `
+        -CommandArgs @('pull', '--image', 'mcr.microsoft.com/windows/servercore:ltsc2025', '--store', $Store))
 
 # --- 2. The privilege boundary, measured in three separate places -----------
 # Full-fidelity import unelevated: expected to stop at privilege enablement.
@@ -235,17 +290,19 @@ foreach ($image in $images) {
 
 # Extraction alone, no security data: measured 2026-08-02 to SUCCEED, which is
 # why it is asserted here — the claim "extraction needs no privileges" now has
-# a test that can fail.
+# a test that can fail. It lands in its OWN directory, not the canonical
+# content-addressed entry, so the elevated import below cannot destroy it: the
+# descriptor-free tree is itself a fixture for the off-diagonal measurement.
+$noSecurityEntry = Join-Path $Store 'experiment-no-security'
 [void](Invoke-Step -Title 'UnelevatedExtract(--no-security --skip-finalize)' -ExpectedExit 0 `
         -ExpectOutputMatch 'VerifyDiffId: hr=0x00000000' `
-        -CommandArgs @('import', '--metadata', $metadataPaths[0], '--no-security', '--skip-finalize'))
+        -CommandArgs @('import', '--metadata', $metadataPaths[0], '--entry', $noSecurityEntry, '--no-security', '--skip-finalize'))
 
 # Finalize alone on that same entry: the OTHER gate. Asserted to FAIL with
 # ERROR_PRIVILEGE_NOT_HELD — an unexpected pass would mean the boundary moved.
-$extracted = (Get-Content $metadataPaths[0] -Raw | ConvertFrom-Json).expectedDiffId -replace '^sha256:', ''
 [void](Invoke-Step -Title 'UnelevatedFinalize' -ExpectedExit 2 `
         -ExpectOutputMatch 'ProcessBaseImage: hr=0x80070522' `
-        -CommandArgs @('finalize', '--entry', (Join-Path $Store $extracted)))
+        -CommandArgs @('finalize', '--entry', $noSecurityEntry))
 
 # --- 3. Import for real, elevated -------------------------------------------
 Write-Both ''
@@ -260,6 +317,7 @@ $childArgs = @(
     '-Phase', 'import',
     '-Store', (& $q $Store),
     '-MetadataPath', (& $q ($metadataPaths -join ';')),
+    '-NoSecurityEntry', (& $q $noSecurityEntry),
     '-LogPath', (& $q $LogPath)
 )
 $child = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
@@ -317,6 +375,20 @@ $mismatched = ($entries | Where-Object { -not $_.Image.Matched })[0]
 # anything about where the layer lives.
 [void](Invoke-Step -Title 'UnelevatedArgonBoot(own store)' `
         -CommandArgs @('run', '--isolation', 'process', '--layer', $matched.Path, '--id', $containerId))
+
+# MEASURED: does a layer whose security descriptors were NEVER restored boot?
+# Only meaningful if the elevated phase managed to finalize it; the guard keeps
+# a skipped step from reading as a passing one.
+if (Test-Path (Join-Path $noSecurityEntry 'UtilityVM\SystemTemplate.vhdx')) {
+    [void](Invoke-Step -Title 'UnelevatedXenonBoot(descriptor-free entry)' `
+            -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $noSecurityEntry, '--id', $containerId))
+}
+else {
+    Write-Both ''
+    Write-Both 'SKIPPED UnelevatedXenonBoot(descriptor-free entry): the elevated phase did not produce'
+    Write-Both "SystemTemplate.vhdx under $noSecurityEntry, so there is nothing to boot. Read the"
+    Write-Both 'ElevatedFinalize(descriptor-free entry) row above for why — that is the finding.'
+}
 
 Write-Both ''
 Write-Both '=== Verdict ==='

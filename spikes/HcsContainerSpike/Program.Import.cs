@@ -30,6 +30,13 @@ internal static partial class Program
     /// first file lands, so existence alone proves nothing.</summary>
     private const string ProvenanceFileName = "aspirehcs-acquisition.json";
 
+    /// <summary>Written when extraction finishes, recording HOW it ran. A later
+    /// standalone `finalize` has no other way to know whether the tree it is
+    /// finalizing had security descriptors replayed: judging by its own token
+    /// would record "descriptors restored" for an entry extracted with
+    /// --no-security, i.e. provenance that lies about the artifact.</summary>
+    private const string ExtractionRecordFileName = "aspirehcs-extraction.json";
+
     private static int Import(string[] args)
     {
         string metadataPath = Path.GetFullPath(Opt(args, "--metadata")
@@ -41,7 +48,13 @@ internal static partial class Program
         string store = Path.GetDirectoryName(Path.GetDirectoryName(metadataPath))!;
         string expectedDiffId = (string?)metadata["expectedDiffId"]
             ?? throw new InvalidOperationException($"{metadataPath} has no expectedDiffId");
-        string entryPath = Path.Combine(store, OciDigest.RequireSha256(expectedDiffId));
+        // --entry overrides the content-addressed location. The experiment modes
+        // need somewhere to land that is NOT the canonical entry, or a
+        // descriptor-free extraction and a full-fidelity import would fight over
+        // one directory and the second would silently destroy the first.
+        string entryPath = Opt(args, "--entry") is string overridden
+            ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(overridden))
+            : Path.Combine(store, OciDigest.RequireSha256(expectedDiffId));
 
         Console.WriteLine($"[import] image={(string?)metadata["image"]} osVersion={(string?)metadata["osVersion"]}");
         Console.WriteLine($"[import] blob={blobPath}");
@@ -143,16 +156,48 @@ internal static partial class Program
             return 2;
         }
 
-        string metadataPath = Path.Combine(entryPath, ProvenanceFileName);
-        if (!File.Exists(metadataPath))
+        if (!File.Exists(Path.Combine(entryPath, ProvenanceFileName)))
         {
             // A standalone finalize completes an entry an earlier --skip-finalize
             // left; the provenance it can write is thinner (no image metadata in
             // hand) and says so.
+            //
+            // Whether descriptors were restored is read from the EXTRACTION
+            // record, never inferred from this process's token: an entry
+            // extracted with --no-security and finalized elevated would
+            // otherwise be recorded as descriptor-complete, which is precisely
+            // backwards.
             WriteCompletionRecords(entryPath, new JsonObject { ["image"] = "(unknown — finalized standalone)" },
-                noSecurity: privHr.Failed);
+                noSecurity: !ExtractionRestoredSecurity(entryPath, out string extractionNote));
+            Console.WriteLine($"[finalize] extraction record: {extractionNote}");
         }
+        _ = privHr; // measured above and printed; deliberately not a gate here
         return Results.Any(r => r.Hr.Failed) ? 2 : 0;
+    }
+
+    /// <summary>Reads the extraction record left by <c>import</c>. A missing or
+    /// unreadable record means UNKNOWN, and unknown must not be recorded as
+    /// "restored" — the conservative answer is the honest one.</summary>
+    private static bool ExtractionRestoredSecurity(string entryPath, out string note)
+    {
+        string path = Path.Combine(entryPath, ExtractionRecordFileName);
+        try
+        {
+            JsonNode? record = JsonNode.Parse(File.ReadAllText(path));
+            bool? restored = (bool?)record?["securityDescriptorsRestored"];
+            if (restored is null)
+            {
+                note = $"{ExtractionRecordFileName} has no securityDescriptorsRestored field — recording UNKNOWN as not-restored";
+                return false;
+            }
+            note = $"{ExtractionRecordFileName}: securityDescriptorsRestored={restored}";
+            return restored.Value;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            note = $"{ExtractionRecordFileName} unreadable ({ex.GetType().Name}) — recording UNKNOWN as not-restored";
+            return false;
+        }
     }
 
     // ------------------------------------------------------------ extraction --
@@ -229,6 +274,14 @@ internal static partial class Program
                 return hr;
             }
         }
+
+        File.WriteAllText(Path.Combine(entryPath, ExtractionRecordFileName), new JsonObject
+        {
+            ["securityDescriptorsRestored"] = !noSecurity,
+            ["extractedElevated"] = IsElevated(),
+            ["extractedUtc"] = DateTime.UtcNow.ToString("o"),
+            ["entries"] = entryCount,
+        }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         return default;
     }
 
@@ -390,9 +443,14 @@ internal static partial class Program
             ChangeTime = ParsePaxTime(pax, "ctime"),
             CreationTime = ParsePaxTime(pax, "LIBARCHIVE.creationtime"),
         };
-        if (pax.TryGetValue("MSWINDOWS.fileattr", out string? attr) && uint.TryParse(attr, out uint attributes))
+        if (pax.TryGetValue("MSWINDOWS.fileattr", out string? attr))
         {
-            info.FileAttributes = attributes;
+            // Present-but-unparseable is a corrupt layer, not a missing value:
+            // silently defaulting would create the entry with the WRONG type
+            // (a directory as a file) and fail later as something unrecognizable.
+            info.FileAttributes = uint.TryParse(attr, out uint attributes)
+                ? attributes
+                : throw new InvalidOperationException($"'{entry.Name}' has a malformed MSWINDOWS.fileattr record: '{attr}'");
         }
         else if (entry.EntryType == TarEntryType.Directory)
         {
@@ -410,6 +468,10 @@ internal static partial class Program
     /// FILETIME is 100 ns and a double loses that precision outright.</summary>
     private static long ParsePaxTime(IReadOnlyDictionary<string, string> pax, string key)
     {
+        // ABSENT is a legitimate state that means "leave this timestamp alone"
+        // (nanoserver tars carry no ctime at all). PRESENT-but-malformed is a
+        // corrupt record, and the two are kept distinguishable: only the first
+        // returns zero quietly.
         if (!pax.TryGetValue(key, out string? raw) || raw.Length == 0)
         {
             return 0;
@@ -421,14 +483,13 @@ internal static partial class Program
         {
             secondsText = raw[..dot];
             string fraction = raw[(dot + 1)..].PadRight(9, '0')[..9];
-            if (long.TryParse(fraction, out long nanoseconds))
-            {
-                ticksFromFraction = nanoseconds / 100; // 100 ns per tick
-            }
+            ticksFromFraction = long.TryParse(fraction, out long nanoseconds)
+                ? nanoseconds / 100 // 100 ns per tick
+                : throw new InvalidOperationException($"malformed PAX '{key}' fraction: '{raw}'");
         }
         if (!long.TryParse(secondsText, out long seconds))
         {
-            return 0;
+            throw new InvalidOperationException($"malformed PAX '{key}' value: '{raw}'");
         }
         // FILETIME epoch is 1601-01-01; Unix epoch is 11644473600 seconds later.
         long ticks = (seconds + 11644473600L) * 10_000_000L;
@@ -506,18 +567,57 @@ internal static partial class Program
         // What these two calls PRODUCE is asserted, not assumed: hcsshim never
         // states the mapping, and a finalize that silently produced nothing
         // would otherwise surface much later as an unexplained boot failure.
-        string? scratchTemplate = FindScratchTemplate(entryPath, out string searched, out _);
-        Step("FinalizeProducedScratchTemplate", scratchTemplate is not null ? default : ProbeFailed,
-            scratchTemplate ?? $"none of the expected blank VHDX names appeared: {searched}");
+        //
+        // Deliberately NOT via FindScratchTemplate: that helper searches the
+        // STORE ROOT before the layer (moby's historical layout), so an
+        // unrelated blank-base.vhdx sitting beside the entry would satisfy this
+        // check without ProcessBaseImage having produced anything — a verifier
+        // that cannot fail for the reason it claims to test. Only the entry's
+        // own files can witness what finalize did.
+        Step("FinalizeProducedScratchTemplate", ProbeEntryFile(entryPath, ScratchTemplateNames, out string scratchDetail), scratchDetail);
 
         if (hasUtilityVm)
         {
-            string systemTemplate = Path.Combine(entryPath, "UtilityVM", "SystemTemplate.vhdx");
-            bool present = File.Exists(systemTemplate);
-            Step("FinalizeProducedSystemTemplate", present ? default : ProbeFailed,
-                present ? $"{systemTemplate} ({new FileInfo(systemTemplate).Length / (1024 * 1024)} MB)" : $"{systemTemplate} absent");
+            Step("FinalizeProducedSystemTemplate",
+                ProbeEntryFile(Path.Combine(entryPath, "UtilityVM"), ["SystemTemplate.vhdx"], out string uvmDetail), uvmDetail);
         }
         return Results.Any(r => r.Hr.Failed) ? ProbeFailed : default;
+    }
+
+    /// <summary>Opens the first of <paramref name="names"/> that exists directly
+    /// under <paramref name="directory"/>, reporting DENIED distinctly from
+    /// ABSENT. File.Exists cannot make that distinction — it reports a file the
+    /// caller may not read as missing, the exact denied-as-absent lie
+    /// Program.Privilege.cs documents as load-bearing for this spike.</summary>
+    private static HRESULT ProbeEntryFile(string directory, IReadOnlyList<string> names, out string detail)
+    {
+        var notes = new List<string>();
+        foreach (string name in names)
+        {
+            string candidate = Path.Combine(directory, name);
+            try
+            {
+                using FileStream probe = File.OpenRead(candidate);
+                detail = $"{candidate}: present, readable ({probe.Length / (1024 * 1024)} MB)";
+                return default;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                detail = $"{candidate}: ERROR_ACCESS_DENIED [0x{(uint)ex.HResult:X8}] — present but unreadable at this privilege level";
+                return new HRESULT(AccessDenied);
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                notes.Add($"{candidate}: absent");
+            }
+            catch (IOException ex)
+            {
+                detail = $"{candidate}: {ex.GetType().Name} [0x{(uint)ex.HResult:X8}] {ex.Message}";
+                return MapManagedFailure(ex);
+            }
+        }
+        detail = $"finalize produced none of the expected files: {string.Join("; ", notes)}";
+        return ProbeFailed;
     }
 
     private static void WriteCompletionRecords(string entryPath, JsonNode metadata, bool noSecurity)

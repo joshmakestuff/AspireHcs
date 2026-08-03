@@ -128,14 +128,27 @@ internal sealed class OciRegistryClient : IDisposable
             throw new InvalidOperationException(
                 $"manifest fetched by digest does not hash to it: asked {reference}, body is {bodyDigest}");
         }
-        if (!byDigest
-            && response.Headers.TryGetValues("Docker-Content-Digest", out IEnumerable<string>? advertised)
-            && advertised.FirstOrDefault() is string header
-            && header.StartsWith("sha256:", StringComparison.Ordinal)
-            && !string.Equals(bodyDigest, header, StringComparison.Ordinal))
+        if (!byDigest)
         {
-            throw new InvalidOperationException(
-                $"manifest body hashes to {bodyDigest} but the registry advertised Docker-Content-Digest {header}");
+            // Fails CLOSED when the header is missing or not sha256. Skipping the
+            // check in that case would leave a tag fetch with no binding at all
+            // while still being described as digest-verified — the header is
+            // present on every MCR response probed (2026-08-02), so its absence
+            // is an anomaly worth stopping on rather than shrugging past.
+            string? header = response.Headers.TryGetValues("Docker-Content-Digest", out IEnumerable<string>? advertised)
+                ? advertised.FirstOrDefault()
+                : null;
+            if (header is null || !header.StartsWith("sha256:", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"registry did not advertise a sha256 Docker-Content-Digest for tag '{reference}' " +
+                    $"(got '{header ?? "(absent)"}') — a tag fetch cannot be bound to a digest without it");
+            }
+            if (!string.Equals(bodyDigest, header, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"manifest body hashes to {bodyDigest} but the registry advertised Docker-Content-Digest {header}");
+            }
         }
 
         string? mediaType = response.Content.Headers.ContentType?.MediaType;
@@ -152,11 +165,14 @@ internal sealed class OciRegistryClient : IDisposable
             HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(response, $"blob {digest}", ct).ConfigureAwait(false);
 
-        byte[] body = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-        if (body.Length > maxBytes)
+        // Checked BEFORE reading, or the "bound" would only report an allocation
+        // that already happened — a limit that cannot prevent what it names.
+        if (response.Content.Headers.ContentLength is long advertisedLength && advertisedLength > maxBytes)
         {
-            throw new InvalidOperationException($"blob {digest} is {body.Length} bytes — over the {maxBytes}-byte in-memory bound");
+            throw new InvalidOperationException(
+                $"blob {digest} advertises {advertisedLength} bytes — over the {maxBytes}-byte in-memory bound");
         }
+        byte[] body = await ReadBoundedAsync(response, maxBytes, digest, ct).ConfigureAwait(false);
         string actual = OciDigest.Sha256(body);
         return string.Equals(actual, digest, StringComparison.Ordinal)
             ? body
@@ -232,6 +248,27 @@ internal sealed class OciRegistryClient : IDisposable
                 File.Delete(tempPath);
             }
         }
+    }
+
+    /// <summary>Reads at most <paramref name="maxBytes"/>, stopping as soon as
+    /// the limit is exceeded — a registry that under-reports (or omits)
+    /// Content-Length must not be able to make this allocate without bound.</summary>
+    private static async Task<byte[]> ReadBoundedAsync(
+        HttpResponseMessage response, int maxBytes, string digest, CancellationToken ct)
+    {
+        await using Stream source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var buffer = new MemoryStream();
+        byte[] chunk = new byte[64 * 1024];
+        int read;
+        while ((read = await source.ReadAsync(chunk, ct).ConfigureAwait(false)) > 0)
+        {
+            if (buffer.Length + read > maxBytes)
+            {
+                throw new InvalidOperationException($"blob {digest} exceeds the {maxBytes}-byte in-memory bound");
+            }
+            buffer.Write(chunk, 0, read);
+        }
+        return buffer.ToArray();
     }
 
     private static async Task<string> Sha256OfFileAsync(string path, CancellationToken ct)

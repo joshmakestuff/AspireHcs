@@ -20,6 +20,38 @@ using Windows.Win32.Foundation;
 
 namespace HcsContainerSpike;
 
+/// <summary>The single definition of the locally-judged-failure sentinel. It
+/// was defined twice (here and in Program) before review caught it — one
+/// semantic with nothing forcing the copies to agree.</summary>
+internal static class SpikeHr
+{
+    /// <summary>E_FAIL, used for proof steps this code judges itself rather
+    /// than receiving from a native call.</summary>
+    public static readonly HRESULT ProbeFailed = new(unchecked((int)0x80004005));
+}
+
+/// <summary>The one UTF-16LE serializer for native buffers. Both the
+/// WIN32_STREAM_ID name field and the reparse buffer's two name fields need it;
+/// two hand-rolled loops would be two places for the same encoding bug.</summary>
+internal static class Utf16
+{
+    public static int Write(Span<byte> destination, string value)
+    {
+        for (int i = 0; i < value.Length; i++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(destination[(i * 2)..], value[i]);
+        }
+        return value.Length * 2;
+    }
+
+    public static int WriteWithNul(Span<byte> destination, string value)
+    {
+        int written = Write(destination, value);
+        BinaryPrimitives.WriteUInt16LittleEndian(destination[written..], 0);
+        return written + 2;
+    }
+}
+
 internal static class BackupStreamId
 {
     public const uint Data = 1;
@@ -46,11 +78,8 @@ internal sealed unsafe class BackupStreamWriter(SafeFileHandle file, bool proces
         BinaryPrimitives.WriteUInt32LittleEndian(header[16..], (uint)nameBytes);
         if (name is not null)
         {
-            // UTF-16LE, no terminator — NameSize already said how many bytes.
-            for (int i = 0; i < name.Length; i++)
-            {
-                BinaryPrimitives.WriteUInt16LittleEndian(header[(20 + i * 2)..], name[i]);
-            }
+            // No terminator — NameSize already said how many bytes.
+            Utf16.Write(header[20..], name);
         }
         return Write(header);
     }
@@ -78,7 +107,7 @@ internal sealed unsafe class BackupStreamWriter(SafeFileHandle file, bool proces
             }
             if (written == 0)
             {
-                return ProgramProbeFailed; // no progress — refuse to spin
+                return SpikeHr.ProbeFailed; // no progress — refuse to spin
             }
             data = data[(int)written..];
         }
@@ -96,7 +125,7 @@ internal sealed unsafe class BackupStreamWriter(SafeFileHandle file, bool proces
             int read = source.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
             if (read == 0)
             {
-                return ProgramProbeFailed; // tar said `length` bytes and delivered fewer — truncated archive
+                return SpikeHr.ProbeFailed; // tar said `length` bytes and delivered fewer — truncated archive
             }
             HRESULT hr = Write(buffer.AsSpan(0, read));
             if (hr.Failed)
@@ -119,8 +148,6 @@ internal sealed unsafe class BackupStreamWriter(SafeFileHandle file, bool proces
             _context = null;
         }
     }
-
-    private static readonly HRESULT ProgramProbeFailed = new(unchecked((int)0x80004005));
 }
 
 /// <summary>Pumps a file's raw backup stream out via BackupRead — the
@@ -232,19 +259,9 @@ internal static class ReparseBuffer
             BinaryPrimitives.WriteUInt32LittleEndian(span[offset..], relative ? 1u : 0u);
             offset += 4;
         }
-        offset += WriteUtf16WithNul(span[offset..], ntTarget);
-        WriteUtf16WithNul(span[offset..], target);
+        offset += Utf16.WriteWithNul(span[offset..], ntTarget);
+        Utf16.WriteWithNul(span[offset..], target);
         return buffer;
-    }
-
-    private static int WriteUtf16WithNul(Span<byte> destination, string value)
-    {
-        for (int i = 0; i < value.Length; i++)
-        {
-            BinaryPrimitives.WriteUInt16LittleEndian(destination[(i * 2)..], value[i]);
-        }
-        BinaryPrimitives.WriteUInt16LittleEndian(destination[(value.Length * 2)..], 0);
-        return (value.Length + 1) * 2;
     }
 }
 

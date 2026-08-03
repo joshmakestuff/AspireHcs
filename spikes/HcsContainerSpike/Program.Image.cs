@@ -228,15 +228,22 @@ internal static partial class Program
 
     /// <summary>Metadata file keyed by the image reference, filename-sanitized.
     /// Content-addressed naming would be wrong here: two refs can name one blob,
-    /// and the ref is what a human asks for again.</summary>
+    /// and the ref is what a human asks for again.
+    ///
+    /// Sanitizing alone is NOT injective — `nanoserver:foo_bar` and
+    /// `nanoserver_foo:bar` both collapse to the same characters — so a short
+    /// hash of the exact reference is appended. Two different images can then
+    /// never overwrite each other's metadata, while the name stays readable.</summary>
     private static string MetadataPath(string store, OciImageReference image)
     {
+        string reference = image.ToString();
         string key = $"{image.Registry}_{image.Repository}_{image.Reference}";
         foreach (char c in Path.GetInvalidFileNameChars())
         {
             key = key.Replace(c, '_');
         }
-        return Path.Combine(store, "images", key + ".json");
+        string discriminator = OciDigest.Sha256(System.Text.Encoding.UTF8.GetBytes(reference))["sha256:".Length..][..8];
+        return Path.Combine(store, "images", $"{key}-{discriminator}.json");
     }
 
     /// <summary>Managed exceptions carry the real Win32/HTTP story in HResult
