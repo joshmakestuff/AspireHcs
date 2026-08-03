@@ -9,8 +9,9 @@ using Xunit;
 namespace AspireHcs.Tests;
 
 // The connect commands launch a client on the host, so the part worth pinning is what would be
-// spawned and when the button is live — not Process.Start itself, which is verified by clicking
-// the button against a real guest (docs/connect-ux.md).
+// spawned and when the button is live. Process.Start itself is NOT covered here or anywhere:
+// seeing a client window appear needs a human, and docs/connect-ux.md records it as unverified
+// rather than claiming otherwise.
 [SupportedOSPlatform("windows10.0.17763")]
 public class ConnectCommandTests
 {
@@ -72,6 +73,11 @@ public class ConnectCommandTests
     // Not up yet: nothing to connect to.
     [InlineData("NotStarted", false, ResourceCommandState.Disabled)]
     [InlineData("Starting", false, ResourceCommandState.Disabled)]
+    // No state published yet at all — the case LifecycleCommandTests covers for Start.
+    [InlineData(null, false, ResourceCommandState.Disabled)]
+    [InlineData(null, true, ResourceCommandState.Disabled)]
+    // On the way down, the allocation is still present but the guest is going away.
+    [InlineData("Stopping", true, ResourceCommandState.Disabled)]
     // Running, but the DHCP lease has not surfaced yet — the window in which a connect attempt
     // would fail rather than wait.
     [InlineData("Running", false, ResourceCommandState.Disabled)]
@@ -81,7 +87,7 @@ public class ConnectCommandTests
     [InlineData("Exited", true, ResourceCommandState.Disabled)]
     [InlineData("FailedToStart", true, ResourceCommandState.Disabled)]
     public void Availability_needs_both_running_and_an_allocated_address(
-        string state, bool allocated, ResourceCommandState expected)
+        string? state, bool allocated, ResourceCommandState expected)
     {
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm()
             .WithEndpoint("ssh", 22)
@@ -170,7 +176,7 @@ public class ConnectCommandTests
         List<ProcessStartInfo> launched = [];
 
         ExecuteCommandResult result = ConnectCommands.Execute(
-            vm.Resource, "ssh", "an SSH session", userInteractive: true,
+            vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: "Running",
             allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
             launched.Add);
 
@@ -187,7 +193,7 @@ public class ConnectCommandTests
         List<ProcessStartInfo> launched = [];
 
         ExecuteCommandResult result = ConnectCommands.Execute(
-            vm.Resource, "ssh", "an SSH session", userInteractive: false,
+            vm.Resource, "ssh", "an SSH session", userInteractive: false, currentState: "Running",
             allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
             launched.Add);
 
@@ -205,7 +211,7 @@ public class ConnectCommandTests
         Allocate(vm, "ssh", "192.168.1.20", 22);
 
         ExecuteCommandResult result = ConnectCommands.Execute(
-            vm.Resource, "ssh", "an SSH session", userInteractive: true,
+            vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: "Running",
             allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
             _ => throw new System.ComponentModel.Win32Exception("The system cannot find the file specified"));
 
@@ -222,7 +228,7 @@ public class ConnectCommandTests
         List<ProcessStartInfo> launched = [];
 
         ExecuteCommandResult result = ConnectCommands.Execute(
-            vm.Resource, "ssh", "an SSH session", userInteractive: true,
+            vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: "Running",
             allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, "Administrator"),
             launched.Add);
 
@@ -243,7 +249,7 @@ public class ConnectCommandTests
         try
         {
             ExecuteCommandResult result = ConnectCommands.Execute(
-                vm.Resource, "rdp", "a Remote Desktop session", userInteractive: true,
+                vm.Resource, "rdp", "a Remote Desktop session", userInteractive: true, currentState: "Running",
                 allocated => ConnectCommands.BuildRdpStartInfo(
                     vm.Resource, "rdp", allocated.Address, allocated.Port, "Administrator"),
                 launched.Add);
@@ -262,6 +268,109 @@ public class ConnectCommandTests
         {
             File.Delete(path);
         }
+    }
+
+    [Theory]
+    [InlineData("Exited")]
+    [InlineData("FailedToStart")]
+    [InlineData("Finished")]
+    public void A_click_on_a_stopped_vm_is_refused_even_though_the_allocation_survives(string state)
+    {
+        // UpdateState only governs what the dashboard offers; the command is still reachable
+        // through Aspire's command APIs, and HcsVmOrchestrator never clears AllocatedEndpoint —
+        // so without this guard the client would be launched at the previous run's address.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithSshCommand();
+        Allocate(vm, "ssh", "192.168.1.20", 22);
+        List<ProcessStartInfo> launched = [];
+
+        ExecuteCommandResult result = ConnectCommands.Execute(
+            vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: state,
+            allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
+            launched.Add);
+
+        Assert.False(result.Success);
+        Assert.Contains("nothing to connect to", result.Message, StringComparison.Ordinal);
+        Assert.Empty(launched);
+    }
+
+    [Fact]
+    public void An_unknown_state_is_allowed_through_rather_than_refused()
+    {
+        // The resource id the state is looked up by is not guaranteed to equal the resource
+        // name. A lookup miss must not turn into a feature that silently stops working.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithSshCommand();
+        Allocate(vm, "ssh", "192.168.1.20", 22);
+        List<ProcessStartInfo> launched = [];
+
+        ExecuteCommandResult result = ConnectCommands.Execute(
+            vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: null,
+            allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
+            launched.Add);
+
+        Assert.True(result.Success);
+        Assert.Single(launched);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void An_explicitly_empty_user_name_is_rejected_rather_than_treated_as_unset(string userName)
+    {
+        // null means "unspecified" and is supported; empty means somebody meant to name an
+        // account and named none, and falling back to the host account would connect as
+        // somebody other than who was asked for.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithEndpoint("rdp", 3389);
+
+        Assert.Throws<ArgumentException>(() => vm.WithSshCommand(userName: userName));
+        Assert.Throws<ArgumentException>(() => vm.WithRdpCommand(userName: userName));
+    }
+
+    [Theory]
+    [InlineData(@"..\..\..\evil")]
+    [InlineData("../../../evil")]
+    [InlineData(@"..\..\..\..\..\evil")]
+    public void An_endpoint_name_that_would_escape_the_connect_directory_is_refused(string endpointName)
+    {
+        // The endpoint name is interpolated into a file name, so it crosses into path syntax.
+        // Three levels, not two: the name is SUFFIXED onto the VmId, so `aspirehcs-vm-x-..`
+        // is one ordinary segment (Windows strips the trailing dots) that the following `..`
+        // then pops — measured, and covered as the boundary case below.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
+
+        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
+            () => ConnectCommands.RdpFilePath(vm.Resource, endpointName));
+
+        Assert.Contains("outside", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Two_traversal_levels_are_absorbed_by_the_vm_id_prefix_and_stay_inside()
+    {
+        // Recorded because it is surprising: `..\..\evil` lands on connect\evil.rdp, still
+        // inside. The guard asserts containment rather than banning `..`, so this passes — and
+        // pinning it here means a future change to the file-name shape cannot quietly move the
+        // boundary without a test noticing.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
+
+        string path = ConnectCommands.RdpFilePath(vm.Resource, @"..\..\evil");
+
+        Assert.Equal(
+            Path.Combine(Path.GetTempPath(), "AspireHcs", "connect", "evil.rdp"),
+            path);
+    }
+
+    [Fact]
+    public void A_normal_endpoint_name_stays_inside_the_connect_directory()
+    {
+        // The negative above is only meaningful if the positive passes — otherwise the guard
+        // could be rejecting everything.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
+
+        string path = ConnectCommands.RdpFilePath(vm.Resource, "rdp");
+
+        Assert.StartsWith(
+            Path.Combine(Path.GetTempPath(), "AspireHcs", "connect"), path, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith("-rdp.rdp", path, StringComparison.Ordinal);
     }
 
     private static void Allocate(

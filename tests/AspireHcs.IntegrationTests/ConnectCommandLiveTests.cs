@@ -37,7 +37,14 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
                 await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
 
             HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
-            appHost.CreateResourceBuilder(vm).WithSshCommand(userName: "Administrator");
+
+            // The sample AppHost already calls WithSshCommand, so registering it again here
+            // would produce two connect-ssh annotations and break the Single() lookup below.
+            // Asserted rather than assumed: if the sample stops registering it, this test must
+            // fail loudly instead of silently testing a command nobody ships.
+            Assert.Single(
+                vm.Annotations.OfType<ResourceCommandAnnotation>(),
+                a => a.Name == ConnectCommands.SshCommandName);
 
             await using DistributedApplication app = await appHost.BuildAsync(cts.Token);
             await app.StartAsync(cts.Token);
