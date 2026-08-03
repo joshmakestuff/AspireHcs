@@ -33,6 +33,19 @@ copy's ext4 root — the Kali root filesystem is not mountable from Windows dire
 
 ## windows/ — Server 2025 base image builder
 
+**Choosing an edition.** A Server ISO carries several — Server Core and Desktop Experience
+variants of each SKU — and the index differs between ISOs, so ask the ISO rather than guessing:
+
+```powershell
+.\New-WindowsGuestImage.ps1 -IsoPath E:\isos\server2025.iso -ListImages
+```
+
+Then select by exact name, `-ImageName 'Windows Server 2025 Standard (Desktop Experience)'`, or
+by `-ImageIndex`. Passing both is refused rather than resolved, since the ignored one would look
+honoured. Names are matched exactly because `Windows Server 2025 Standard` is a *prefix* of the
+Desktop Experience name. Desktop Experience wants more room than Core — pass a larger `-SizeGB`
+(60 is comfortable; the VHDX is dynamic, so the ceiling costs nothing until used).
+
 `New-WindowsGuestImage.ps1` (requires an elevated shell and the Hyper-V module — build-time
 only): pins the ISO by SHA-256, provisions offline (GPT EFI/MSR/NTFS → `Expand-WindowsImage`
 → unattend → `dism.exe` capability servicing → `bcdboot` → EMS on COM1 in the BCD), runs one
