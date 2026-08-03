@@ -43,10 +43,10 @@ The rejected alternatives, both from the issue:
 fixture image:
 
 ```
-guest leased 172.31.25.153:22
-connect command: ssh.exe -p 22 -l Administrator 172.31.25.153
-ssh exit 255; stderr: Warning: Permanently added '172.31.25.153' (ED25519) to the list of known hosts.
-Administrator@172.31.25.153: Permission denied (publickey,password,keyboard-interactive).
+guest leased 172.31.17.56:22
+connect command: ssh.exe -p 22 -l Administrator 172.31.17.56
+ssh exit 255; stderr: Warning: Permanently added '172.31.17.56' (ED25519) to the list of known hosts.
+Administrator@172.31.17.56: Permission denied (publickey,password,keyboard-interactive).
 ```
 
 Boot to that line: 10 s.
@@ -60,8 +60,12 @@ Two further things that run asserts, both against live state rather than a synth
 
 | Claim | How it is checked |
 |---|---|
-| The button is live exactly when a connection is possible | `UpdateState` evaluated against the real `Running` snapshot with the real allocation present — must be `Enabled` |
+| The button is live once the guest is running and has an address | `UpdateState` evaluated against the real `Running` snapshot with the real allocation present — must be `Enabled` |
 | The command line under test is the product's | The `ArgumentList` comes from `ConnectCommands.BuildSshStartInfo`; the test only *prefixes* batch-mode options, never rewrites it |
+
+Running plus an address is a *necessary* condition, not a sufficient one. An allocated endpoint
+can still refuse TCP — that is precisely what `WithTcpHealthCheck` exists to detect — so an
+enabled button means "there is an address to try", not "the service is listening".
 
 ## Decisions worth recording
 
@@ -74,6 +78,12 @@ instead of believed, and it works. A follow-up probe round-tripped a child proce
 found `has a space`, `has"quote`, `trailing\slash\`, `amp&caret^pipe|` and `Domain\User Name` all
 arriving **unchanged** through the ShellExecuteEx path. Hand-rolling an escaper would have been
 reimplementing something the framework already does correctly.
+
+That probe is committed as [`docs/probes/argv-roundtrip.cs`](probes/argv-roundtrip.cs) — run
+`dotnet run docs/probes/argv-roundtrip.cs`; exit 0 means every argument round-tripped. It is a
+probe rather than a unit test because asserting it needs a purpose-built child executable, and
+the test projects have no such binary to launch. Recorded result on the reference host,
+2026-08-03: `sent 6 args, got 6: IDENTICAL`.
 
 **`UseShellExecute = true` is load-bearing, not incidental.** It gives the client its own console
 instead of making it share the AppHost's, where it would compete for stdin and scribble over the
@@ -91,9 +101,23 @@ lease surfaces. A button that is live during that window produces a failed conne
 a wait, so availability requires an allocated address as well — and the unit theory covers the
 `Running` + not-yet-allocated case specifically.
 
+**The availability gate is not the enforcement.** `UpdateState` governs what the dashboard
+*offers*, but the command stays reachable through Aspire's command APIs, and the orchestrator
+assigns `AllocatedEndpoint` and never clears it — so an allocation outlives the VM that earned
+it. Without a second check, invoking the command on a stopped VM would launch a client at the
+previous run's address. `Execute` therefore refuses on a known terminal state itself. It
+deliberately does *not* refuse when the state cannot be determined: the resource id the state is
+looked up by is not guaranteed to equal the resource name, and a lookup miss must not turn into a
+feature that silently stops working.
+
 **Failures are reported, never silent.** A non-interactive AppHost (session 0, no desktop) is
 detected rather than discovered: `Process.Start` would still succeed there, leaving an invisible
 process and a dashboard claiming success.
+
+**An explicitly empty user name is rejected, not treated as unset.** `null` means "unspecified"
+and is a supported choice; `""` means somebody meant to name an account and named none, and
+falling back to the host account (ssh) or the last cached one (mstsc) would connect as somebody
+other than who was asked for.
 
 ## Not verified
 
