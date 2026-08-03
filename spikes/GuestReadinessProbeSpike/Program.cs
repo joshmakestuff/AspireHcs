@@ -95,6 +95,7 @@ internal static class Program
                 Console.WriteLine($"[{clock.ElapsedMilliseconds,7} ms] RuntimeId {vmRuntimeId} (hvsocket VmId)");
 
                 Dictionary<string, long> firstSuccess = [];
+                Dictionary<string, int> notReadyRefusals = [];
                 Dictionary<string, string> lastDocument = [];
                 string? leasedIp = null;
                 bool tcpAnswered = false;
@@ -116,7 +117,7 @@ internal static class Program
                     && !(leasedIp is not null && tcpAnswered && firstSuccess.ContainsKey("modify:memory-grown")))
                 {
                     // Candidate 1: the pre-#5 probe — an idempotent resize to the configured size.
-                    await ProbeAsync("modify:memory-same", firstSuccess, clock, () =>
+                    await ProbeAsync("modify:memory-same", firstSuccess, notReadyRefusals, clock, () =>
                         vm.ModifyAsync($$"""
                             {"ResourcePath":"VirtualMachine/ComputeTopology/Memory/SizeInMB","RequestType":"Update","Settings":{{memoryMb}}}
                             """));
@@ -126,7 +127,7 @@ internal static class Program
                     // shrink — an earlier run shrank the guest into memory pressure it never
                     // recovered from — and restore the configured size as soon as it lands, so
                     // the measurement does not perturb the rest of the boot.
-                    await ProbeAsync("modify:memory-grown", firstSuccess, clock, async () =>
+                    await ProbeAsync("modify:memory-grown", firstSuccess, notReadyRefusals, clock, async () =>
                     {
                         await vm.ModifyAsync($$"""
                             {"ResourcePath":"VirtualMachine/ComputeTopology/Memory/SizeInMB","RequestType":"Update","Settings":{{memoryMb + 256}}}
@@ -228,13 +229,18 @@ internal static class Program
                 // ~40 ms, while a resize that actually moves the balloon is refused with
                 // ERROR_NOT_READY until the guest's integration drivers load (~9.3 s on the Kali
                 // image, reproducible across runs). If this ever drops to near-zero, the signal has
-                // stopped being guest-gated and WaitForGuestReadyAsync is lying again.
+                // stopped being guest-gated and WaitForGuestReadyAsync is lying again. The refusal
+                // count is the guest-gating signature itself: a merely-slow host-side operation
+                // would clear the timing bar with zero ERROR_NOT_READY refusals.
                 bool balloonAnswered = firstSuccess.TryGetValue("modify:memory-grown", out long balloonMs);
                 Check(balloonAnswered, "the guest-gated memory probe succeeded");
                 if (balloonAnswered)
                 {
                     Check(balloonMs > 1_000,
                         $"the guest-gated memory probe answered in {balloonMs} ms — slow enough to have involved the guest");
+                    int refused = notReadyRefusals.GetValueOrDefault("modify:memory-grown");
+                    Check(refused > 0,
+                        $"the guest-gated probe was refused with ERROR_NOT_READY before succeeding ({refused} refusals) — gated on the guest, not merely slow");
                     Check(firstSuccess["modify:memory-same"] < balloonMs,
                         "the idempotent resize answered before the guest was up; it is not a readiness signal");
                 }
@@ -281,7 +287,8 @@ internal static class Program
         return 0;
     }
 
-    private static async Task ProbeAsync(string name, Dictionary<string, long> firstSuccess, Stopwatch clock, Func<Task> probe)
+    private static async Task ProbeAsync(
+        string name, Dictionary<string, long> firstSuccess, Dictionary<string, int> notReadyRefusals, Stopwatch clock, Func<Task> probe)
     {
         if (firstSuccess.ContainsKey(name))
         {
@@ -296,6 +303,11 @@ internal static class Program
         }
         catch (HcsException ex)
         {
+            if (ex.HResult == unchecked((int)0x80070015))
+            {
+                notReadyRefusals[name] = notReadyRefusals.GetValueOrDefault(name) + 1;
+            }
+
             Console.WriteLine($"[{clock.ElapsedMilliseconds,7} ms] {name}: 0x{ex.HResult:X8}");
         }
     }
