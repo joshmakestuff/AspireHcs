@@ -55,12 +55,30 @@ $ErrorActionPreference = 'Stop'
 $exe = Join-Path $PSScriptRoot 'bin\Debug\net10.0-windows10.0.17763.0\HcsContainerSpike.exe'
 $containerId = 'AspireHcsAcquisitionProbe'
 
-# The two fixtures. ltsc2025 matches the host build family and is the one whose
-# boot is ASSERTED; ltsc2022 is deliberately build-MISMATCHED (20348 vs 26200)
-# and is the #32 stretch question, measured for the first time here.
+# The two fixtures.
+#
+# "Compatible" here does NOT mean "same build number as the host", and an
+# earlier revision of this harness got that wrong and refused to run: it
+# compared 26100 to 26200, called ltsc2025 mislabelled, and stopped. But #31
+# already RECORDED a 26100 image booting process-isolated on this 26200 host —
+# they are the same servicing family (Server 2025 / Win11 24H2-25H2, where
+# 26200 is an enablement package over the 26100 servicing base). The equality
+# rule contradicted the measurement, so the measurement wins.
+#
+# So compatibility is stated from the empirical record, per fixture, and what
+# the witness below actually checks is that each image is STILL the build the
+# record was made against — which is what would silently rot if MCR retagged.
 $images = @(
-    [pscustomobject]@{ Name = 'ltsc2025'; Ref = 'mcr.microsoft.com/windows/nanoserver:ltsc2025'; Matched = $true }
-    [pscustomobject]@{ Name = 'ltsc2022'; Ref = 'mcr.microsoft.com/windows/nanoserver:ltsc2022'; Matched = $false }
+    [pscustomobject]@{
+        Name = 'ltsc2025'; Ref = 'mcr.microsoft.com/windows/nanoserver:ltsc2025'
+        ExpectedBuild = 26100; Compatible = $true
+        Why = 'same servicing family as the 26xxx host; a 26100 image is already recorded booting on this host (#31)'
+    }
+    [pscustomobject]@{
+        Name = 'ltsc2022'; Ref = 'mcr.microsoft.com/windows/nanoserver:ltsc2022'
+        ExpectedBuild = 20348; Compatible = $false
+        Why = 'Windows Server 2022 generation — a genuinely different family from this 26xxx host, never booted here'
+    }
 )
 
 if (-not $Store) {
@@ -187,9 +205,19 @@ if ($Phase -eq 'import') {
     # unprivileged-extraction design would actually produce, and nothing else in
     # this run exercises it. MEASURED — whether ProcessBaseImage tolerates a
     # descriptor-free tree is exactly the unknown.
+    #
+    # It must be RE-EXTRACTED first. The unelevated finalize earlier in the run
+    # is asserted to fail, and it fails PART-WAY — leaving a partial
+    # blank-base.vhdx that makes any later finalize die 0x80070050
+    # ERROR_FILE_EXISTS. Finalizing the leftovers would measure the leftovers,
+    # not the descriptor-free question (observed exactly that on 2026-08-02).
     if ($NoSecurityEntry) {
-        [void](Invoke-Step -Title 'ElevatedFinalize(descriptor-free entry)' `
-                -CommandArgs @('finalize', '--entry', $NoSecurityEntry))
+        if (Invoke-Step -Title 'ElevatedRe-extract(descriptor-free, clean)' `
+                -CommandArgs @('import', '--metadata', ($MetadataPath -split ';')[0], '--entry', $NoSecurityEntry, `
+                    '--no-security', '--skip-finalize')) {
+            [void](Invoke-Step -Title 'ElevatedFinalize(descriptor-free entry)' `
+                    -CommandArgs @('finalize', '--entry', $NoSecurityEntry))
+        }
     }
 
     # The OTHER off-diagonal, and the positive control for the provenance fix:
@@ -270,29 +298,40 @@ foreach ($image in $images) {
     $metadataPaths += $found
 }
 
-# The build-matched / build-mismatched LABELS are claims, so they are witnessed
-# at runtime against the pulled metadata and this host rather than trusted from
-# the table above. If MCR ever retags ltsc2022 onto a 26100 build, the
-# "build-mismatch" experiment below would silently be testing nothing — the
-# vacuous-verifier failure this check exists to prevent.
+# The fixture labels are claims, so the builds behind them are witnessed at
+# runtime rather than trusted from the table above. What can silently rot is a
+# RETAG: if MCR ever moved :ltsc2022 onto a 26xxx build, the build-mismatch
+# experiment below would be testing nothing while still printing its name.
+# That is what this checks — NOT build equality with the host, which is not the
+# compatibility rule (see the fixture table).
 $hostBuild = [Environment]::OSVersion.Version.Build
 Write-Both ''
-Write-Both "=== Build-match witness (host build $hostBuild) ==="
+Write-Both "=== Fixture build witness (host build $hostBuild) ==="
+$fixtureBuilds = @{}
 foreach ($i in 0..($images.Count - 1)) {
     $osVersion = (Get-Content $metadataPaths[$i] -Raw | ConvertFrom-Json).osVersion
     $imageBuild = [int](($osVersion -split '\.')[2])
-    $actuallyMatched = ($imageBuild -eq $hostBuild)
-    Write-Both ("  {0,-9} osVersion={1,-18} imageBuild={2} declaredMatched={3} actualMatched={4}" -f `
-            $images[$i].Name, $osVersion, $imageBuild, $images[$i].Matched, $actuallyMatched)
-    if ($actuallyMatched -ne $images[$i].Matched) {
+    $fixtureBuilds[$images[$i].Name] = $imageBuild
+    Write-Both ("  {0,-9} osVersion={1,-18} build={2,-6} expected={3,-6} compatible={4}  {5}" -f `
+            $images[$i].Name, $osVersion, $imageBuild, $images[$i].ExpectedBuild, $images[$i].Compatible, $images[$i].Why)
+    if ($imageBuild -ne $images[$i].ExpectedBuild) {
         Write-Both ''
-        Write-Both "MISLABELLED FIXTURE: $($images[$i].Name) is declared Matched=$($images[$i].Matched) but its build"
-        Write-Both "$imageBuild vs host $hostBuild says otherwise. The boot steps below would test something other"
-        Write-Both 'than what their names claim. Stopping rather than recording a result under the wrong label.'
+        Write-Both "FIXTURE DRIFTED: $($images[$i].Name) is build $imageBuild, but this harness's compatibility"
+        Write-Both "claim was recorded against $($images[$i].ExpectedBuild). The tag has moved, so the labels below"
+        Write-Both 'no longer describe what would actually be booted. Stopping rather than recording a result'
+        Write-Both 'under a stale label; re-establish which builds are compatible, then update the fixture table.'
         exit 2
     }
 }
-$script:steps += [pscustomobject]@{ Step = 'BuildMatchWitness'; Elevated = $isElevated; Exit = 0; MustPass = $true; Ok = $true }
+# The whole point of the mismatch experiment is that the two fixtures are from
+# DIFFERENT generations. If they ever converge, the experiment is vacuous.
+if ($fixtureBuilds['ltsc2025'] -eq $fixtureBuilds['ltsc2022']) {
+    Write-Both ''
+    Write-Both 'FIXTURES CONVERGED: both tags now resolve to the same build, so there is no build-mismatch'
+    Write-Both 'case left to test. Stopping.'
+    exit 2
+}
+$script:steps += [pscustomobject]@{ Step = 'FixtureBuildWitness'; Elevated = $isElevated; Exit = 0; MustPass = $true; Ok = $true }
 
 # What the images actually contain, on the record: the port's handling of
 # symlinks/junctions/ADS is only exercised if the fixtures carry them. BOTH tags
@@ -383,18 +422,18 @@ foreach ($entry in $entries) {
 # --- 5. Boot what we acquired, unelevated ----------------------------------
 # ASSERTED for the build-matched image: acquisition -> boot with no Docker and
 # no ACL surgery is the claim this whole spike exists to establish.
-$matched = ($entries | Where-Object { $_.Image.Matched })[0]
+$compatible = ($entries | Where-Object { $_.Image.Compatible })[0]
 # The output assertion names the SUCCEEDING proof line, not merely the step:
 # "GuestExecProof" alone appears on failure too, so matching it would assert
 # nothing the exit code had not already decided.
 [void](Invoke-Step -Title 'UnelevatedXenonBoot(own store, ltsc2025)' -ExpectedExit 0 `
         -ExpectOutputMatch 'GuestExecProof\(stdout\): hr=0x00000000' `
-        -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $matched.Path, '--id', $containerId))
+        -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $compatible.Path, '--id', $containerId))
 
 # MEASURED, and the headline unknown: a 20348 guest on a 26200 host. The claim
 # that Hyper-V isolation lifts the build-match constraint has never been tested
 # on this host, so this row carries no expectation in either direction.
-$mismatched = ($entries | Where-Object { -not $_.Image.Matched })[0]
+$mismatched = ($entries | Where-Object { -not $_.Image.Compatible })[0]
 [void](Invoke-Step -Title 'UnelevatedXenonBoot(BUILD-MISMATCHED ltsc2022)' `
         -CommandArgs @('run', '--isolation', 'hyperv', '--scratch', 'template', '--layer', $mismatched.Path, '--id', $containerId))
 
@@ -402,7 +441,7 @@ $mismatched = ($entries | Where-Object { -not $_.Image.Matched })[0]
 # it does on Docker's store — which would show the gate is a privilege, not
 # anything about where the layer lives.
 [void](Invoke-Step -Title 'UnelevatedArgonBoot(own store)' `
-        -CommandArgs @('run', '--isolation', 'process', '--layer', $matched.Path, '--id', $containerId))
+        -CommandArgs @('run', '--isolation', 'process', '--layer', $compatible.Path, '--id', $containerId))
 
 # MEASURED: does a layer whose security descriptors were NEVER restored boot?
 # Only meaningful if the elevated phase managed to finalize it; the guard keeps

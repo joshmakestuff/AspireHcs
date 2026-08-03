@@ -12,8 +12,29 @@ documentation, and the pending rows are pending, not assumed.
 - Account: a normal user in **Hyper-V Administrators**
 - Images: `mcr.microsoft.com/windows/nanoserver:ltsc2025` (build 26100.33158)
   and `:ltsc2022` (build 20348.5386)
-- Spike: `spikes/HcsContainerSpike`, commit `8463963`+ on `image-acquisition`
+- Spike: `spikes/HcsContainerSpike`, commit `4c858da`+ on `image-acquisition`
 - Date: 2026-08-02
+- Full run: `Run-AcquisitionProofs.ps1`, log `acquisition-proofs-20260802-211720.log`
+
+## Headline
+
+**A developer with no elevation and no Docker can acquire a Windows base image
+and run it.** Pull from a registry, materialize it into a store AspireHcs owns,
+and boot it as a Hyper-V-isolated container — verified end to end, with the
+container reporting the image's own build from inside.
+
+**And Hyper-V isolation really does lift the host/image build-match constraint.**
+A Windows Server 2022 guest (build 20348.5386) booted on this build 26200 host
+and printed its own version from inside the container. That answers
+[#32](https://github.com/joshmakestuff/AspireHcs/issues/32)'s stretch question,
+which had been carried as *untested, not true* since the xenon spike.
+
+| Claim | Verdict |
+|---|---|
+| Acquire + boot, unelevated, no Docker | **PROVEN** — `cmd /c ver` → `10.0.26100.33158`, cold-to-exec 2124 ms |
+| Build-mismatched image under Hyper-V isolation | **PROVEN** — 20348 guest on 26200 host, cold-to-exec 1903 ms |
+| A store AspireHcs owns needs no ACL surgery | **PROVEN** — unelevated `verify` passes on both entries, no grant |
+| Elevation still required, and only here | `ProcessBaseImage` (finalize). Extraction and everything after are unprivileged |
 
 ## Why not just copy the layer out of Docker's store
 
@@ -116,30 +137,69 @@ There is also **no `ctime` PAX record at all**, and `mtime` is missing on 149 of
 10 288 ltsc2025 entries. Absent timestamps are therefore left at zero, which
 Windows reads as "do not change", rather than fabricated from another field.
 
-## Still pending — the elevated half has not run
+### The elevated half, and what it settled
 
-`Run-AcquisitionProofs.ps1` needs one UAC click, which no automated session can
-supply. Until it runs, these remain open and must not be quoted as results:
+| Step | Result |
+|---|---|
+| `import` ltsc2025, full fidelity, elevated | **OK** |
+| `import` ltsc2022, full fidelity, elevated | **OK** |
+| `ProcessBaseImage` produced `blank-base.vhdx` | **OK — 38 MB**, absent before the call |
+| `ProcessUtilityImage` produced `UtilityVM\SystemTemplate.vhdx` | **OK — 4 MB**, absent before the call |
+| split extract → standalone `finalize`, full fidelity | **OK**, provenance records `securityDescriptorsRestored=True` |
+| unelevated `verify` on both imported entries | **OK — no grant, no ACL work** |
+| unelevated xenon boot, ltsc2025, from our store | **OK**, guest `10.0.26100.33158`, 2124 ms |
+| unelevated xenon boot, **ltsc2022 (build-mismatched)** | **OK**, guest `10.0.20348.5386` on a 26200 host, 1903 ms |
+| unelevated argon boot, from our store | **FAILED at `ActivateLayer` `0x80070522`** — as on Docker's store |
 
-- **Full-fidelity import, elevated.** Extraction with security descriptors
-  restored has not been run end to end.
-- **What finalize actually produces.** hcsshim never states that
-  `ProcessBaseImage`/`ProcessUtilityImage` create `blank-base.vhdx` and
-  `UtilityVM\SystemTemplate.vhdx`; the spike asserts it as a transition
-  (absent before the call, present after) rather than assuming it, but the
-  assertion has not been evaluated yet.
-- **Whether the imported entry is readable unelevated.** The entry root inherits
-  from `%LOCALAPPDATA%`, but `UtilityVM`'s descriptor is restored verbatim from
-  the image and `SystemTemplate.vhdx` inherits it. If that descriptor does not
-  grant the developer read/traverse, the store still needs an explicit grant —
-  which would weaken, though not defeat, the "user-owned from birth" claim.
-- **Boot from our own store.** The whole point. Unproven until it runs.
-- **Build mismatch (the #32 stretch).** Booting ltsc2022 (build 20348) on this
-  26200 host is the first real test of the claim that Hyper-V isolation lifts
-  the host/image build-match constraint. The fixture now exists; the answer
-  does not.
-- **Descriptor-free finalize.** Whether `ProcessBaseImage` tolerates a tree
-  whose descriptors were never restored, and whether the result boots.
+The finalize products are now witnessed rather than believed: the spike probes
+for them *before* the calls too, so "produced" means absent-then-present, not
+merely present. hcsshim never documents this mapping; it is now measured.
+
+Argon failing identically on a store we own is itself a result: it confirms the
+process-isolation gate is a **privilege**, with nothing to do with where the
+layer lives or who owns it.
+
+### Build mismatch: answered
+
+The container printed, from inside:
+
+```
+Microsoft Windows [Version 10.0.20348.5386]
+```
+
+on a host running 10.0.26200. `HostingSystemId` names our utility VM, so this is
+a genuine xenon and not a silently-substituted argon. Hyper-V isolation supplies
+the guest's own kernel, and the host/image build-match rule that constrains
+process isolation does not apply.
+
+One caveat kept explicit: this is **one** mismatched pair (Server 2022 guest,
+Win11 25H2 host), not a general claim that any image runs on any host. It
+falsifies "the constraint applies to xenons"; it does not establish a support
+matrix.
+
+### Descriptor-free finalize: INCONCLUSIVE, and why
+
+The run tried to finalize a tree extracted with `--no-security`. It failed
+`0x80070050 ERROR_FILE_EXISTS` — **but not because of the missing descriptors.**
+
+The unelevated `finalize` earlier in the same run (asserted to fail at the
+privilege gate) had already gotten far enough to create a **partial**
+`blank-base.vhdx`: 4 MB, where a complete one is 38 MB. The later elevated
+attempt then tripped over those leftovers.
+
+Two things follow, and the second is the more useful:
+
+1. The descriptor-free question is still open. The harness now re-extracts a
+   clean tree before finalizing it, so the next run measures the question
+   rather than the debris.
+2. **`ProcessBaseImage` is neither idempotent nor atomic.** A failed call leaves
+   partial output behind, and the retry dies `ERROR_FILE_EXISTS` in a way that
+   blames the retry. `finalize` now refuses up front when outputs pre-exist and
+   names the remedy (re-import; `import` destroys a torn entry automatically).
+
+This was only visible because the pre-existence probe was added during review —
+without it the run would have read as "descriptor-free finalize fails" and a
+wrong conclusion would have gone into this document.
 
 ## Not attempted
 
@@ -172,12 +232,25 @@ HcsContainerSpike finalize --entry <store>\<diffID>
 HcsContainerSpike run --isolation hyperv --scratch template --layer <store>\<diffID>
 ```
 
+## Still open
+
+- **Descriptor-free finalize** — see above; the question survived the run, the
+  obstacle did not.
+- **Chain import** (multi-layer images). Unchanged and unstarted.
+- **Which privilege `ProcessBaseImage` wants.** It is the same
+  `ERROR_PRIVILEGE_NOT_HELD` class as argon's `ActivateLayer`, and an
+  unelevated token holds neither `SeBackupPrivilege` nor `SeRestorePrivilege`
+  to enable — but which specific privilege the call checks is still unidentified.
+- **Whether `--no-security` layers behave correctly in a guest** even if they do
+  finalize. Host-side descriptors are not replayed, so guest services that check
+  specific SIDs might misbehave; nothing here tests that.
+
 ## Retiring the Docker dependency
 
-Once the elevated run confirms a boot from our own store, the `icacls` grant
+The elevated run confirmed a boot from our own store, so the `icacls` grant
 against Docker's store described in
-[container-privilege-matrix.md](container-privilege-matrix.md) is no longer
-needed and should be reversed:
+[container-privilege-matrix.md](container-privilege-matrix.md) is **no longer
+needed** and should be reversed:
 
 ```powershell
 HcsContainerSpike grant --layer C:\ProgramData\Docker\windowsfilter\<sha> --account DOMAIN\you --revoke
