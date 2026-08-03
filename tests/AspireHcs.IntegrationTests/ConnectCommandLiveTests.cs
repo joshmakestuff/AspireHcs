@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Net.Sockets;
 using System.Runtime.Versioning;
+using System.Text.Json;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
@@ -20,6 +22,122 @@ namespace AspireHcs.IntegrationTests;
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
 {
+    [SkippableFact]
+    public async Task Rdp_connect_command_reaches_a_guest_that_serves_remote_desktop()
+    {
+        string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_TEST_WINDOWS_VHDX");
+        Skip.If(string.IsNullOrEmpty(windowsVhdx),
+            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image to run the connect-UX tests.");
+
+        // The image says for itself whether it serves RDP: New-WindowsGuestImage.ps1 refuses to
+        // seal unless TermService was observed listening on 3389 during burn-in, and records
+        // that in the provenance sidecar. Skipping on an older image is right — failing would
+        // report a defect in the command when the truth is the fixture predates the feature.
+        string provenancePath = Path.ChangeExtension(windowsVhdx, ".provenance.json");
+        Skip.If(!File.Exists(provenancePath), $"No provenance beside {windowsVhdx}; cannot tell whether it serves RDP.");
+        using JsonDocument provenance = JsonDocument.Parse(await File.ReadAllTextAsync(provenancePath));
+        string? burnInRdp = provenance.RootElement.TryGetProperty("burnIn", out JsonElement burnIn)
+            && burnIn.TryGetProperty("rdp", out JsonElement rdp)
+                ? rdp.GetString()
+                : null;
+        Skip.If(burnInRdp != "Listening",
+            $"{Path.GetFileName(windowsVhdx)} records burnIn.rdp='{burnInRdp ?? "<absent>"}' — built before the RDP edit.");
+        output.WriteLine($"fixture provenance: burnIn.rdp={burnInRdp}");
+
+        using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
+
+        string? originalVhdx = Environment.GetEnvironmentVariable("HCS_TEST_VHDX");
+        Environment.SetEnvironmentVariable("HCS_TEST_VHDX", windowsVhdx);
+        try
+        {
+            IDistributedApplicationTestingBuilder appHost =
+                await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
+
+            HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
+            appHost.CreateResourceBuilder(vm)
+                .WithEndpoint("rdp", targetPort: 3389)
+                .WithRdpCommand(userName: "Administrator");
+
+            await using DistributedApplication app = await appHost.BuildAsync(cts.Token);
+            await app.StartAsync(cts.Token);
+
+            ResourceEvent running = await app.ResourceNotifications.WaitForResourceAsync(
+                "appliance", e => e.Snapshot.State?.Text == KnownResourceStates.Running, cts.Token);
+
+            EndpointAnnotation endpoint = vm.Annotations.OfType<EndpointAnnotation>().Single(e => e.Name == "rdp");
+            DateTime deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
+            while (endpoint.AllocatedEndpoint is null && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), cts.Token);
+            }
+
+            AllocatedEndpoint allocated = endpoint.AllocatedEndpoint
+                ?? throw new TimeoutException("The guest never leased an address.");
+            output.WriteLine($"guest leased {allocated.Address}:{allocated.Port}");
+
+            ResourceCommandAnnotation command = vm.Annotations.OfType<ResourceCommandAnnotation>()
+                .Single(a => a.Name == ConnectCommands.RdpCommandName);
+            Assert.Equal(
+                ResourceCommandState.Enabled,
+                command.UpdateState(new UpdateCommandStateContext
+                {
+                    ResourceSnapshot = running.Snapshot,
+                    ServiceProvider = app.Services,
+                }));
+
+            // The host-side half, and the credential-free analogue of SSH's "Permission denied":
+            // 3389 accepting a connection from the host proves the guest is serving Remote
+            // Desktop and that the NAT path reaches it. Completing an RDP handshake would need
+            // the image's password, which the suite deliberately does not hold.
+            // Retried rather than attempted once: the DHCP lease surfaces well before a guest
+            // has finished starting its services, and on Desktop Experience that gap is wide.
+            // A single attempt would conflate "not up yet" with "not reachable".
+            Stopwatch reachable = Stopwatch.StartNew();
+            TimeSpan rdpTimeout = TimeSpan.FromMinutes(2);
+            Exception? lastFailure = null;
+            bool connected = false;
+            while (reachable.Elapsed < rdpTimeout && !connected)
+            {
+                try
+                {
+                    using TcpClient client = new();
+                    await client.ConnectAsync(allocated.Address, allocated.Port)
+                        .WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+                    connected = true;
+                }
+                catch (Exception ex) when (ex is SocketException or TimeoutException)
+                {
+                    lastFailure = ex;
+                    await Task.Delay(TimeSpan.FromSeconds(3), cts.Token);
+                }
+            }
+
+            Assert.True(connected,
+                $"{allocated.Address}:{allocated.Port} never accepted a connection within {rdpTimeout}. " +
+                $"The image's provenance records burnIn.rdp='{burnInRdp}', so RDP was listening INSIDE the guest at " +
+                $"build time — a timeout here points at the guest firewall rather than at the service. " +
+                $"Last failure: {lastFailure?.GetType().Name}: {lastFailure?.Message}");
+            output.WriteLine($"TCP {allocated.Address}:{allocated.Port} -> connected after {reachable.Elapsed.TotalSeconds:0.0}s");
+
+            // And the file mstsc would actually be handed, written by the product.
+            ProcessStartInfo startInfo = ConnectCommands.BuildRdpStartInfo(
+                vm, "rdp", allocated.Address, allocated.Port, "Administrator");
+            string rdpPath = Assert.Single(startInfo.ArgumentList);
+            string content = await File.ReadAllTextAsync(rdpPath, RdpFile.FileEncoding, cts.Token);
+            output.WriteLine($"generated {rdpPath}:{Environment.NewLine}{content.Trim()}");
+
+            Assert.Equal("mstsc.exe", startInfo.FileName);
+            Assert.Contains($"full address:s:{allocated.Address}:{allocated.Port}", content, StringComparison.Ordinal);
+            Assert.Contains("username:s:Administrator", content, StringComparison.Ordinal);
+
+            await app.StopAsync(cts.Token);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HCS_TEST_VHDX", originalVhdx);
+        }
+    }
+
     [SkippableFact]
     public async Task Ssh_connect_command_line_reaches_the_guest_sshd()
     {

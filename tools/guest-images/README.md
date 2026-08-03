@@ -46,9 +46,11 @@ honoured. Names are matched exactly because `Windows Server 2025 Standard` is a 
 Desktop Experience name. Desktop Experience needs more room than Core, so raise `-SizeGB`; the
 VHDX is dynamic, so a generous ceiling costs nothing until used.
 
-Only Server Core has actually been built and booted by this tooling so far. Desktop Experience
-is *permitted* and its name is what the provenance will record, but no image has been built from
-it — treat the first one as a test, not a routine build.
+Both have now been built: `winserver2025-core.vhdx` / `winserver2025-core-rdp.vhdx` (Core,
+index 1) and `winserver2025-desktop.vhdx` (Desktop Experience, index 2, 14 GB), each recording
+its own edition in provenance. SSH works on every image generated so far. RDP does **not** yet
+reach the guest from the host — see [docs/connect-ux.md](../../docs/connect-ux.md); the fix is
+in the bootstrap but no image has been built from it.
 
 `New-WindowsGuestImage.ps1` (requires an elevated shell and the Hyper-V module — build-time
 only): pins the ISO by SHA-256, provisions offline (GPT EFI/MSR/NTFS → `Expand-WindowsImage`
