@@ -22,11 +22,22 @@ function Wait-ForListener {
     $expectedPid = (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'").ProcessId
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        # The error is captured, not discarded: SilentlyContinue alone would report a provider
+        # or access failure as 'NotListening', sending whoever reads the sentinel after a
+        # connectivity problem that does not exist.
+        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen `
+                -ErrorAction SilentlyContinue -ErrorVariable probeError |
             Where-Object { $_.OwningProcess -eq $expectedPid } | Select-Object -First 1
         if ($listener) { return 'Listening' }
         Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $deadline)
+
+    # Get-NetTCPConnection errors when nothing matches, so an error alone does not mean the
+    # probe broke — only one that is not the no-matching-object case does.
+    $realFailure = $probeError | Where-Object { $_.Exception.Message -notmatch 'No matching MSFT_NetTCPConnection' } | Select-Object -First 1
+    if ($realFailure) {
+        return "ProbeFailed: $($realFailure.Exception.Message)"
+    }
 
     # Distinguish "nothing there" from "something else there": they need different fixes. The
     # owner is NAMED rather than just flagged, because a burn-in is a ~30-minute round trip and
@@ -88,15 +99,23 @@ try {
     $rdpRules | Set-NetFirewallRule -Profile Any
     $result.rdpFirewallRules = $rdpRules.Count
 
-    # Automatic rather than its default trigger-start, so the image serves RDP on every boot
-    # without waiting for something to poke the trigger.
+    # Automatic rather than its default trigger-start, the intent being that the image serves
+    # RDP on every boot rather than only when something pokes the trigger. NOTE that the
+    # every-boot part is an intent, not a result: the burn-in witnesses this boot only, and
+    # nothing here boots the sealed image again. The host-side check after a real VM start is
+    # what would establish it.
     Set-Service -Name TermService -StartupType Automatic
 
-    # NOT Restart-Service. TermService cannot be stopped — Windows denies the stop even to
-    # Administrator ("Cannot open TermService service on computer '.': Access is denied"), so a
-    # restart can never succeed here and no privilege would change that. It is also unnecessary:
-    # fDenyTSConnections is honoured dynamically, and enabling the firewall rules above is
-    # itself TermService's start trigger. Starting it is allowed; stopping it is not.
+    # NOT Restart-Service. MEASURED on the 2026-08-03 burn-in of this image: stopping
+    # TermService is denied to Administrator ("Cannot open TermService service on computer '.':
+    # Access is denied"), so Restart-Service fails outright. That is one recorded denial on this
+    # SKU as Administrator — enough to rule the approach out here, not enough to claim no
+    # context anywhere could ever stop the service.
+    #
+    # EXPECTED, not yet measured: that fDenyTSConnections is honoured dynamically and that
+    # enabling the RDP firewall rules trips TermService's start trigger, making a restart
+    # unnecessary. If either is wrong the sentinel will say rdp='NotListening' and the build
+    # will refuse to seal — which is the test.
     if ((Get-Service TermService).Status -ne 'Running') {
         Start-Service -Name TermService
     }

@@ -41,9 +41,14 @@ param(
     [string]$IsoPath,
 
     # SHA-256 the ISO must have. Get it once with Get-FileHash and pin it in your build notes.
-    [Parameter(Mandatory)]
-    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    # Not Mandatory only so -SkipIsoHashCheck can stand alone; still required without it.
+    [ValidatePattern('^$|^[0-9a-fA-F]{64}$')]
     [string]$IsoSha256,
+
+    # Skips the ~7 GB read that verifies the ISO, for iterating on the bootstrap where the same
+    # ISO is rebuilt repeatedly. The resulting image is NOT reproducibly pinned and its
+    # provenance records that, so the shortcut cannot silently outlive the iteration.
+    [switch]$SkipIsoHashCheck,
 
     [ValidateScript({ -not $_ -or (Test-Path $_ -PathType Leaf) })]
     [string]$FodIsoPath,
@@ -70,6 +75,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not $SkipIsoHashCheck -and -not $IsoSha256) {
+    throw "-IsoSha256 is required. Pass the ISO's pinned SHA-256, or -SkipIsoHashCheck to build an explicitly unpinned iteration image."
+}
 if (Test-Path $OutputVhdx) {
     throw "Output already exists: $OutputVhdx. Delete it first; this script never overwrites."
 }
@@ -92,12 +100,22 @@ function Write-Step([string]$Message) { Write-Host "  -> $Message" }
 
 # ---------------------------------------------------------------- Phase 1: pin the input
 Write-Host "Phase 1: verifying ISO identity"
-Write-Step "Hashing $IsoPath ..."
-$actualIsoHash = (Get-FileHash -Algorithm SHA256 -Path $IsoPath).Hash
-if ($actualIsoHash -ne $IsoSha256.ToUpperInvariant()) {
-    throw "ISO SHA-256 mismatch.`n  expected: $($IsoSha256.ToUpperInvariant())`n  actual:   $actualIsoHash`nRefusing to build from an unpinned input."
+if ($SkipIsoHashCheck) {
+    # Loud, and permanently attached to the artifact: provenance records isoSha256 = null with
+    # isoHashVerified = false, so an image built this way can never be mistaken later for one
+    # whose input was pinned. Recording the EXPECTED hash here instead would be a lie — nothing
+    # checked it.
+    Write-Warning "-SkipIsoHashCheck: the ISO is NOT being verified. This image is for iteration only; its provenance will say so."
+    $actualIsoHash = $null
 }
-Write-Step "ISO hash verified."
+else {
+    Write-Step "Hashing $IsoPath ..."
+    $actualIsoHash = (Get-FileHash -Algorithm SHA256 -Path $IsoPath).Hash
+    if ($actualIsoHash -ne $IsoSha256.ToUpperInvariant()) {
+        throw "ISO SHA-256 mismatch.`n  expected: $($IsoSha256.ToUpperInvariant())`n  actual:   $actualIsoHash`nRefusing to build from an unpinned input."
+    }
+    Write-Step "ISO hash verified."
+}
 
 # ---------------------------------------------------------------- Phase 2: provision offline
 Write-Host "Phase 2: offline provisioning"
@@ -327,7 +345,10 @@ $provenance = [ordered]@{
     # never an independent claim that could drift from the input.
     image          = "$($wimInfo.ImageName) (AspireHcs guest base)"
     isoPath        = (Resolve-Path $IsoPath).Path
-    isoSha256      = $actualIsoHash
+    # Null when unverified. An image whose input was never checked must not carry a hash that
+    # looks like evidence.
+    isoSha256        = $actualIsoHash
+    isoHashVerified  = -not $SkipIsoHashCheck
     wimIndex       = $ImageIndex
     wimImageName   = $wimInfo.ImageName
     wimVersion     = $wimInfo.Version.ToString()
