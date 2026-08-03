@@ -141,8 +141,17 @@ other than who was asked for.
   for. The suspected mechanism is piping stale rule objects
   (`$captured | Set-NetFirewallRule -Profile Any` after `Enable-NetFirewallRule`) re-applying
   the captured `Enabled = False`; sshd's rule ships enabled, so the identical pattern was
-  harmless there and hid it. Fixed by addressing rules by group, enabling last, re-querying, and
-  gating the seal on the enabled count — **unproven until an image is built from it.**
+  harmless there and hid it. Changed — not yet "fixed", since no image has been built from it —
+  by addressing rules by group, enabling last, re-querying, and gating the seal on the enabled
+  count and the profile.
+
+  The first version of that gate was itself inert, which is worth recording. `Get-NetFirewallRule`
+  returns `Enabled` as an **enum** (`True` = 1, `False` = 2), and every nonzero enum is truthy in
+  PowerShell. Measured on the reference host: for a *disabled* rule, `[bool]$r.Enabled` is `True`,
+  `-not $r.Enabled` is `False`, and `Where-Object Enabled` matches it. Written the natural way,
+  the check counted disabled rules as enabled and could never have failed — the same
+  cannot-fail-against-its-own-defect shape as the thing it was written to catch. Comparisons are
+  now against `.ToString()`, verified to discriminate both ways.
 
   So `WithRdpCommand` still means "this opens mstsc pointed at the guest", a claim about the
   host. **Do not read it as "RDP works with the AspireHcs guest image."**
