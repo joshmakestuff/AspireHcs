@@ -14,6 +14,10 @@ builder.AddHcsVm("appliance")
     .WithMemory(gigabytes: 2)
     .WithProcessorCount(2)
     .WithNatNetwork()
-    .WithEndpoint("ssh", targetPort: 22);
+    .WithEndpoint("ssh", targetPort: 22)
+    // Administrator is the account the tools/guest-images/windows fixture ships. There is no
+    // matching WithRdpCommand here because that image does not serve RDP — a connect button
+    // that cannot connect is worse than no button.
+    .WithSshCommand(userName: "Administrator");
 
 builder.Build().Run();
