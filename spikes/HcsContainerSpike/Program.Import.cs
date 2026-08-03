@@ -62,6 +62,18 @@ internal static partial class Program
         Console.WriteLine($"[import] security={(noSecurity ? "SKIPPED (--no-security: no SDs restored, no privileges taken)" : "full fidelity")}" +
                           $" finalize={(skipFinalize ? "SKIPPED (--skip-finalize)" : "in-line")}");
 
+        // The already-done check comes BEFORE privileges are demanded. Nothing
+        // privileged is about to happen if there is nothing to do, and asking
+        // first made a re-run fail unelevated where it should have reported "no
+        // work" — which also falsified the documented claim that repeating a
+        // completed import is a safe no-op.
+        if (Directory.Exists(entryPath) && File.Exists(Path.Combine(entryPath, ProvenanceFileName)))
+        {
+            Step("EntryAlreadyComplete", default, $"{entryPath} carries {ProvenanceFileName} — nothing to do");
+            Console.WriteLine("Already imported. Delete the directory to force a re-import.");
+            return 0;
+        }
+
         // Privileges: hcsshim's NewLayerWriter contract. In --no-security mode
         // they are deliberately not requested — that mode exists to measure
         // whether extraction without them is possible at all.
@@ -78,18 +90,11 @@ internal static partial class Program
             }
         }
 
-        // A leftover entry is only reusable if it carries the completion
-        // sentinel; anything else is torn and gets destroyed rather than
-        // silently extended (FILE_CREATE would fail on the first duplicate and
-        // report a confusing collision).
+        // A leftover entry that lacks the sentinel is TORN: destroy it rather
+        // than silently extending it (FILE_CREATE would fail on the first
+        // duplicate and report a confusing collision).
         if (Directory.Exists(entryPath))
         {
-            if (File.Exists(Path.Combine(entryPath, ProvenanceFileName)))
-            {
-                Step("EntryAlreadyComplete", default, $"{entryPath} carries {ProvenanceFileName} — nothing to do");
-                Console.WriteLine($"Already imported. Delete the directory to force a re-import.");
-                return 0;
-            }
             Step("DestroyTornEntry", DestroyEntry(entryPath), entryPath);
         }
 

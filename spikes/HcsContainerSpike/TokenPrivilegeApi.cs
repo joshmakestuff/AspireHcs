@@ -65,6 +65,114 @@ internal static class TokenPrivileges
     public static HRESULT EnableBackupRestorePrivileges(out string detail) =>
         EnableProcessPrivileges([SeBackupPrivilege, SeRestorePrivilege], out detail);
 
+    /// <summary>Disables the named privileges without removing them, so a call
+    /// can be probed with an otherwise-identical token. This is what makes
+    /// "which privilege does it want" answerable: an elevated token holds many,
+    /// and only turning specific ones off can attribute the failure.</summary>
+    public static unsafe HRESULT DisableProcessPrivileges(IReadOnlyList<string> names, out string detail)
+    {
+        using SafeFileHandle process = new(PInvoke.GetCurrentProcess(), ownsHandle: false);
+        if (!PInvoke.OpenProcessToken(
+                process,
+                TOKEN_ACCESS_MASK.TOKEN_ADJUST_PRIVILEGES | TOKEN_ACCESS_MASK.TOKEN_QUERY,
+                out SafeFileHandle token))
+        {
+            HRESULT openHr = HrFromLastError();
+            detail = $"OpenProcessToken failed: 0x{(uint)openHr.Value:X8}";
+            return openHr;
+        }
+
+        using (token)
+        {
+            var notes = new List<string>();
+            HRESULT result = default;
+            foreach (string name in names)
+            {
+                if (!PInvoke.LookupPrivilegeValue(null, name, out LUID luid))
+                {
+                    HRESULT hr = HrFromLastError();
+                    notes.Add($"{name}: LookupPrivilegeValue failed 0x{(uint)hr.Value:X8}");
+                    if (result.Succeeded) { result = hr; }
+                    continue;
+                }
+                TOKEN_PRIVILEGES state = default;
+                state.PrivilegeCount = 1;
+                state.Privileges[0] = new LUID_AND_ATTRIBUTES { Luid = luid, Attributes = 0 }; // 0 = disabled
+                if (!PInvoke.AdjustTokenPrivileges(new HANDLE(token.DangerousGetHandle()), false, &state, 0, null, null))
+                {
+                    HRESULT hr = HrFromLastError();
+                    notes.Add($"{name}: AdjustTokenPrivileges failed 0x{(uint)hr.Value:X8}");
+                    if (result.Succeeded) { result = hr; }
+                    continue;
+                }
+                // ERROR_NOT_ALL_ASSIGNED here just means the token never held it,
+                // which for a disable request is the desired end state anyway.
+                notes.Add(Marshal.GetLastPInvokeError() == ErrorNotAllAssigned
+                    ? $"{name}: not held (already effectively disabled)"
+                    : $"{name}: DISABLED");
+            }
+            detail = string.Join("; ", notes);
+            return result;
+        }
+    }
+
+    /// <summary>Every privilege in the process token and whether it is enabled —
+    /// the inventory that turns "a required privilege is not held" into a
+    /// specific, checkable name.</summary>
+    /// <summary>Returns null when the token could not be READ. An empty list and
+    /// an unreadable token are completely different claims — "holds no
+    /// privileges" versus "we do not know" — and collapsing them would let a
+    /// read failure masquerade as evidence about the token's contents.</summary>
+    public static unsafe IReadOnlyList<(string Name, bool Enabled)>? ListProcessPrivileges()
+    {
+        var result = new List<(string, bool)>();
+        using SafeFileHandle process = new(PInvoke.GetCurrentProcess(), ownsHandle: false);
+        if (!PInvoke.OpenProcessToken(process, TOKEN_ACCESS_MASK.TOKEN_QUERY, out SafeFileHandle token))
+        {
+            return null;
+        }
+        using (token)
+        {
+            var handle = new HANDLE(token.DangerousGetHandle());
+            uint size = 0;
+            PInvoke.GetTokenInformation(handle, TOKEN_INFORMATION_CLASS.TokenPrivileges, null, 0, &size);
+            if (size == 0)
+            {
+                return null;
+            }
+            byte[] buffer = new byte[size];
+            fixed (byte* p = buffer)
+            {
+                if (!PInvoke.GetTokenInformation(handle, TOKEN_INFORMATION_CLASS.TokenPrivileges, p, size, &size))
+                {
+                    return null;
+                }
+                // TOKEN_PRIVILEGES is a count followed by a variable-length
+                // LUID_AND_ATTRIBUTES array; walk it by offset rather than
+                // relying on the generated inline-array helpers.
+                uint count = *(uint*)p;
+                var entries = (LUID_AND_ATTRIBUTES*)(p + sizeof(uint));
+                for (int i = 0; i < count; i++)
+                {
+                    LUID luid = entries[i].Luid;
+                    uint nameLength = 0;
+                    PInvoke.LookupPrivilegeName(null, luid, default, ref nameLength);
+                    if (nameLength == 0)
+                    {
+                        continue;
+                    }
+                    Span<char> name = new char[nameLength + 1];
+                    if (PInvoke.LookupPrivilegeName(null, luid, name, ref nameLength))
+                    {
+                        result.Add((new string(name[..(int)nameLength]),
+                            (entries[i].Attributes & TOKEN_PRIVILEGES_ATTRIBUTES.SE_PRIVILEGE_ENABLED) != 0));
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
     private static unsafe HRESULT EnableOne(SafeFileHandle token, string name, out string note)
     {
         if (!PInvoke.LookupPrivilegeValue(null, name, out LUID luid))
