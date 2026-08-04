@@ -1,15 +1,13 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.Versioning;
 
-namespace AspireHcs.IntegrationTests;
+namespace GuestReadinessProbeSpike;
 
 /// <summary>
 /// Minimal host-side Hyper-V socket connect, used to investigate whether hvsocket offers a
 /// read-only guest-readiness signal (issue #5). Deliberately dependency-free and confined to
-/// the test project: nothing here is a proposal for the library yet.
+/// this spike: nothing here is a proposal for the library yet.
 /// </summary>
-[SupportedOSPlatform("windows10.0.17763")]
 internal static class HvSocketProbe
 {
     private const int AF_HYPERV = 34;
