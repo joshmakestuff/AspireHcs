@@ -12,6 +12,5 @@
   <Folder Name="/spikes/">
     <Project Path="spikes/GuestReadinessProbeSpike/GuestReadinessProbeSpike.csproj" />
     <Project Path="spikes/HcsBootSpike/HcsBootSpike.csproj" />
-    <Project Path="spikes/HcsContainerSpike/HcsContainerSpike.csproj" />
   </Folder>
 </Solution>
