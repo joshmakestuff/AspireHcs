@@ -51,8 +51,9 @@ Aspire's container story is Docker/Podman via DCP, and Windows containers are no
 Spike code lives under `spikes/` and is not part of the shipped package. The container spike and the guest-image builders moved to
 [hcsimgtool](https://github.com/joshmakestuff/hcsimgtool) ([#43](https://github.com/joshmakestuff/AspireHcs/issues/43)) — image and disk
 preparation is that tool's job now. The seam: **hcsimgtool produces an ordered layer chain of directory paths, topmost first, whose base
-carries a `UtilityVM/` directory and a `SystemTemplate.vhdx` beside it**; AspireHcs consumes that and runs it. The container *runtime* gets
-rewritten here fresh ([#39](https://github.com/joshmakestuff/AspireHcs/issues/39)).
+carries a `UtilityVM/` directory and a `SystemTemplate.vhdx` beside it**; AspireHcs consumes that and runs it. **That chain is length 1 today** —
+hcsimgtool's `pull` refuses multi-layer images (`servercore` exits 2), so the plural is the contract, not current behaviour. The container
+*runtime* gets rewritten here fresh ([#39](https://github.com/joshmakestuff/AspireHcs/issues/39)).
 
 ## Requirements
 
