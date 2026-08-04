@@ -9,7 +9,7 @@ using Xunit.Abstractions;
 namespace AspireHcs.IntegrationTests;
 
 // Issue #11 phase 0's never-leases finding, pinned: a guest that boots healthy but never
-// DHCPs (the StaticNoDhcp Kali variant from tools/guest-images/kali) must fail LOUDLY with
+// DHCPs (the StaticNoDhcp Kali variant, built by hcsimgtool) must fail LOUDLY with
 // the cause named — not hang, not report Running, not point anywhere but DHCP. This is the
 // suite pin promised when the manual witness was recorded (2026-08-01).
 [SupportedOSPlatform("windows10.0.17763")]
@@ -20,7 +20,7 @@ public sealed class NoLeaseFailureModeTests(ITestOutputHelper output)
     {
         string? noLeaseVhdx = Environment.GetEnvironmentVariable("HCS_TEST_NOLEASE_VHDX");
         Skip.If(string.IsNullOrEmpty(noLeaseVhdx),
-            "Set HCS_TEST_NOLEASE_VHDX to the StaticNoDhcp probe variant (tools/guest-images/kali) to run the never-leases pin. Takes ~2 minutes by design (the 90 s lease timeout is the subject).");
+            "Set HCS_TEST_NOLEASE_VHDX to the StaticNoDhcp probe variant (built by hcsimgtool) to run the never-leases pin. Takes ~2 minutes by design (the 90 s lease timeout is the subject).");
 
         // Boot (~20 s) + the 90 s lease timeout under test + teardown.
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
