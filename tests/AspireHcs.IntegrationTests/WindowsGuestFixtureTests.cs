@@ -10,7 +10,7 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #11: the Windows Server 2025 image built by tools/guest-images/windows is the suite's
+// Issue #11: the Windows Server 2025 image built by hcsimgtool is the suite's
 // POSITIVE fixture — a guest that actually serves something. Until it existed, "healthy" was
 // only ever proven against an in-process TcpListener; the Kali image can only prove the
 // negative half (refusal withholds readiness). These tests are the other half, live:
@@ -24,7 +24,7 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
     {
         string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_TEST_WINDOWS_VHDX");
         Skip.If(string.IsNullOrEmpty(windowsVhdx),
-            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (tools/guest-images/windows) to run the positive-fixture tests.");
+            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (built by hcsimgtool) to run the positive-fixture tests.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 

@@ -145,7 +145,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
     {
         string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_TEST_WINDOWS_VHDX");
         Skip.If(string.IsNullOrEmpty(windowsVhdx),
-            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (tools/guest-images/windows) to run the connect-UX test.");
+            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (built by hcsimgtool) to run the connect-UX test.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
