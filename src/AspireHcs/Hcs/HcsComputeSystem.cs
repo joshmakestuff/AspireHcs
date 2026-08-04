@@ -78,9 +78,9 @@ internal sealed class HcsComputeSystem : IDisposable
     /// size the VM already has is a no-op that the VM worker satisfies on its own: it returns in
     /// ~40 ms having never consulted the guest, which is how this method previously claimed a
     /// still-booting VM was ready. Measured on the reference image, the real transition lands at
-    /// ~9.3 s, ahead of the guest's first DHCP lease at ~14.4 s — see
-    /// <c>GuestReadinessProbeExperiment</c>, which asserts the distinction so it cannot silently
-    /// regress. The probe grows rather than shrinks: shrinking pushed the reference guest into
+    /// ~9.3 s, ahead of the guest's first DHCP lease at ~14.4 s. The distinction is
+    /// re-measurable on demand with the <c>spikes/GuestReadinessProbeSpike</c> experiment, whose
+    /// finding checks fail if it stops holding; nothing runs that experiment automatically. The probe grows rather than shrinks: shrinking pushed the reference guest into
     /// memory pressure it did not recover from.
     /// <para>
     /// This reports guest <em>kernel</em> readiness, not that a workload is listening. Use a
