@@ -5,7 +5,7 @@ dashboard opens a session inside a running guest, without hunting for the leased
 
 - Host: Windows 11 Enterprise 10.0.26200, Hyper-V enabled
 - Account: a normal user in **Hyper-V Administrators**, running **unelevated**
-- Guest: `tools/guest-images/windows` fixture — Windows Server 2025 Core, image build
+- Guest: hcsimgtool's `tools/guest-images/windows` fixture — Windows Server 2025 Core, image build
   10.0.26100.6584, sshd Running (`winserver2025-core.provenance.json`)
 - Base commit: `f44f1af`
 - Date: 2026-08-03
