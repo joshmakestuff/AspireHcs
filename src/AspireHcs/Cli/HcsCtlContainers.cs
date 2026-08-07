@@ -9,19 +9,28 @@ namespace AspireHcs.Cli;
 /// </summary>
 internal static class HcsCtlContainers
 {
-    /// <summary>Creates the compute system and its scratch. Does not start it.</summary>
+    /// <summary>
+    /// Creates the compute system and its scratch. Does not start it.
+    /// </summary>
+    /// <remarks>
+    /// Mounts and scratch size belong here rather than on exec: they are properties of the
+    /// compute system's document, fixed when it is created. Environment is the other way round —
+    /// hcsctl's <c>create</c> takes no <c>--env</c> at all. See <see cref="ExecAsync"/>.
+    /// </remarks>
     public static Task<HcsCtlContainerCreateDocument> CreateAsync(
         this HcsCtl hcsctl,
         string id,
         string imageReference,
         int processorCount,
         int memoryMb,
+        int? scratchSizeGigabytes = null,
+        IEnumerable<string>? mounts = null,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(hcsctl);
 
-        string[] arguments =
+        List<string> arguments =
         [
             "container", "create",
             "--id", id,
@@ -29,6 +38,20 @@ internal static class HcsCtlContainers
             "--cpus", processorCount.ToString(CultureInfo.InvariantCulture),
             "--memory-mb", memoryMb.ToString(CultureInfo.InvariantCulture),
         ];
+
+        if (scratchSizeGigabytes is { } gigabytes)
+        {
+            // hcsctl requires a unit and rejects a bare number: a size is where guessing wrong
+            // costs tens of gigabytes.
+            arguments.Add("--scratch-size");
+            arguments.Add($"{gigabytes.ToString(CultureInfo.InvariantCulture)}GB");
+        }
+
+        foreach (string mount in mounts ?? [])
+        {
+            arguments.Add("--mount");
+            arguments.Add(mount);
+        }
 
         return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlContainerCreateDocument, progress, cancellationToken);
     }
@@ -46,16 +69,31 @@ internal static class HcsCtlContainers
     /// not return until the guest process exits — which is how a long-running workload is
     /// followed. Cancel the token to tear it down.
     /// </summary>
+    /// <remarks>
+    /// Environment is set here, per guest process, because hcsctl's <c>container create</c> takes
+    /// no <c>--env</c>. Every exec against a container therefore needs the same environment
+    /// passed again — nothing on the compute system remembers it — which is why the caller keeps
+    /// the resolved set rather than resolving it per call.
+    /// </remarks>
     public static Task<HcsCtlExecDocument> ExecAsync(
         this HcsCtl hcsctl,
         string id,
         string commandLine,
+        IReadOnlyDictionary<string, string>? environment = null,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(hcsctl);
-        return hcsctl.InvokeAsync(["container", "exec", "--id", id, "--cmd", commandLine],
-            HcsCtlJsonContext.Default.HcsCtlExecDocument, progress, cancellationToken);
+
+        List<string> arguments = ["container", "exec", "--id", id, "--cmd", commandLine];
+
+        foreach ((string name, string value) in environment ?? new Dictionary<string, string>())
+        {
+            arguments.Add("--env");
+            arguments.Add($"{name}={value}");
+        }
+
+        return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlExecDocument, progress, cancellationToken);
     }
 
     public static Task<HcsCtlResultDocument> StopAsync(

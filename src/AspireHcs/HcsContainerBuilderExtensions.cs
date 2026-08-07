@@ -107,6 +107,68 @@ public static class HcsContainerBuilderExtensions
         return builder;
     }
 
+    /// <summary>
+    /// Maps a host directory into the guest, mirroring Aspire's container API shape. A relative
+    /// <paramref name="source"/> is resolved against the AppHost directory, the way Aspire's
+    /// Docker path does.
+    /// </summary>
+    /// <remarks>
+    /// Carried over VSMB, not as a Docker bind mount, and hcsctl requires both paths to be
+    /// drive-letter absolute — so the resolution happens here rather than letting a developer
+    /// meet an error about a path they never typed. The host directory must exist when the
+    /// container is created.
+    /// </remarks>
+    public static IResourceBuilder<HcsContainerResource> WithBindMount(
+        this IResourceBuilder<HcsContainerResource> builder, string source, string target, bool isReadOnly = false)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+        ArgumentException.ThrowIfNullOrWhiteSpace(target);
+
+        string resolvedSource = Path.GetFullPath(source, builder.ApplicationBuilder.AppHostDirectory);
+
+        if (!Path.IsPathFullyQualified(target))
+        {
+            throw new ArgumentException(
+                $"The mount target '{target}' must be an absolute path in the guest, e.g. C:\\app. " +
+                "Relative targets have no meaning: there is no working directory to resolve them against.",
+                nameof(target));
+        }
+
+        // Rejected at model-build time rather than at container-start time. hcsctl rejects a
+        // duplicate container path with exit 64, and meeting that as a resource-start failure
+        // would be a slower, worse version of this message.
+        if (builder.Resource.Mounts.Any(m => string.Equals(
+                m.Target.TrimEnd('\\'), target.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"Resource '{builder.Resource.Name}' already has a mount at '{target}'. " +
+                "Each guest path can be mapped only once.");
+        }
+
+        builder.Resource.Mounts.Add(new HcsContainerMount(resolvedSource, target, isReadOnly));
+        return builder;
+    }
+
+    /// <summary>
+    /// Sets the guest's C: size. Without this the guest gets hcsctl's default, which is
+    /// <b>20 GB</b> — measured, and easy to hit unnoticed by anything that unpacks, builds or
+    /// caches inside the container.
+    /// </summary>
+    /// <remarks>
+    /// The observed size comes back about 0.1 GB under the request, measured: a 40 GB request
+    /// gives a 39.9 GB guest C:.
+    /// </remarks>
+    public static IResourceBuilder<HcsContainerResource> WithScratchSize(
+        this IResourceBuilder<HcsContainerResource> builder, int gigabytes)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(gigabytes, 0);
+
+        builder.Resource.ScratchSizeGigabytes = gigabytes;
+        return builder;
+    }
+
     public static IResourceBuilder<HcsContainerResource> WithMemory(
         this IResourceBuilder<HcsContainerResource> builder, int gigabytes)
     {

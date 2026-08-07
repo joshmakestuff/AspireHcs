@@ -158,11 +158,26 @@ internal sealed class HcsContainerInstance(
 
             Progress progress = new(logger);
 
+            // Resolved before anything is created. An empty value is rejected here (#49), and a
+            // resource that cannot be configured correctly should fail before it has acquired a
+            // compute system and a scratch layer to clean up.
+            IReadOnlyDictionary<string, string> environment = await ContainerEnvironment
+                .ResolveAsync(resource, services.GetRequiredService<DistributedApplicationExecutionContext>(), stopping)
+                .ConfigureAwait(false);
+
             logger.LogInformation("Creating container {ContainerId} from {Image} ({MemoryMb} MB, {Processors} vCPU)",
                 resource.ContainerId, image, resource.MemoryMb, resource.ProcessorCount);
 
             HcsCtlContainerCreateDocument created = await hcsctl
-                .CreateAsync(resource.ContainerId, image, resource.ProcessorCount, resource.MemoryMb, progress, stopping)
+                .CreateAsync(
+                    resource.ContainerId,
+                    image,
+                    resource.ProcessorCount,
+                    resource.MemoryMb,
+                    resource.ScratchSizeGigabytes,
+                    [.. resource.Mounts.Select(m => m.ToOptionValue())],
+                    progress,
+                    stopping)
                 .ConfigureAwait(false);
 
             // Release with rm, not stop: rm is what removes the scratch layer, and a scratch
@@ -187,7 +202,9 @@ internal sealed class HcsContainerInstance(
 
             if (resource.Command is { Length: > 0 } command)
             {
-                _ = Task.Run(() => RunWorkloadAsync(hcsctl, boot, command, progress, workloadCts.Token), CancellationToken.None);
+                _ = Task.Run(
+                    () => RunWorkloadAsync(hcsctl, boot, command, environment, progress, workloadCts.Token),
+                    CancellationToken.None);
             }
 
             ThrowIfExitedMidBoot(boot);
@@ -233,12 +250,17 @@ internal sealed class HcsContainerInstance(
     /// not the log pipeline #40 asks for.
     /// </summary>
     private async Task RunWorkloadAsync(
-        HcsCtl hcsctl, BootRecord boot, string command, IProgress<string> progress, CancellationToken cancellationToken)
+        HcsCtl hcsctl,
+        BootRecord boot,
+        string command,
+        IReadOnlyDictionary<string, string> environment,
+        IProgress<string> progress,
+        CancellationToken cancellationToken)
     {
         try
         {
             HcsCtlExecDocument result = await hcsctl
-                .ExecAsync(resource.ContainerId, command, progress, cancellationToken)
+                .ExecAsync(resource.ContainerId, command, environment, progress, cancellationToken)
                 .ConfigureAwait(false);
 
             // The guest's exit code, never hcsctl's. hcsctl reports the two separately for

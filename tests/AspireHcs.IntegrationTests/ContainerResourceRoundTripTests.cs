@@ -19,121 +19,39 @@ namespace AspireHcs.IntegrationTests;
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
 {
-    private const string ImageVariable = "ASPIREHCS_TEST_IMAGE";
-    private const string StoreVariable = "ASPIREHCS_TEST_STORE";
-    private const string HcsCtlVariable = "ASPIREHCS_HCSCTL";
-
-    private static (string HcsCtl, string Store, string Image) RequireFixture()
-    {
-        string? hcsctl = Environment.GetEnvironmentVariable(HcsCtlVariable);
-        string? store = Environment.GetEnvironmentVariable(StoreVariable);
-        string? image = Environment.GetEnvironmentVariable(ImageVariable);
-
-        Skip.If(string.IsNullOrWhiteSpace(hcsctl) || !File.Exists(hcsctl),
-            $"Set {HcsCtlVariable} to hcsctl.exe (./eng/Get-HcsCtl.ps1 installs it) to run container integration tests.");
-        Skip.If(string.IsNullOrWhiteSpace(store),
-            $"Set {StoreVariable} to an hcsctl store holding an imported image.");
-        Skip.If(string.IsNullOrWhiteSpace(image),
-            $"Set {ImageVariable} to an image reference materialized in that store.");
-
-        return (hcsctl!, store!, image!);
-    }
-
-    /// <summary>
-    /// Asks hcsctl directly what containers exist. Independent of the product's own listing code
-    /// on purpose: a teardown check that reuses the code under test can only confirm it is
-    /// self-consistent.
-    /// </summary>
-    private static async Task<string[]> ListContainerIdsAsync(string hcsctl, string store, CancellationToken cancellationToken)
-    {
-        ProcessStartInfo startInfo = new(hcsctl)
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        foreach (string argument in new[] { "container", "ls", "--store", store, "--json" })
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        using Process process = Process.Start(startInfo)!;
-        string stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-
-        using JsonDocument document = JsonDocument.Parse(stdout);
-        if (!document.RootElement.TryGetProperty("containers", out JsonElement containers)
-            || containers.ValueKind != JsonValueKind.Array)
-        {
-            return [];
-        }
-
-        return [.. containers.EnumerateArray()
-            .Select(c => c.TryGetProperty("id", out JsonElement id) ? id.GetString() : null)
-            .Where(id => id is not null)
-            .Select(id => id!)];
-    }
-
-    /// <summary>
-    /// Builds the sample AppHost, which adds the container when <c>ASPIREHCS_TEST_IMAGE</c> is
-    /// set. Going through the sample rather than an in-process builder is what #39 asks for, and
-    /// it is also the only way to get DCP and the dashboard configured.
-    /// </summary>
-    private static async Task<IDistributedApplicationTestingBuilder> SampleAppHostAsync(
-        string command, CancellationToken cancellationToken)
-    {
-        Environment.SetEnvironmentVariable("ASPIREHCS_TEST_COMMAND", command);
-        return await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cancellationToken);
-    }
-
-    /// <summary>Reads the id the resource generated, so absence can be asserted against it.</summary>
-    private static string ContainerIdOf(DistributedApplication app, string resourceName)
-    {
-        DistributedApplicationModel model = app.Services.GetRequiredService<DistributedApplicationModel>();
-        HcsContainerResource resource = model.Resources
-            .OfType<HcsContainerResource>()
-            .Single(r => r.Name == resourceName);
-
-        return resource.ContainerId;
-    }
-
     [SkippableFact]
     public async Task A_container_resource_reaches_running_and_leaves_nothing_behind()
     {
-        (string hcsctl, string store, _) = RequireFixture();
+        (string hcsctl, string store, _) = ContainerFixture.Require();
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
         // Long-running on purpose: the resource must stay Running rather than reaching Finished
         // the instant a one-shot command exits.
-        IDistributedApplicationTestingBuilder appHost = await SampleAppHostAsync("cmd /c ping -t 127.0.0.1", cts.Token);
+        IDistributedApplicationTestingBuilder appHost = await ContainerFixture.SampleAppHostAsync("cmd /c ping -t 127.0.0.1", cts.Token);
 
         string containerId;
         await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
         {
-            containerId = ContainerIdOf(app, "worker");
+            containerId = ContainerFixture.ContainerIdOf(app);
             output.WriteLine($"container id: {containerId}");
 
             await app.StartAsync(cts.Token);
             await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
 
             // It really is running, according to something other than our own state machine.
-            Assert.Contains(containerId, await ListContainerIdsAsync(hcsctl, store, cts.Token));
+            Assert.Contains(containerId, await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token));
 
             await app.StopAsync(cts.Token);
         }
 
         // ABSENCE, not a return code. A container still listed here — in any state, including
         // "created" — means its scratch layer probably survived too.
-        string[] remaining = await ListContainerIdsAsync(hcsctl, store, cts.Token);
+        string[] remaining = await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token);
         output.WriteLine($"after teardown: {(remaining.Length == 0 ? "(none)" : string.Join(", ", remaining))}");
         Assert.DoesNotContain(containerId, remaining);
     }
 
-    // The measurement that proves the isolation is real rather than nominal, and the one #39 asks
-    // for by name: the guest reports the image's build, which on a mismatched pair cannot be the
-    // host's.
     // #39 by name: "cmd /c ver from inside reports the image's own build". Asserted from the
     // resource's own logs, so it also proves the guest's output reaches the dashboard at all.
     //
@@ -143,17 +61,17 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
     [SkippableFact]
     public async Task The_guest_reports_the_images_own_build_in_the_resource_logs()
     {
-        (string hcsctl, string store, _) = RequireFixture();
+        (string hcsctl, string store, _) = ContainerFixture.Require();
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
-        IDistributedApplicationTestingBuilder appHost = await SampleAppHostAsync("cmd /c ver", cts.Token);
+        IDistributedApplicationTestingBuilder appHost = await ContainerFixture.SampleAppHostAsync("cmd /c ver", cts.Token);
 
         string containerId;
         string versionLine;
         await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
         {
-            containerId = ContainerIdOf(app, "worker");
+            containerId = ContainerFixture.ContainerIdOf(app);
             await app.StartAsync(cts.Token);
 
             // Watch the logs concurrently with the run: a one-shot workload can finish before a
@@ -176,7 +94,7 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
         // the command ran somewhere other than inside the image.
         Assert.DoesNotContain(Environment.OSVersion.Version.Build.ToString(), versionLine);
 
-        Assert.DoesNotContain(containerId, await ListContainerIdsAsync(hcsctl, store, cts.Token));
+        Assert.DoesNotContain(containerId, await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token));
     }
 
     /// <summary>
@@ -208,7 +126,7 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
     [SkippableFact]
     public async Task A_container_left_by_a_dead_run_is_scavenged_by_the_next_one()
     {
-        (string hcsctl, string store, string image) = RequireFixture();
+        (string hcsctl, string store, string image) = ContainerFixture.Require();
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
@@ -217,9 +135,9 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
         await RunHcsCtlAsync(hcsctl, cts.Token,
             "container", "create", "--id", abandonedId, "--ref", image, "--store", store);
 
-        Assert.Contains(abandonedId, await ListContainerIdsAsync(hcsctl, store, cts.Token));
+        Assert.Contains(abandonedId, await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token));
 
-        IDistributedApplicationTestingBuilder appHost = await SampleAppHostAsync("cmd /c ver", cts.Token);
+        IDistributedApplicationTestingBuilder appHost = await ContainerFixture.SampleAppHostAsync("cmd /c ver", cts.Token);
 
         await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
         {
@@ -231,7 +149,7 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
             await app.StopAsync(cts.Token);
         }
 
-        Assert.DoesNotContain(abandonedId, await ListContainerIdsAsync(hcsctl, store, cts.Token));
+        Assert.DoesNotContain(abandonedId, await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token));
     }
 
     /// <summary>

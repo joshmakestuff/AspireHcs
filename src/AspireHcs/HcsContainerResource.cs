@@ -5,6 +5,20 @@ using System.Globalization;
 namespace Aspire.Hosting.ApplicationModel;
 
 /// <summary>
+/// One host directory mapped into the guest. Carried over VSMB rather than as a Docker bind
+/// mount — hcsctl is explicit that these are not Docker semantics — and both paths must be
+/// drive-letter absolute.
+/// </summary>
+/// <param name="Source">Host directory. Must exist when the container is created.</param>
+/// <param name="Target">Where it appears in the guest.</param>
+/// <param name="IsReadOnly">When true, the guest cannot write through the mount.</param>
+internal readonly record struct HcsContainerMount(string Source, string Target, bool IsReadOnly)
+{
+    /// <summary>hcsctl's <c>--mount HOST:CONTAINER[:ro]</c> spelling.</summary>
+    public string ToOptionValue() => IsReadOnly ? $"{Source}:{Target}:ro" : $"{Source}:{Target}";
+}
+
+/// <summary>
 /// A Hyper-V-isolated Windows container hosted through the Windows Host Compute System (HCS) API,
 /// run by driving <c>hcsctl</c>. Ephemeral like the VM resource: created when the AppHost starts
 /// and torn down when it exits, with leftovers from a crashed run scavenged on the next one.
@@ -16,7 +30,7 @@ namespace Aspire.Hosting.ApplicationModel;
 /// UAC-filtered token. See <c>docs/containers.md</c>.
 /// </remarks>
 public sealed class HcsContainerResource([ResourceName] string name)
-    : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString
+    : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString, IResourceWithEnvironment
 {
     /// <summary>
     /// Identifies containers this integration owns. The pid makes ownership provable: crash
@@ -69,6 +83,16 @@ public sealed class HcsContainerResource([ResourceName] string name)
     internal int MemoryMb { get; set; } = 2048;
 
     internal int ProcessorCount { get; set; } = 2;
+
+    /// <summary>
+    /// Guest C: size. Null leaves hcsctl's default, which is <b>20 GB</b> — measured, and low
+    /// enough that anything unpacking or caching inside the container hits it with no error
+    /// naming the real cause.
+    /// </summary>
+    internal int? ScratchSizeGigabytes { get; set; }
+
+    /// <summary>Host directories mapped into the guest over VSMB.</summary>
+    internal List<HcsContainerMount> Mounts { get; } = [];
 
     /// <summary>
     /// The hcsctl container id. Carries this process's id so a crashed AppHost's leftovers are
