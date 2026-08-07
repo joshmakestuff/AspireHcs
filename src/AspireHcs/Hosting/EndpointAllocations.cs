@@ -8,10 +8,14 @@ namespace AspireHcs.Hosting;
 /// rule (which is case-insensitive, matching how endpoints are named elsewhere in Aspire)
 /// cannot drift between the thing that decides a VM is healthy and the thing that decides you
 /// can connect to it.
+/// <para>
+/// Typed on <see cref="IResource"/> rather than the VM resource because containers allocate
+/// endpoints too (#41). Nothing here was VM-specific except the parameter type.
+/// </para>
 /// </summary>
 internal static class EndpointAllocations
 {
-    internal static AllocatedEndpoint? Find(HcsVirtualMachineResource resource, string endpointName)
+    internal static AllocatedEndpoint? Find(IResource resource, string endpointName)
         => resource.Annotations
             .OfType<EndpointAnnotation>()
             .FirstOrDefault(e => string.Equals(e.Name, endpointName, StringComparison.OrdinalIgnoreCase))

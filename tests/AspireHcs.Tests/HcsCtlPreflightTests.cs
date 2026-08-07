@@ -1,0 +1,118 @@
+using System.Runtime.Versioning;
+using AspireHcs.Cli;
+using Xunit;
+
+namespace AspireHcs.Tests;
+
+// The preflight's only job is to replace an unactionable failure with an actionable one, so what
+// is asserted here is that each blocker names the fix. A test that only checked "returns
+// non-null" would pass for a message that says "preflight failed", which is the thing this is
+// supposed to prevent.
+[SupportedOSPlatform("windows10.0.17763")]
+public class HcsCtlPreflightTests
+{
+    private static HcsCtlInfoDocument Healthy(
+        bool hyperVAdministrators = true,
+        Dictionary<string, string>? services = null,
+        HcsCtlStoreInfo? store = null,
+        IReadOnlyList<HcsCtlImageInfo>? images = null) => new()
+        {
+            Ok = true,
+            HostBuild = 26200,
+            HostOsVersion = "10.0.26200.8894",
+            Elevated = false,
+            HyperVAdministrators = hyperVAdministrators,
+            Services = services ?? new Dictionary<string, string>
+            {
+                ["vmcompute"] = "running",
+                ["vmms"] = "running",
+                ["hvhost"] = "running",
+            },
+            Store = store ?? new HcsCtlStoreInfo { Root = @"C:\store", Exists = true },
+            Images = images ?? [],
+        };
+
+    [Fact]
+    public void A_healthy_unelevated_host_has_no_blocker()
+    {
+        // The whole posture in one assertion: elevation is not a prerequisite for running.
+        Assert.Null(HcsCtlPreflight.DescribeBlocker(Healthy()));
+    }
+
+    [Fact]
+    public void A_stopped_vmcompute_names_the_service_and_its_state()
+    {
+        string? blocker = HcsCtlPreflight.DescribeBlocker(Healthy(services: new Dictionary<string, string>
+        {
+            ["vmcompute"] = "stopped",
+            ["hvhost"] = "running",
+        }));
+
+        Assert.NotNull(blocker);
+        Assert.Contains("vmcompute", blocker);
+        Assert.Contains("stopped", blocker);
+    }
+
+    [Fact]
+    public void A_missing_service_report_is_a_blocker_rather_than_an_assumed_pass()
+    {
+        // An absent key must not read as "running". Treating unknown as healthy is how a
+        // preflight becomes decorative.
+        string? blocker = HcsCtlPreflight.DescribeBlocker(Healthy(services: new Dictionary<string, string>
+        {
+            ["vmcompute"] = "running",
+        }));
+
+        Assert.NotNull(blocker);
+        Assert.Contains("hvhost", blocker);
+    }
+
+    [Fact]
+    public void Missing_hyperv_administrators_names_the_group_and_the_sign_out()
+    {
+        string? blocker = HcsCtlPreflight.DescribeBlocker(Healthy(hyperVAdministrators: false));
+
+        Assert.NotNull(blocker);
+        Assert.Contains("Hyper-V Administrators", blocker);
+        // The membership only reaches the token at next logon; without this the developer adds
+        // the group, retries, and sees the same failure.
+        Assert.Contains("sign out", blocker);
+    }
+
+    [Fact]
+    public void A_present_image_is_not_reported_as_missing()
+    {
+        HcsCtlInfoDocument info = Healthy(images:
+            [new HcsCtlImageInfo { Reference = "mcr.microsoft.com/windows/nanoserver:ltsc2025" }]);
+
+        Assert.Null(HcsCtlPreflight.DescribeMissingImage(info, "mcr.microsoft.com/windows/nanoserver:ltsc2025"));
+    }
+
+    [Fact]
+    public void A_missing_image_prints_both_acquisition_commands_and_marks_only_import_elevated()
+    {
+        HcsCtlInfoDocument info = Healthy(images:
+            [new HcsCtlImageInfo { Reference = "mcr.microsoft.com/windows/servercore:ltsc2022" }]);
+
+        string? blocker = HcsCtlPreflight.DescribeMissingImage(info, "mcr.microsoft.com/windows/nanoserver:ltsc2025");
+
+        Assert.NotNull(blocker);
+        Assert.Contains("hcsctl image pull", blocker);
+        Assert.Contains("hcsctl image import", blocker);
+        Assert.Contains("elevated", blocker);
+        // The distinction that matters: elevating once per image buys unprivileged runs
+        // afterwards. A message that just said "needs elevation" would imply otherwise.
+        Assert.Contains("running the container afterwards does not", blocker);
+    }
+
+    [Fact]
+    public void An_absent_store_is_described_as_absent_rather_than_as_a_missing_image()
+    {
+        HcsCtlInfoDocument info = Healthy(store: new HcsCtlStoreInfo { Root = @"C:\store", Exists = false });
+
+        string? blocker = HcsCtlPreflight.DescribeMissingImage(info, "mcr.microsoft.com/windows/nanoserver:ltsc2025");
+
+        Assert.NotNull(blocker);
+        Assert.Contains("does not exist yet", blocker);
+    }
+}
