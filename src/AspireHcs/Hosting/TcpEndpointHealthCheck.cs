@@ -5,7 +5,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 namespace AspireHcs.Hosting;
 
 /// <summary>
-/// Reports healthy once a TCP connection to a VM's endpoint is accepted — that is, once
+/// Reports healthy once a TCP connection to a resource's endpoint is accepted — that is, once
 /// something inside the guest is actually listening there.
 /// </summary>
 /// <remarks>
@@ -27,8 +27,14 @@ namespace AspireHcs.Hosting;
 /// forever.
 /// </para>
 /// </remarks>
+/// <para>
+/// Serves containers as well as VMs (#41), and the difference in what it <em>means</em> matters.
+/// For a VM, guest-kernel readiness gates Running and this gates ready. A container has no
+/// separate kernel-readiness signal — start already implies the guest is up — so this is the only
+/// readiness gate there is.
+/// </para>
 internal sealed class TcpEndpointHealthCheck(
-    HcsVirtualMachineResource resource,
+    IResource resource,
     string endpointName,
     TimeSpan timeout) : IHealthCheck
 {
