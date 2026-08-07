@@ -484,3 +484,7 @@ $RECYCLE.BIN/
 # Agent skill trees dropped by the aspire CLI; regenerated on demand, not source.
 .agents/
 .claude/
+
+# The pinned hcsctl drop, fetched by eng/Get-HcsCtl.ps1. Build output of another repo:
+# reproducible from the release and verified by SHA256, so it is not carried in history.
+tools/hcsctl/
