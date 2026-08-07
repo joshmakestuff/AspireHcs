@@ -1,6 +1,8 @@
 using AspireHcs;
 using AspireHcs.Hosting;
 using Aspire.Hosting.ApplicationModel;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 // Extensions live in Aspire.Hosting so they are in scope as soon as the package is referenced.
 namespace Aspire.Hosting;
@@ -190,14 +192,36 @@ public static class HcsContainerBuilderExtensions
     }
 
     /// <summary>
-    /// Declares a service the guest exposes on <paramref name="targetPort"/>, as a non-proxied
-    /// Aspire endpoint. The first endpoint declared backs the resource's connection string.
+    /// Attaches a NIC on an existing host compute network, defaulting to <c>nat</c> — the network
+    /// a Windows container host normally has.
     /// </summary>
     /// <remarks>
-    /// Endpoints are declared but not yet allocated an address: container networking is
-    /// <see href="https://github.com/joshmakestuff/AspireHcs/issues/41">#41</see>. Until that
-    /// lands the endpoint has no address and nothing resolves against it.
+    /// <para>
+    /// Unlike the VM path, there is no DHCP dance. A static HNS endpoint programs a container's
+    /// network stack directly, so the address is known when the container is <em>created</em>
+    /// rather than discovered afterwards — measured 2026-08-07, along with the fact that the
+    /// address is reachable from the host, so no port publishing is involved.
+    /// </para>
+    /// <para>
+    /// The network must already exist: hcsctl cannot create one
+    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>).
+    /// </para>
     /// </remarks>
+    public static IResourceBuilder<HcsContainerResource> WithNatNetwork(
+        this IResourceBuilder<HcsContainerResource> builder, string networkName = "nat")
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(networkName);
+
+        builder.Resource.NetworkName = networkName;
+        return builder;
+    }
+
+    /// <summary>
+    /// Declares a service the guest exposes on <paramref name="targetPort"/>, as a non-proxied
+    /// Aspire endpoint resolving to the container's own address. The first endpoint declared
+    /// backs the resource's connection string. Requires <see cref="WithNatNetwork"/>.
+    /// </summary>
     public static IResourceBuilder<HcsContainerResource> WithEndpoint(
         this IResourceBuilder<HcsContainerResource> builder, string name, int targetPort)
     {
@@ -207,5 +231,50 @@ public static class HcsContainerBuilderExtensions
 
         builder.Resource.PrimaryEndpointName ??= name;
         return builder.WithEndpoint(name: name, targetPort: targetPort, isProxied: false);
+    }
+
+    /// <summary>
+    /// Gates readiness on the container actually serving: the resource is healthy — and
+    /// <c>WaitFor(container)</c> releases its dependents — only once a TCP connection to
+    /// <paramref name="endpointName"/> is accepted. Defaults to the first endpoint declared.
+    /// </summary>
+    /// <remarks>
+    /// For a container this is the <em>only</em> readiness gate. A VM has a separate
+    /// guest-kernel-readiness signal that gates Running; a container's start already implies the
+    /// guest is up, so without this a resource is declared ready the moment it reports Running —
+    /// before anything inside it is listening.
+    /// </remarks>
+    public static IResourceBuilder<HcsContainerResource> WithTcpHealthCheck(
+        this IResourceBuilder<HcsContainerResource> builder,
+        string? endpointName = null,
+        TimeSpan? timeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        string name = endpointName
+            ?? builder.Resource.PrimaryEndpointName
+            ?? throw new InvalidOperationException(
+                $"Resource '{builder.Resource.Name}' has no endpoints; call WithEndpoint(...) before WithTcpHealthCheck().");
+
+        // Checked here rather than at check time so a typo fails the build of the model, not a
+        // health report nobody reads.
+        if (!builder.Resource.Annotations.OfType<EndpointAnnotation>()
+                .Any(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"Resource '{builder.Resource.Name}' has no endpoint named '{name}'. " +
+                $"Declare it with WithEndpoint(\"{name}\", targetPort) before calling WithTcpHealthCheck().");
+        }
+
+        string key = $"{builder.Resource.Name}_{name}_tcp_check";
+        TimeSpan connectTimeout = timeout ?? TimeSpan.FromSeconds(3);
+
+        builder.ApplicationBuilder.Services.AddHealthChecks().Add(new HealthCheckRegistration(
+            key,
+            _ => new TcpEndpointHealthCheck(builder.Resource, name, connectTimeout),
+            failureStatus: null,
+            tags: null));
+
+        return builder.WithHealthCheck(key);
     }
 }

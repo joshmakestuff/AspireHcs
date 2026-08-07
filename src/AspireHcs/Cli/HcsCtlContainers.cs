@@ -25,6 +25,7 @@ internal static class HcsCtlContainers
         int memoryMb,
         int? scratchSizeGigabytes = null,
         IEnumerable<string>? mounts = null,
+        string? network = null,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -38,6 +39,14 @@ internal static class HcsCtlContainers
             "--cpus", processorCount.ToString(CultureInfo.InvariantCulture),
             "--memory-mb", memoryMb.ToString(CultureInfo.InvariantCulture),
         ];
+
+        if (!string.IsNullOrEmpty(network))
+        {
+            // The endpoint is created and its address assigned here, at create time — the result
+            // document carries it before the container has even started.
+            arguments.Add("--network");
+            arguments.Add(network);
+        }
 
         if (scratchSizeGigabytes is { } gigabytes)
         {

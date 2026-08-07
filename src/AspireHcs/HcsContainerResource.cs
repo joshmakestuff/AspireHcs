@@ -95,6 +95,17 @@ public sealed class HcsContainerResource([ResourceName] string name)
     internal List<HcsContainerMount> Mounts { get; } = [];
 
     /// <summary>
+    /// The host compute network to attach an endpoint on, by name or id. Null means no NIC.
+    /// </summary>
+    /// <remarks>
+    /// The network must already exist — hcsctl cannot create one
+    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>), so this
+    /// names one rather than making it. <c>nat</c> is the conventional default and is what
+    /// Windows container hosts normally have.
+    /// </remarks>
+    internal string? NetworkName { get; set; }
+
+    /// <summary>
     /// The hcsctl container id. Carries this process's id so a crashed AppHost's leftovers are
     /// attributable, and a random suffix so a dying container from a previous run — teardown is
     /// asynchronous — cannot collide with this one.
