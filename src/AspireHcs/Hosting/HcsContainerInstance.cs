@@ -132,6 +132,15 @@ internal sealed class HcsContainerInstance(
             string image = resource.ImageReference ?? throw new InvalidOperationException(
                 $"Resource '{resource.Name}' has no image; call WithImage(reference) before running it.");
 
+            // Caught here rather than after the container exists: a resource whose endpoints can
+            // never resolve is misconfigured, and finding that out post-create means cleaning up
+            // a compute system to say so.
+            if (resource.Annotations.OfType<EndpointAnnotation>().Any() && resource.NetworkName is null)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNatNetwork().");
+            }
+
             HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath);
 
             // Preflight before anything is acquired. Every condition here is knowable in advance,
@@ -176,6 +185,7 @@ internal sealed class HcsContainerInstance(
                     resource.MemoryMb,
                     resource.ScratchSizeGigabytes,
                     [.. resource.Mounts.Select(m => m.ToOptionValue())],
+                    resource.NetworkName,
                     progress,
                     stopping)
                 .ConfigureAwait(false);
@@ -206,6 +216,9 @@ internal sealed class HcsContainerInstance(
                     () => RunWorkloadAsync(hcsctl, boot, command, environment, progress, workloadCts.Token),
                     CancellationToken.None);
             }
+
+            AllocateEndpoints(created);
+            await PublishEndpointsAsync(stopping).ConfigureAwait(false);
 
             ThrowIfExitedMidBoot(boot);
 
@@ -240,6 +253,75 @@ internal sealed class HcsContainerInstance(
 
             throw;
         }
+    }
+
+    /// <summary>
+    /// Resolves the resource's declared endpoints against the container's own address.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// No waiting, no polling. A static HNS endpoint programs a container's network stack
+    /// directly, so <c>container create</c> reports the address before the container has started
+    /// — the #4 finding inverting in our favour exactly as #41 predicted. The VM path's ~14 s
+    /// DHCP-lease discovery has no analogue here.
+    /// </para>
+    /// <para>
+    /// The address is the container's own on the host compute network, reachable from the host
+    /// directly (measured 2026-08-07). There is no host port mapping, so an endpoint's port is
+    /// the guest's port — nothing is translated.
+    /// </para>
+    /// </remarks>
+    private void AllocateEndpoints(HcsCtlContainerCreateDocument created)
+    {
+        List<EndpointAnnotation> endpoints = [.. resource.Annotations.OfType<EndpointAnnotation>()];
+        if (endpoints.Count == 0)
+        {
+            return;
+        }
+
+        if (created.Addresses.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Resource '{resource.Name}' declares endpoints but the container has no address. " +
+                "Add WithNatNetwork() so it gets a NIC on a host compute network.");
+        }
+
+        // hcsctl reports the address in CIDR form (172.17.163.120/20). An endpoint wants the
+        // address alone; leaving the prefix on produces a host string nothing can connect to.
+        string address = created.Addresses[0].Split('/')[0];
+
+        logger.LogInformation("Container address {Address}; publishing {Count} endpoint(s).", address, endpoints.Count);
+
+        foreach (EndpointAnnotation endpoint in endpoints)
+        {
+            int port = endpoint.TargetPort
+                ?? throw new InvalidOperationException($"Endpoint '{endpoint.Name}' has no target port.");
+
+            // Setting the property is enough to make the endpoint resolve: EndpointAnnotation's
+            // constructor registers this same snapshot under the endpoint's default network,
+            // which is what EndpointReference.IsAllocated consults.
+            endpoint.AllocatedEndpoint = new AllocatedEndpoint(endpoint, address, port);
+        }
+    }
+
+    private async Task PublishEndpointsAsync(CancellationToken cancellationToken)
+    {
+        if (!resource.Annotations.OfType<EndpointAnnotation>().Any())
+        {
+            return;
+        }
+
+        // Drives the orchestrator's URL processing — WithUrl callbacks and the dashboard's URL
+        // list both hang off this event, and nothing raises it for a non-DCP resource.
+        await eventing.PublishAsync(new ResourceEndpointsAllocatedEvent(resource, services), cancellationToken)
+            .ConfigureAwait(false);
+
+        // The orchestrator publishes endpoint-derived URLs as inactive (hidden), on the
+        // assumption that whoever allocated them activates them. That is us.
+        await notifications.PublishUpdateAsync(resource, s => s with
+        {
+            Urls = [.. s.Urls.Select(u => u with { IsInactive = false })],
+        }).ConfigureAwait(false);
     }
 
     /// <summary>
