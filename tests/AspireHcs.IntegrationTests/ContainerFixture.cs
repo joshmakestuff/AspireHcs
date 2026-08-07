@@ -154,11 +154,12 @@ internal static class ContainerFixture
     }
 
     /// <summary>
-    /// Asks hcsctl directly what containers exist. Independent of the product's own listing code
-    /// on purpose: a teardown check that reuses the code under test can only confirm it is
-    /// self-consistent.
+    /// Runs hcsctl and returns its one stdout document. Deliberately a separate implementation
+    /// from the product's own runner: a check that reuses the code under test can only confirm it
+    /// is self-consistent.
     /// </summary>
-    public static async Task<string[]> ListContainerIdsAsync(string hcsctl, string store, CancellationToken cancellationToken)
+    public static async Task<string> RunHcsCtlJsonAsync(
+        string hcsctl, CancellationToken cancellationToken, params string[] arguments)
     {
         ProcessStartInfo startInfo = new(hcsctl)
         {
@@ -167,14 +168,23 @@ internal static class ContainerFixture
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        foreach (string argument in new[] { "container", "ls", "--store", store, "--json" })
+        foreach (string argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
         }
 
+        startInfo.ArgumentList.Add("--json");
+
         using Process process = Process.Start(startInfo)!;
         string stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken);
         await process.WaitForExitAsync(cancellationToken);
+        return stdout;
+    }
+
+    /// <summary>Asks hcsctl directly what containers exist.</summary>
+    public static async Task<string[]> ListContainerIdsAsync(string hcsctl, string store, CancellationToken cancellationToken)
+    {
+        string stdout = await RunHcsCtlJsonAsync(hcsctl, cancellationToken, "container", "ls", "--store", store);
 
         using JsonDocument document = JsonDocument.Parse(stdout);
         if (!document.RootElement.TryGetProperty("containers", out JsonElement containers)

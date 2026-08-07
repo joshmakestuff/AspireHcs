@@ -17,6 +17,17 @@ namespace AspireHcs.Hosting;
 /// </summary>
 internal static class HcsContainerOrchestrator
 {
+    /// <summary>
+    /// The state text for a paused container.
+    /// </summary>
+    /// <remarks>
+    /// Aspire has no <c>Paused</c> in <see cref="KnownResourceStates"/> — checked, not assumed —
+    /// so this is our own string. It is deliberately not in <c>TerminalStates</c>: a paused
+    /// container is still there, and treating it as stopped would offer Start on something that
+    /// never stopped, while hiding the Stop that would actually clean it up.
+    /// </remarks>
+    public const string PausedState = "Paused";
+
     public static void Register(IResourceBuilder<HcsContainerResource> builder)
     {
         InstanceHolder holder = new();
@@ -96,6 +107,52 @@ internal static class HcsContainerOrchestrator
                     : ResourceCommandState.Disabled,
             });
 
+        // Pause and Resume are each offered only in the one state they apply to, and hidden
+        // otherwise rather than shown-but-disabled: an unavailable command should not look like a
+        // broken one (#52).
+        builder.WithCommand(
+            "container-pause",
+            "Pause",
+            context => ExecuteAsync(holder, i => i.PauseAsync(), "paused"),
+            new CommandOptions
+            {
+                Description = "Suspend the container. Its workload stops making progress.",
+                IconName = "Pause",
+                IconVariant = IconVariant.Filled,
+                UpdateState = context => State(context) == KnownResourceStates.Running
+                    ? ResourceCommandState.Enabled
+                    : ResourceCommandState.Hidden,
+            });
+
+        builder.WithCommand(
+            "container-resume",
+            "Resume",
+            context => ExecuteAsync(holder, i => i.ResumeAsync(), "resumed"),
+            new CommandOptions
+            {
+                Description = "Resume a paused container.",
+                IconName = "Play",
+                IconVariant = IconVariant.Regular,
+                UpdateState = context => State(context) == PausedState
+                    ? ResourceCommandState.Enabled
+                    : ResourceCommandState.Hidden,
+            });
+
+        builder.WithCommand(
+            "container-ps",
+            "List processes",
+            context => ReportAsync(holder, i => i.ListGuestProcessesAsync()),
+            new CommandOptions
+            {
+                Description = "Write the guest's process list to this resource's logs. Flat — HCS reports no parent pids.",
+                IconName = "TextBulletListSquare",
+                IconVariant = IconVariant.Regular,
+                UpdateState = context => State(context) is { } state
+                    && (state == KnownResourceStates.Running || state == PausedState)
+                        ? ResourceCommandState.Enabled
+                        : ResourceCommandState.Hidden,
+            });
+
         static string? State(UpdateCommandStateContext context) => context.ResourceSnapshot.State?.Text;
 
         static bool IsInFlight(string? state) =>
@@ -106,6 +163,28 @@ internal static class HcsContainerOrchestrator
             || state == KnownResourceStates.NotStarted
             || state == "Unknown"
             || string.IsNullOrEmpty(state);
+    }
+
+    /// <summary>
+    /// Runs a command whose own return value is the message worth showing — a process count, say —
+    /// rather than a fixed past-tense confirmation.
+    /// </summary>
+    private static async Task<ExecuteCommandResult> ReportAsync(
+        InstanceHolder holder, Func<HcsContainerInstance, Task<string>> action)
+    {
+        if (holder.Instance is not { } instance)
+        {
+            return new ExecuteCommandResult { Success = false, Message = "The container has not been initialized yet." };
+        }
+
+        try
+        {
+            return new ExecuteCommandResult { Success = true, Message = await action(instance).ConfigureAwait(false) };
+        }
+        catch (Exception ex)
+        {
+            return new ExecuteCommandResult { Success = false, Message = ex.Message };
+        }
     }
 
     private static async Task<ExecuteCommandResult> ExecuteAsync(

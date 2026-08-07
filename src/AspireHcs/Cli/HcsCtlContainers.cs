@@ -131,6 +131,41 @@ internal static class HcsCtlContainers
         return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlResultDocument, cancellationToken: cancellationToken);
     }
 
+    /// <summary>Uptime, memory, CPU, storage and per-endpoint network counters.</summary>
+    public static Task<HcsCtlStatsDocument> StatsAsync(
+        this HcsCtl hcsctl, string id, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        return hcsctl.InvokeAsync(["container", "stats", "--id", id],
+            HcsCtlJsonContext.Default.HcsCtlStatsDocument, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>What is running inside the guest. Flat — HCS reports no parent pids.</summary>
+    public static Task<HcsCtlProcessListDocument> ProcessListAsync(
+        this HcsCtl hcsctl, string id, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        return hcsctl.InvokeAsync(["container", "ps", "--id", id],
+            HcsCtlJsonContext.Default.HcsCtlProcessListDocument, cancellationToken: cancellationToken);
+    }
+
+    /// <summary>Suspends the container. A paused workload stops making progress.</summary>
+    public static Task<HcsCtlResultDocument> PauseAsync(
+        this HcsCtl hcsctl, string id, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        return hcsctl.InvokeAsync(["container", "pause", "--id", id],
+            HcsCtlJsonContext.Default.HcsCtlResultDocument, cancellationToken: cancellationToken);
+    }
+
+    public static Task<HcsCtlResultDocument> ResumeAsync(
+        this HcsCtl hcsctl, string id, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        return hcsctl.InvokeAsync(["container", "resume", "--id", id],
+            HcsCtlJsonContext.Default.HcsCtlResultDocument, cancellationToken: cancellationToken);
+    }
+
     public static Task<HcsCtlContainerListDocument> ListAsync(
         this HcsCtl hcsctl, CancellationToken cancellationToken = default)
     {

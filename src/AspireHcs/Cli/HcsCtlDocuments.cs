@@ -225,7 +225,171 @@ internal sealed record HcsCtlExecDocument
     public string? Output { get; init; }
 }
 
+// The statistics and process documents are hcsshim structs marshalled straight through, so their
+// names are PascalCase and come from hcsshim's tags rather than hcsctl's. Every name below was
+// read off a live container rather than inferred from the Go field names — which differ: the Go
+// field is `UsageCommitBytes` but the wire name is `MemoryUsageCommitBytes`.
+//
+// Fields are `omitempty` throughout, so a zero counter is an ABSENT key. Every numeric is
+// therefore nullable or defaults to zero on purpose: absent and zero mean the same thing here,
+// and treating absent as an error would make a freshly started container look broken.
+
+/// <summary><c>hcsctl container stats</c>.</summary>
+internal sealed record HcsCtlStatsDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("statistics")]
+    public HcsCtlStatistics? Statistics { get; init; }
+}
+
+/// <summary>What HCS reports about a running compute system.</summary>
+internal sealed record HcsCtlStatistics
+{
+    [JsonPropertyName("Timestamp")]
+    public DateTimeOffset? Timestamp { get; init; }
+
+    [JsonPropertyName("ContainerStartTime")]
+    public DateTimeOffset? ContainerStartTime { get; init; }
+
+    /// <summary>Uptime in 100-nanosecond ticks — the unit HCS reports, not one a person wants.</summary>
+    [JsonPropertyName("Uptime100ns")]
+    public long Uptime100ns { get; init; }
+
+    [JsonPropertyName("Memory")]
+    public HcsCtlMemoryStats? Memory { get; init; }
+
+    [JsonPropertyName("Processor")]
+    public HcsCtlProcessorStats? Processor { get; init; }
+
+    [JsonPropertyName("Storage")]
+    public HcsCtlStorageStats? Storage { get; init; }
+
+    /// <summary>One entry per endpoint. Absent entirely on a container with no network.</summary>
+    [JsonPropertyName("Network")]
+    public IReadOnlyList<HcsCtlNetworkStats> Network { get => field ?? []; init; } = [];
+
+    /// <summary>Uptime as a duration. HCS ticks are 100 ns, so this is ticks × 100 ns.</summary>
+    public TimeSpan Uptime => TimeSpan.FromTicks(Uptime100ns);
+}
+
+internal sealed record HcsCtlMemoryStats
+{
+    [JsonPropertyName("MemoryUsageCommitBytes")]
+    public long CommitBytes { get; init; }
+
+    [JsonPropertyName("MemoryUsageCommitPeakBytes")]
+    public long CommitPeakBytes { get; init; }
+
+    [JsonPropertyName("MemoryUsagePrivateWorkingSetBytes")]
+    public long PrivateWorkingSetBytes { get; init; }
+}
+
+internal sealed record HcsCtlProcessorStats
+{
+    [JsonPropertyName("TotalRuntime100ns")]
+    public long TotalRuntime100ns { get; init; }
+
+    [JsonPropertyName("RuntimeUser100ns")]
+    public long UserRuntime100ns { get; init; }
+
+    [JsonPropertyName("RuntimeKernel100ns")]
+    public long KernelRuntime100ns { get; init; }
+
+    public TimeSpan TotalRuntime => TimeSpan.FromTicks(TotalRuntime100ns);
+}
+
+internal sealed record HcsCtlStorageStats
+{
+    [JsonPropertyName("ReadCountNormalized")]
+    public long ReadCount { get; init; }
+
+    [JsonPropertyName("ReadSizeBytes")]
+    public long ReadBytes { get; init; }
+
+    [JsonPropertyName("WriteCountNormalized")]
+    public long WriteCount { get; init; }
+
+    [JsonPropertyName("WriteSizeBytes")]
+    public long WriteBytes { get; init; }
+}
+
+internal sealed record HcsCtlNetworkStats
+{
+    [JsonPropertyName("EndpointId")]
+    public string? EndpointId { get; init; }
+
+    [JsonPropertyName("BytesReceived")]
+    public long BytesReceived { get; init; }
+
+    [JsonPropertyName("BytesSent")]
+    public long BytesSent { get; init; }
+
+    [JsonPropertyName("PacketsReceived")]
+    public long PacketsReceived { get; init; }
+
+    [JsonPropertyName("PacketsSent")]
+    public long PacketsSent { get; init; }
+}
+
+/// <summary><c>hcsctl container ps</c> — what is running inside the guest.</summary>
+internal sealed record HcsCtlProcessListDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("processes")]
+    public IReadOnlyList<HcsCtlGuestProcess> Processes { get => field ?? []; init; } = [];
+}
+
+/// <summary>
+/// One process inside the guest.
+/// </summary>
+/// <remarks>
+/// <b>There is no parent process id, and there cannot be one.</b> HCS does not report it, so this
+/// is a flat list and no amount of presentation work will make it a tree. Confirmed against a live
+/// container: 18 processes, not one carrying a parent. Anything built on this must be a list.
+/// </remarks>
+internal sealed record HcsCtlGuestProcess
+{
+    [JsonPropertyName("ProcessId")]
+    public int ProcessId { get; init; }
+
+    [JsonPropertyName("ImageName")]
+    public string? ImageName { get; init; }
+
+    [JsonPropertyName("CreateTimestamp")]
+    public DateTimeOffset? CreatedAt { get; init; }
+
+    [JsonPropertyName("MemoryCommitBytes")]
+    public long MemoryCommitBytes { get; init; }
+
+    [JsonPropertyName("MemoryWorkingSetPrivateBytes")]
+    public long WorkingSetPrivateBytes { get; init; }
+
+    [JsonPropertyName("MemoryWorkingSetSharedBytes")]
+    public long WorkingSetSharedBytes { get; init; }
+
+    [JsonPropertyName("KernelTime100ns")]
+    public long KernelTime100ns { get; init; }
+
+    [JsonPropertyName("UserTime100ns")]
+    public long UserTime100ns { get; init; }
+
+    /// <summary>Kernel plus user time. Both are omitted from the wire when zero.</summary>
+    public TimeSpan CpuTime => TimeSpan.FromTicks(KernelTime100ns + UserTime100ns);
+}
+
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = false)]
+[JsonSerializable(typeof(HcsCtlStatsDocument))]
+[JsonSerializable(typeof(HcsCtlProcessListDocument))]
 [JsonSerializable(typeof(HcsCtlFailureDocument))]
 [JsonSerializable(typeof(HcsCtlResultDocument))]
 [JsonSerializable(typeof(HcsCtlInfoDocument))]
