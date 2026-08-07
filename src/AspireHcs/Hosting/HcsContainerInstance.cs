@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Eventing;
@@ -29,6 +30,13 @@ internal sealed class HcsContainerInstance(
     private BootRecord? _current;
     private int _epoch;
     private CancellationToken _appStopping;
+
+    /// <summary>
+    /// The tool for the live boot. Held so the dashboard commands can reach it — they run long
+    /// after BootAsync's locals are gone, and resolving the binary again per click would let a
+    /// command act on a different hcsctl than the one that created the container.
+    /// </summary>
+    private HcsCtl? _hcsctl;
 
     public async Task RunAsync()
     {
@@ -96,6 +104,100 @@ internal sealed class HcsContainerInstance(
         }
     }
 
+    /// <summary>
+    /// Suspends the container. A paused workload demonstrably stops making progress — that is the
+    /// point of the command, and it is what distinguishes pause from stop.
+    /// </summary>
+    public async Task PauseAsync()
+    {
+        await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
+        try
+        {
+            if (_current is not { Exited: false } || _hcsctl is not { } hcsctl)
+            {
+                throw new InvalidOperationException("The container is not running.");
+            }
+
+            await hcsctl.PauseAsync(resource.ContainerId, _appStopping).ConfigureAwait(false);
+
+            await notifications.PublishUpdateAsync(resource, s => s with
+            {
+                State = HcsContainerOrchestrator.PausedState,
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task ResumeAsync()
+    {
+        await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
+        try
+        {
+            if (_current is not { Exited: false } || _hcsctl is not { } hcsctl)
+            {
+                throw new InvalidOperationException("The container is not running.");
+            }
+
+            await hcsctl.ResumeAsync(resource.ContainerId, _appStopping).ConfigureAwait(false);
+
+            await notifications.PublishUpdateAsync(resource, s => s with
+            {
+                State = KnownResourceStates.Running,
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Writes the guest's process list to the resource log and returns a one-line summary.
+    /// </summary>
+    /// <remarks>
+    /// A flat table, and it can be nothing else: HCS reports no parent process ids, so there is no
+    /// tree to build here or in any UI downstream. It goes to the log rather than to a snapshot
+    /// property because it is tens of rows that a developer reads once while diagnosing, not a
+    /// value worth showing continuously.
+    /// </remarks>
+    public async Task<string> ListGuestProcessesAsync()
+    {
+        if (_current is not { Exited: false } || _hcsctl is not { } hcsctl)
+        {
+            throw new InvalidOperationException("The container is not running.");
+        }
+
+        HcsCtlProcessListDocument list = await hcsctl
+            .ProcessListAsync(resource.ContainerId, _appStopping)
+            .ConfigureAwait(false);
+
+        if (list.Processes.Count == 0)
+        {
+            logger.LogInformation("No processes reported in the guest.");
+            return "The guest reported no processes.";
+        }
+
+        logger.LogInformation("{Header}", $"{"PID",8}  {"IMAGE",-32} {"COMMIT",12} {"CPU",12}");
+        foreach (HcsCtlGuestProcess process in list.Processes.OrderBy(p => p.ProcessId))
+        {
+            logger.LogInformation("{Row}", string.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "{0,8}  {1,-32} {2,12} {3,12}",
+                process.ProcessId,
+                Truncate(process.ImageName ?? "", 32),
+                FormatBytes(process.MemoryCommitBytes),
+                FormatDuration(process.CpuTime)));
+        }
+
+        return $"{list.Processes.Count} process(es) written to the resource logs.";
+    }
+
+    private static string Truncate(string value, int width) =>
+        value.Length <= width ? value : value[..(width - 1)] + "…";
+
     /// <summary>Stop then start, under one lock so nothing observes the resource mid-swap.</summary>
     public async Task RestartAsync()
     {
@@ -142,6 +244,7 @@ internal sealed class HcsContainerInstance(
             }
 
             HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath);
+            _hcsctl = hcsctl;
 
             // Preflight before anything is acquired. Every condition here is knowable in advance,
             // and each has a fix a developer can act on — which a bare exit code would not.
@@ -219,6 +322,17 @@ internal sealed class HcsContainerInstance(
 
             AllocateEndpoints(created);
             await PublishEndpointsAsync(stopping).ConfigureAwait(false);
+
+            // Boot-scoped like the workload: cancelling the source is what stops the polling, and
+            // a poller left over from a previous boot would publish a dead container's numbers
+            // over a live one's.
+            CancellationTokenSource statsCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+            boot.Ledger.Add("statistics poller", () =>
+            {
+                statsCts.Cancel();
+                statsCts.Dispose();
+            });
+            _ = Task.Run(() => PollStatisticsAsync(hcsctl, created, statsCts.Token), CancellationToken.None);
 
             ThrowIfExitedMidBoot(boot);
 
@@ -303,6 +417,132 @@ internal sealed class HcsContainerInstance(
             endpoint.AllocatedEndpoint = new AllocatedEndpoint(endpoint, address, port);
         }
     }
+
+    /// <summary>How often live statistics are refreshed into the dashboard.</summary>
+    private static readonly TimeSpan StatisticsInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Refreshes the resource's dashboard properties from <c>container stats</c> until the boot
+    /// ends.
+    /// </summary>
+    /// <remarks>
+    /// Failures are logged at debug and the loop continues. A stats call can fail for reasons that
+    /// are not faults — the container is paused, or is mid-teardown — and a poller that gave up on
+    /// the first error would leave the dashboard frozen on stale numbers with no indication why.
+    /// </remarks>
+    private async Task PollStatisticsAsync(HcsCtl hcsctl, HcsCtlContainerCreateDocument created, CancellationToken cancellationToken)
+    {
+        using PeriodicTimer timer = new(StatisticsInterval);
+        do
+        {
+            try
+            {
+                HcsCtlStatsDocument stats = await hcsctl
+                    .StatsAsync(resource.ContainerId, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (stats.Statistics is { } s)
+                {
+                    await notifications.PublishUpdateAsync(resource, snapshot => snapshot with
+                    {
+                        Properties = Describe(created, s),
+                    }).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Reading container statistics failed; will retry.");
+            }
+        }
+        while (await SafeWaitAsync(timer, cancellationToken).ConfigureAwait(false));
+    }
+
+    private static async Task<bool> SafeWaitAsync(PeriodicTimer timer, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The properties the dashboard shows for a container, mirroring what the VM resource
+    /// surfaces. Byte counts and HCS's 100-nanosecond ticks are formatted here rather than shown
+    /// raw — a dashboard row reading <c>1088274432</c> is data, not information.
+    /// </summary>
+    private ImmutableArray<ResourcePropertySnapshot> Describe(
+        HcsCtlContainerCreateDocument created, HcsCtlStatistics stats)
+    {
+        List<ResourcePropertySnapshot> properties =
+        [
+            new("hcs.container.id", resource.ContainerId),
+            new("hcs.container.image", resource.ImageReference),
+            new("hcs.container.layers", created.Chain.Count),
+            new("hcs.container.uptime", FormatDuration(stats.Uptime)),
+        ];
+
+        if (stats.Memory is { } memory)
+        {
+            properties.Add(new("hcs.memory.commit", FormatBytes(memory.CommitBytes)));
+            properties.Add(new("hcs.memory.commitPeak", FormatBytes(memory.CommitPeakBytes)));
+            properties.Add(new("hcs.memory.workingSetPrivate", FormatBytes(memory.PrivateWorkingSetBytes)));
+        }
+
+        if (stats.Processor is { } processor)
+        {
+            properties.Add(new("hcs.cpu.total", FormatDuration(processor.TotalRuntime)));
+        }
+
+        if (stats.Storage is { } storage)
+        {
+            properties.Add(new("hcs.storage.read", $"{storage.ReadCount} ops, {FormatBytes(storage.ReadBytes)}"));
+            properties.Add(new("hcs.storage.write", $"{storage.WriteCount} ops, {FormatBytes(storage.WriteBytes)}"));
+        }
+
+        // Indexed because a container can carry more than one endpoint, and an unindexed name
+        // would silently show only the last.
+        for (int i = 0; i < stats.Network.Count; i++)
+        {
+            HcsCtlNetworkStats network = stats.Network[i];
+            string suffix = stats.Network.Count == 1 ? "" : $".{i}";
+            properties.Add(new($"hcs.network{suffix}.received", FormatBytes(network.BytesReceived)));
+            properties.Add(new($"hcs.network{suffix}.sent", FormatBytes(network.BytesSent)));
+        }
+
+        return [.. properties];
+    }
+
+    private static string FormatBytes(long value)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        double scaled = value;
+        int unit = 0;
+        while (scaled >= 1024 && unit < units.Length - 1)
+        {
+            scaled /= 1024;
+            unit++;
+        }
+
+        return unit == 0
+            ? $"{value} {units[unit]}"
+            : $"{scaled:0.#} {units[unit]}";
+    }
+
+    private static string FormatDuration(TimeSpan value) => value switch
+    {
+        { TotalSeconds: < 1 } => $"{value.TotalMilliseconds:0} ms",
+        { TotalMinutes: < 1 } => $"{value.TotalSeconds:0.#} s",
+        { TotalHours: < 1 } => $"{value.Minutes}m {value.Seconds}s",
+        _ => $"{(int)value.TotalHours}h {value.Minutes}m",
+    };
 
     private async Task PublishEndpointsAsync(CancellationToken cancellationToken)
     {
