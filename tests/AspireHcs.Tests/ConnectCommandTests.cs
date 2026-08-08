@@ -10,7 +10,7 @@ namespace AspireHcs.Tests;
 
 // The connect commands launch a client on the host, so the part worth pinning is what would be
 // spawned and when the button is live. Process.Start itself is NOT covered here or anywhere:
-// seeing a client window appear needs a human, and docs/connect-ux.md records it as unverified
+// seeing a client window appear needs a human, and the workspace's docs/old/AspireHcs/docs/connect-ux.md records it as unverified
 // rather than claiming otherwise.
 [SupportedOSPlatform("windows10.0.17763")]
 public class ConnectCommandTests

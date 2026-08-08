@@ -18,7 +18,7 @@ namespace AspireHcs.IntegrationTests;
 //
 // What it deliberately does NOT cover: ShellExecute putting a client window on the desktop.
 // That needs a human to see a window appear, so it is a manual step recorded in
-// docs/connect-ux.md rather than a claim asserted here.
+// the workspace's docs/old/AspireHcs/docs/connect-ux.md rather than a claim asserted here.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
 {

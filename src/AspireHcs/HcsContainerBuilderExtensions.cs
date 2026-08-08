@@ -20,7 +20,7 @@ public static class HcsContainerBuilderExtensions
     /// There is no isolation option. Hyper-V isolation is the only mode AspireHcs supports and
     /// the only one hcsctl implements — process isolation is refused rather than attempted,
     /// because its gate runs at every container start and no grant satisfies it in a
-    /// UAC-filtered token. See <c>docs/containers.md</c>.
+    /// UAC-filtered token. See the workspace's <c>docs/findings.md</c> (preserved detail: <c>docs/old/AspireHcs/docs/containers.md</c>).
     /// </remarks>
     public static IResourceBuilder<HcsContainerResource> AddHcsContainer(
         this IDistributedApplicationBuilder builder, [ResourceName] string name)
