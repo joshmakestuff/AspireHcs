@@ -42,8 +42,10 @@ internal static class HcsCtlContainers
 
         if (!string.IsNullOrEmpty(network))
         {
-            // The endpoint is created and its address assigned here, at create time — the result
-            // document carries it before the container has even started.
+            // The endpoint is created here, at create time. Whether the result document carries
+            // an address depends on the network: NAT assigns one at create, while an ICS network
+            // leases it only after the guest starts, so the document's list is empty there and
+            // the current address comes from `network endpoints` (#63, hcsctl#43).
             arguments.Add("--network");
             arguments.Add(network);
         }
