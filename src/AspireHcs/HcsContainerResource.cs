@@ -27,7 +27,7 @@ internal readonly record struct HcsContainerMount(string Source, string Target, 
 /// Hyper-V isolation is the only mode, and that is permanent rather than pending. Process
 /// isolation needs an enabled <c>BUILTIN\Administrators</c> SID at <c>PrepareLayer</c>, which runs
 /// at <em>every</em> container start — a group check no user-rights assignment satisfies in a
-/// UAC-filtered token. See <c>docs/containers.md</c>.
+/// UAC-filtered token. See the workspace's <c>docs/findings.md</c> (preserved detail: <c>docs/old/AspireHcs/docs/containers.md</c>).
 /// </remarks>
 public sealed class HcsContainerResource([ResourceName] string name)
     : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString, IResourceWithEnvironment

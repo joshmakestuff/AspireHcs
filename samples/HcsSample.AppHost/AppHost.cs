@@ -13,16 +13,26 @@ var builder = DistributedApplication.CreateBuilder(args);
 string? vhdx = Environment.GetEnvironmentVariable("HCS_TEST_VHDX");
 if (!string.IsNullOrWhiteSpace(vhdx))
 {
-    builder.AddHcsVm("appliance")
-        .WithVhdx(vhdx, copyOnWrite: true)
+    IResourceBuilder<HcsVirtualMachineResource> appliance = builder.AddHcsVm("appliance")
+        .WithVhdx(vhdx)
         .WithMemory(gigabytes: 2)
         .WithProcessorCount(2)
         .WithNatNetwork()
         .WithEndpoint("ssh", targetPort: 22)
-        // Administrator is the account the guest-image fixture ships. There is no matching
-        // WithRdpCommand here because that image does not serve RDP — a connect button that
-        // cannot connect is worse than no button.
-        .WithSshCommand(userName: "Administrator");
+        // The account depends on the image HCS_TEST_VHDX names, so it is configurable and
+        // defaults to the Linux fixture hcs-images builds: Rocky 10, whose kickstart creates
+        // root and nothing else. It was hardcoded to "Administrator" for a Windows fixture, and
+        // stayed that way after the fixture became Rocky — a connect button that cannot connect
+        // is worse than no button, which is also why there is no WithRdpCommand here.
+        .WithSshCommand(userName: Environment.GetEnvironmentVariable("HCS_TEST_VM_USER") ?? "root");
+
+    // The VM path drives hcsctl too now, so it takes the same store the container half does. A
+    // VM store holds differencing disks rather than images, so pointing both at one directory is
+    // fine and keeps a run's leftovers in one place.
+    if (Environment.GetEnvironmentVariable("ASPIREHCS_TEST_STORE") is { Length: > 0 } vmStore)
+    {
+        appliance.WithHcsCtl(storePath: vmStore);
+    }
 }
 
 string? image = Environment.GetEnvironmentVariable("ASPIREHCS_TEST_IMAGE");

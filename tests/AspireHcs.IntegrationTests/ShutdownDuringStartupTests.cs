@@ -2,7 +2,6 @@ using System.Runtime.Versioning;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
-using AspireHcs.Hcn;
 using AspireHcs.Hosting;
 using Xunit;
 using Xunit.Abstractions;
@@ -88,7 +87,11 @@ public sealed class ShutdownDuringStartupTests(ITestOutputHelper output)
         Assert.False(Directory.Exists(workDir), $"copy-on-write work directory leaked: {workDir}");
         // Unfiltered: owners are run-scoped now, and a filtered query that names the wrong
         // owner would make this assertion pass vacuously.
-        Assert.DoesNotContain(vm.HcnEndpointId, HcnClient.EnumerateEndpointIds());
+        Assert.DoesNotContain(vm.VmId, HcsCtlProbes.VmIds(vm.StorePath));
+        if (vm.EndpointId is { } endpointId)
+        {
+            Assert.DoesNotContain(endpointId, HcsCtlProbes.EndpointIds());
+        }
         Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
     }
 }

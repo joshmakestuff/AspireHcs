@@ -1,17 +1,12 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Text.Json.Nodes;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Eventing;
-using AspireHcs.Hcn;
-using AspireHcs.Hcs;
-using AspireHcs.Hcs.Schema;
-using AspireHcs.Storage;
+using AspireHcs.Cli;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Windows.Win32.System.HostComputeSystem;
 
 namespace AspireHcs.Hosting;
 
@@ -24,19 +19,15 @@ namespace AspireHcs.Hosting;
 internal static class HcsVmOrchestrator
 {
     /// <summary>
-    /// Owner prefix for AspireHcs HCN endpoints. Endpoints are created with the run-scoped
-    /// form <see cref="RunHcnOwner"/>; the bare value survives only as the legacy owner of
-    /// endpoints left behind by pre-#12 builds, which are scavenged by VM attachment instead.
+    /// The label key hcsctl stores on every VM this integration creates, holding the AppHost's
+    /// process id. hcsctl never interprets a label — that is the point of one — so this is the
+    /// only thing that says which run a leftover VM belongs to.
     /// </summary>
-    internal const string HcnOwner = "AspireHcs";
+    internal const string OwnerPidLabel = "aspirehcs-apphost-pid";
 
-    /// <summary>
-    /// The Owner written on HCN endpoints this process creates. Scoped to the AppHost process
-    /// so scavenging can attribute every endpoint to a specific run and delete only those whose
-    /// process is gone — a missing VM proves nothing, because every run has a window where its
-    /// endpoint exists before its compute system does (#12).
-    /// </summary>
-    internal static string RunHcnOwner { get; } = $"{HcnOwner}:{Environment.ProcessId}";
+    /// <summary>The value written under <see cref="OwnerPidLabel"/> by this process.</summary>
+    internal static string OwnerPidValue { get; } = Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
+
 
     public static void Register(IResourceBuilder<HcsVirtualMachineResource> builder)
     {
@@ -158,106 +149,95 @@ internal static class HcsVmOrchestrator
     }
 
     /// <summary>
-    /// Deletes AspireHcs-owned HCN endpoints left behind by dead AppHost processes (endpoints
-    /// persist independently of the ephemeral compute systems). Ownership identifies the run:
-    /// an endpoint whose owner pid is alive is never touched, even in the window before its
-    /// compute system exists — the window that made VM-attachment-based scavenging race (#12).
-    /// Static so integration tests can drive it without booting a VM.
+    /// Removes VMs left behind by AppHost processes that are gone.
     /// </summary>
-    internal static async Task ScavengeStaleEndpointsAsync(Guid ownEndpointId, ILogger logger)
+    /// <remarks>
+    /// hcsctl reports facts and holds no opinion about what a dead run is, deliberately: it is a
+    /// CLI that exits, so it has no long-lived process to test a pid against (hcsctl#44). The
+    /// policy lives here, because this process is the one that outlives its VMs.
+    ///
+    /// Removing the VM removes its HCN endpoint with it, which is why endpoint-level scavenging is
+    /// gone entirely: there is no longer a window where an endpoint exists with no VM to attribute
+    /// it to, which is the race that made the old sweep delicate.
+    ///
+    /// Static so tests can drive it without booting anything.
+    /// </remarks>
+    internal static async Task ScavengeAbandonedVmsAsync(
+        HcsCtl hcsctl, string ownVmId, ILogger logger, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        ArgumentNullException.ThrowIfNull(logger);
+
         try
         {
-            // ORDER MATTERS: endpoints are enumerated BEFORE the pid snapshot below. An endpoint
-            // in this list was created by a process that existed before the snapshot, so if that
-            // process is alive now it is in the snapshot — a recycled pid can therefore only make
-            // a dead run look alive (deferring deletion), never a live run look dead. Snapshotting
-            // pids first would open exactly that hole: a run started after the snapshot could have
-            // its endpoint enumerated and its pid judged dead.
-            List<Guid> endpoints = HcnClient.EnumerateEndpointIds();
-            if (endpoints.Count == 0)
+            // ORDER MATTERS, and it is the same argument the endpoint sweep used to make: VMs are
+            // listed BEFORE the pid snapshot. A VM in this list was created by a process that
+            // existed before the snapshot, so if that process is alive now it is in the snapshot.
+            // A recycled pid can therefore only make a dead run look alive, deferring a removal —
+            // never make a live run look dead. Snapshotting pids first would open exactly that
+            // hole: a run started after the snapshot could be listed and then judged dead.
+            HcsCtlVmListDocument listing = await hcsctl.ListVmsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (listing.VirtualMachines.Count == 0)
             {
                 return;
             }
 
-            string running = await HcsClient.EnumerateComputeSystemsAsync().ConfigureAwait(false) ?? "[]";
-            HashSet<string> runtimeIds = new(StringComparer.OrdinalIgnoreCase);
-            foreach (JsonNode? system in JsonNode.Parse(running) as JsonArray ?? [])
-            {
-                if (system?["RuntimeId"]?.GetValue<string>() is { } runtimeId)
-                {
-                    runtimeIds.Add(runtimeId);
-                }
-            }
-
-            // Snapshot of live pids. A recycled pid can make a dead run look alive — that only
-            // defers the deletion to a later scavenge, never deletes a live run's endpoint.
             HashSet<int> livePids = [.. Process.GetProcesses().Select(static p => p.Id)];
 
-            foreach (Guid endpointId in endpoints)
+            foreach (string id in StaleVmIds(listing, ownVmId, livePids.Contains))
             {
-                // Never scavenge our own endpoint: on a Restart it is recreated under the same
-                // id, and between the delete and the new compute system it looks like a leftover.
-                if (endpointId == ownEndpointId)
-                {
-                    continue;
-                }
-
-                // Guarded per endpoint: concurrent AppHosts may sweep the same leftovers, and
-                // losing the delete race on one endpoint must not abort the rest of the sweep.
+                // Guarded per VM: concurrent AppHosts may sweep the same leftovers, and losing the
+                // race on one must not abort the rest of the sweep.
                 try
                 {
-                    string? properties = HcnClient.QueryEndpointProperties(endpointId);
-                    JsonNode? parsed = properties is null ? null : JsonNode.Parse(properties);
-                    string? owner = parsed?["Owner"]?.GetValue<string>();
-                    string? vmRuntimeId = parsed?["VirtualMachine"]?.GetValue<string>();
-                    if (IsStaleAspireHcsEndpoint(owner, vmRuntimeId, livePids.Contains, runtimeIds.Contains))
-                    {
-                        logger.LogInformation(
-                            "Scavenging stale HCN endpoint {EndpointId} (owner '{Owner}') from a dead run.",
-                            endpointId, owner);
-                        HcnClient.DeleteEndpoint(endpointId);
-                    }
+                    logger.LogInformation("Removing virtual machine {VmId}, left by an AppHost that is gone.", id);
+                    await hcsctl.RemoveVmAsync(id, cancellationToken: cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogWarning(ex, "Skipping HCN endpoint {EndpointId} during scavenging.", endpointId);
+                    logger.LogWarning(ex, "Skipping virtual machine {VmId} during scavenging.", id);
                 }
             }
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Scavenging stale HCN endpoints failed; continuing.");
+            logger.LogWarning(ex, "Scavenging abandoned virtual machines failed; continuing.");
         }
     }
 
     /// <summary>
-    /// Decides whether an endpoint is a scavengeable leftover. Deletion requires proof of
-    /// abandonment: an AspireHcs owner whose recorded pid is dead, or the legacy bare owner
-    /// (pre-#12 builds, no pid recorded) with no compute system attached. Anything attached to
-    /// a running compute system, owned by someone else, or unattributable is left alone.
+    /// Picks the VMs that belong to this integration and whose creating AppHost is gone. Pure, so
+    /// the judgement is testable without a store, a host, or a process to kill.
     /// </summary>
-    internal static bool IsStaleAspireHcsEndpoint(
-        string? owner,
-        string? attachedVmRuntimeId,
-        Func<int, bool> isProcessAlive,
-        Func<string, bool> isVmRunning)
+    internal static IEnumerable<string> StaleVmIds(
+        HcsCtlVmListDocument listing, string ownVmId, Func<int, bool> isProcessAlive)
     {
-        if (attachedVmRuntimeId is not null && isVmRunning(attachedVmRuntimeId))
-        {
-            return false;
-        }
+        ArgumentNullException.ThrowIfNull(listing);
+        ArgumentNullException.ThrowIfNull(isProcessAlive);
 
-        if (owner == HcnOwner)
+        foreach (HcsCtlVmRow vm in listing.VirtualMachines)
         {
-            return true;
-        }
+            if (vm.Id is not { } id || string.Equals(id, ownVmId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
 
-        return owner is not null
-            && owner.StartsWith($"{HcnOwner}:", StringComparison.Ordinal)
-            && int.TryParse(owner.AsSpan(HcnOwner.Length + 1), NumberStyles.None, CultureInfo.InvariantCulture, out int pid)
-            && !isProcessAlive(pid);
+            // Someone else's VM in a shared store. No label of ours, so no claim over it.
+            if (!vm.Labels.TryGetValue(OwnerPidLabel, out string? recorded))
+            {
+                continue;
+            }
+
+            // An unparseable pid proves nothing, so it is left alone. The alternative turns a
+            // corrupt label into permission to destroy a running VM.
+            if (int.TryParse(recorded, NumberStyles.None, CultureInfo.InvariantCulture, out int pid)
+                && !isProcessAlive(pid))
+            {
+                yield return id;
+            }
+        }
     }
+
 
     private sealed class InstanceHolder
     {
@@ -294,6 +274,20 @@ internal sealed class HcsVmInstance(
     private int _epoch;
 
     private CancellationToken _appStopping;
+
+    /// <summary>
+    /// How often the exit watch asks hcsctl whether the VM is still there. Two seconds is the
+    /// same cadence hcsctl polls the DHCP lease at, and an exit is not a thing anyone reacts to
+    /// in under a second.
+    /// </summary>
+    private static readonly TimeSpan ExitPollInterval = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// How long to wait for the guest to take a DHCP lease. Measured cold boots land near 16 s;
+    /// this is generous enough for a slow guest and short enough that a guest with no DHCP client
+    /// fails the resource rather than hanging the AppHost.
+    /// </summary>
+    private static readonly TimeSpan AddressTimeout = TimeSpan.FromSeconds(90);
 
     public async Task RunAsync()
     {
@@ -416,39 +410,20 @@ internal sealed class HcsVmInstance(
             // this, WaitFor(...) on an HCS VM would never hold the boot back.
             await eventing.PublishAsync(new BeforeResourceStartedEvent(resource, services), stopping).ConfigureAwait(false);
 
-            string bootDisk = PrepareBootDisk(boot.Ledger);
-            ComputeSystemDocument document = BuildDocument(bootDisk);
+            HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath);
 
-            if (resource.NetworkEnabled)
+            HcsCtlInfoDocument info = await hcsctl.GetInfoAsync(stopping).ConfigureAwait(false);
+            if (HcsCtlPreflight.DescribeBlocker(info) is { } blocker)
             {
-                await HcsVmOrchestrator.ScavengeStaleEndpointsAsync(resource.HcnEndpointId, logger).ConfigureAwait(false);
-                Guid networkId = HcnClient.FindIcsNetworkId();
-                HcnClient.CreateDhcpEndpoint(networkId, resource.HcnEndpointId, resource.MacAddress, HcsVmOrchestrator.RunHcnOwner);
-                boot.Ledger.Add($"HCN endpoint {resource.HcnEndpointId}",
-                    () => HcnClient.DeleteEndpoint(resource.HcnEndpointId));
-                logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on network {NetworkId}",
-                    resource.MacAddress, resource.HcnEndpointId, networkId);
+                throw new InvalidOperationException(blocker);
             }
 
-            HcsClient.GrantVmAccess(resource.VmId, bootDisk);
-            boot.Ledger.Add($"VM access grant on '{bootDisk}'",
-                () => HcsClient.RevokeVmAccess(resource.VmId, bootDisk));
-            if (resource.CopyOnWrite)
-            {
-                string basePath = resource.VhdxPath!;
-                HcsClient.GrantVmAccess(resource.VmId, basePath);
-                boot.Ledger.Add($"VM access grant on '{basePath}'",
-                    () => HcsClient.RevokeVmAccess(resource.VmId, basePath));
-            }
-
-            logger.LogInformation("Creating HCS compute system {VmId} from {Disk} ({MemoryMb} MB, {Processors} vCPU)",
-                resource.VmId, bootDisk, resource.MemoryMb, resource.ProcessorCount);
+            await HcsVmOrchestrator.ScavengeAbandonedVmsAsync(hcsctl, resource.VmId, logger, stopping).ConfigureAwait(false);
 
             // Entered ahead of the compute system so the reverse-order drain stops the pump only
-            // after the VM is gone — the guest's own shutdown output still reaches the logs. The
-            // pump is boot-scoped on purpose: the pipe name is stable across boots, and a pump
-            // left over from a previous boot would attach to the next VM's pipe alongside the
-            // new one.
+            // after the VM is gone -- the guest's own shutdown output still reaches the logs. The
+            // pump is boot-scoped on purpose: the pipe name is stable across boots, and a pump left
+            // over from a previous boot would attach to the next VM's pipe alongside the new one.
             CancellationTokenSource pumpCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             boot.Ledger.Add("serial console pump", () =>
             {
@@ -456,23 +431,53 @@ internal sealed class HcsVmInstance(
                 pumpCts.Dispose();
             });
 
-            HcsComputeSystem vm = await HcsClient.CreateComputeSystemAsync(resource.VmId, document, stopping).ConfigureAwait(false);
-            boot.Ledger.Add($"compute system {resource.VmId}", () => ReleaseVm(boot, vm));
-            vm.Notification += (_, notification) => OnVmNotification(boot, notification);
+            logger.LogInformation("Creating virtual machine {VmId} from {Disk} ({MemoryMb} MB, {Processors} vCPU)",
+                resource.VmId, resource.VhdxPath, resource.MemoryMb, resource.ProcessorCount);
 
-            await vm.StartAsync(stopping).ConfigureAwait(false);
-            _ = Task.Run(() => SerialConsolePump.RunAsync(resource.SerialPipeName, logger, pumpCts.Token), CancellationToken.None);
+            // One call makes the differencing disk, grants the VM access to it and the base, builds
+            // the compute system, and attaches a DHCP endpoint. It does not start it. Everything it
+            // made is released by `vm rm`, including from a later process -- so the ledger entry is
+            // registered immediately, before anything else can fail.
+            boot.Ledger.Add($"virtual machine {resource.VmId}", () => RemoveVm(boot, hcsctl));
 
-            logger.LogInformation("VM started; waiting for the guest OS to become ready...");
-            await vm.WaitForGuestReadyAsync(resource.MemoryMb, TimeSpan.FromMinutes(2), stopping).ConfigureAwait(false);
-            logger.LogInformation("Guest OS is ready.");
-            ThrowIfExitedMidBoot(boot);
+            HcsCtlVmCreateDocument created = await hcsctl.CreateVmAsync(
+                resource.VmId,
+                RequireBootDisk(),
+                resource.ProcessorCount,
+                resource.MemoryMb,
+                network: resource.NetworkEnabled ? HcsCtlVirtualMachines.DefaultNetwork : null,
+                serialPipe: @"\\.\pipe\" + resource.SerialPipeName,
+                labels: new Dictionary<string, string> { [HcsVmOrchestrator.OwnerPidLabel] = HcsVmOrchestrator.OwnerPidValue },
+                progress: new Progress<string>(line => logger.LogDebug("hcsctl: {Line}", line)),
+                cancellationToken: stopping).ConfigureAwait(false);
 
+            resource.EndpointId = created.EndpointId;
+            resource.MacAddress = created.MacAddress;
             if (resource.NetworkEnabled)
             {
-                await AllocateEndpointsAsync(endpoints, stopping).ConfigureAwait(false);
+                logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on {Network}",
+                    created.MacAddress, created.EndpointId, created.Network);
+            }
+
+            await hcsctl.StartVmAsync(resource.VmId, cancellationToken: stopping).ConfigureAwait(false);
+            _ = Task.Run(() => SerialConsolePump.RunAsync(resource.SerialPipeName, logger, pumpCts.Token), CancellationToken.None);
+
+            // The DHCP lease IS the readiness gate, and it is the only one there is.
+            //
+            // There used to be a balloon-resize probe here claiming to detect guest-ready. It was
+            // measured to be a no-op: the lease wait was doing the work all along. Nothing was lost
+            // by deleting it, and a VM with no network genuinely has no readiness signal short of
+            // asking the guest agent — which is `hcsctl guest info`, and a separate concern.
+            if (resource.NetworkEnabled)
+            {
+                logger.LogInformation("VM started; waiting for the guest to take a DHCP lease...");
+                await AllocateEndpointsAsync(hcsctl, endpoints, stopping).ConfigureAwait(false);
                 ThrowIfExitedMidBoot(boot);
             }
+
+            // Started, but nothing has watched the VM since. hcsctl has no verb that blocks until
+            // a compute system exits, so the exit watch is a poll rather than a native callback.
+            StartExitWatch(boot, hcsctl, pumpCts.Token);
 
             ThrowIfExitedMidBoot(boot);
 
@@ -574,15 +579,19 @@ internal sealed class HcsVmInstance(
     private void DrainCurrentBoot() => Interlocked.Exchange(ref _current, null)?.Ledger.Drain();
 
     /// <summary>
-    /// Best-effort graceful release of the compute system: try a clean guest shutdown briefly,
-    /// then terminate, then close the handle. Even if this never runs (crash, kill),
-    /// ShouldTerminateOnLastHandleClosed reaps the VM and the next run's scavenger reaps the
-    /// endpoint.
+    /// Removes the VM and everything hcsctl made for it: the compute system, the differencing
+    /// disk, the HCN endpoint and the store record.
     /// </summary>
-    private void ReleaseVm(BootRecord boot, HcsComputeSystem vm)
+    /// <remarks>
+    /// A graceful stop is attempted first so the guest can flush and its shutdown output reaches
+    /// the console pump, then <c>vm rm --force</c> takes the rest whatever happened. Unlike the
+    /// interop this replaced, nothing here depends on a handle: if this process dies without
+    /// running it, the VM survives and the next run's scavenger removes it by label.
+    /// </remarks>
+    private void RemoveVm(BootRecord boot, HcsCtl hcsctl)
     {
-        // Retires the epoch first: the termination below raises an exit notification that
-        // would otherwise fight whatever state the caller is about to publish.
+        // Retires the epoch first: the exit watch would otherwise see the VM disappear and publish
+        // Exited over whatever state the caller is about to publish.
         Interlocked.Increment(ref _epoch);
 
         try
@@ -590,36 +599,84 @@ internal sealed class HcsVmInstance(
             // A guest that already exited on its own has nothing left to shut down.
             if (!boot.Exited)
             {
-                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(20));
                 try
                 {
-                    vm.ShutdownAsync(readyTimeout: TimeSpan.FromSeconds(10), cts.Token).GetAwaiter().GetResult();
+                    hcsctl.StopVmAsync(resource.VmId, force: false, cts.Token).GetAwaiter().GetResult();
                 }
                 catch (Exception)
                 {
-                    vm.TerminateAsync(CancellationToken.None).GetAwaiter().GetResult();
+                    // A guest with no shutdown integration service cannot be asked. rm terminates.
                 }
             }
         }
-        catch (Exception)
-        {
-            // Handle close below still guarantees termination.
-        }
         finally
         {
-            vm.Dispose();
+            try
+            {
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(60));
+                hcsctl.RemoveVmAsync(resource.VmId, cancellationToken: cts.Token).GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                // Reported, not swallowed: this is the one path that deletes the HCN endpoint, and
+                // an endpoint that outlives its run is a leak that outlives the process too.
+                logger.LogWarning(ex, "Removing virtual machine {VmId} failed; the next run will scavenge it.", resource.VmId);
+            }
         }
     }
 
-    private void OnVmNotification(BootRecord boot, HcsNotification notification)
-    {
-        if (notification.Type != HCS_EVENT_TYPE.HcsEventSystemExited)
+    /// <summary>
+    /// Watches for the guest exiting on its own, by polling.
+    /// </summary>
+    /// <remarks>
+    /// The interop this replaced got an <c>HcsEventSystemExited</c> callback the instant a VM
+    /// died. hcsctl has no verb that blocks until a compute system exits, so this polls
+    /// <c>vm ls</c> instead, and an exit is noticed within <see cref="ExitPollInterval"/> rather
+    /// than immediately. That latency shows in the dashboard and nowhere else: cleanup is still
+    /// driven by the same ledger, and a stop the user asked for does not wait on this.
+    /// </remarks>
+    private void StartExitWatch(BootRecord boot, HcsCtl hcsctl, CancellationToken cancellationToken)
+        => _ = Task.Run(async () =>
         {
-            return;
-        }
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    await Task.Delay(ExitPollInterval, cancellationToken).ConfigureAwait(false);
 
+                    HcsCtlVmListDocument listing = await hcsctl.ListVmsAsync(cancellationToken: cancellationToken)
+                        .ConfigureAwait(false);
+                    string? state = listing.VirtualMachines
+                        .FirstOrDefault(v => string.Equals(v.Id, resource.VmId, StringComparison.OrdinalIgnoreCase))?.State;
+
+                    // Absent from the store means someone else removed it; stopped means the guest
+                    // powered itself off. Both are the VM being gone. A blank or unknown state is
+                    // NOT: hcsctl says "created" before a first start and "unknown" when it could
+                    // not tell, and treating either as an exit would kill a live VM's boot.
+                    if (state is null || state == HcsCtlVmState.Stopped)
+                    {
+                        OnVmExited(boot, state is null ? "removed" : "stopped");
+                        return;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // The boot was drained; this watch belongs to it and goes with it.
+            }
+            catch (Exception ex)
+            {
+                // A watch that dies must not take the VM with it, but a silent one would leave the
+                // dashboard showing Running forever.
+                logger.LogWarning(ex, "The exit watch for '{Name}' stopped; its state may go stale.", resource.Name);
+            }
+        }, CancellationToken.None);
+
+    private void OnVmExited(BootRecord boot, string how)
+    {
         // A VM we already replaced or are already tearing down has no business reporting the
-        // resource's state — ReleaseVm retires the epoch before it terminates anything.
+        // resource's state -- RemoveVm retires the epoch before it stops anything.
         if (Volatile.Read(ref _epoch) != boot.Epoch)
         {
             return;
@@ -629,7 +686,7 @@ internal sealed class HcsVmInstance(
         // Start, and Start must be able to tell a live boot from a corpse awaiting cleanup.
         boot.Exited = true;
 
-        logger.LogInformation("VM exited: {Detail}", notification.EventData ?? "(no detail)");
+        logger.LogInformation("VM exited ({How}).", how);
         _ = notifications.PublishUpdateAsync(resource, s => s with
         {
             State = KnownResourceStates.Exited,
@@ -637,11 +694,12 @@ internal sealed class HcsVmInstance(
             Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
         });
 
-        // The exited compute system's handle, endpoint, grants and work directory are all still
-        // held; release them without racing a lifecycle command over the same resources. This
-        // runs on a native callback thread and must not block on the gate itself.
+        // The store record, disk and endpoint are all still there; release them without racing a
+        // lifecycle command over the same resources.
         _ = Task.Run(() => CleanUpAfterUnexpectedExitAsync(boot));
     }
+
+
 
     private async Task CleanUpAfterUnexpectedExitAsync(BootRecord boot)
     {
@@ -683,14 +741,28 @@ internal sealed class HcsVmInstance(
     }
 
     /// <summary>
-    /// Waits for the guest's DHCP lease to surface in the HCN endpoint properties (HNS learns
-    /// it against our MAC — verified empirically; typically seconds after guest-ready), then
-    /// resolves every declared endpoint at that address.
+    /// Waits for the guest's DHCP lease and resolves every declared endpoint at that address.
     /// </summary>
-    private async Task AllocateEndpointsAsync(List<EndpointAnnotation> endpoints, CancellationToken cancellationToken)
+    /// <remarks>
+    /// The address is not knowable before the guest boots. An HCN endpoint carries none when it is
+    /// created, none when it is attached to a NIC, and none while the VM runs without a guest, so
+    /// this is a wait and not a read (hcsctl#43). Measured against a Rocky 10 guest: about 16 s on
+    /// a cold boot and 10 s on a restart.
+    /// </remarks>
+    private async Task AllocateEndpointsAsync(
+        HcsCtl hcsctl, List<EndpointAnnotation> endpoints, CancellationToken cancellationToken)
     {
-        string ip = await WaitForLeasedIpAsync(TimeSpan.FromSeconds(90), cancellationToken).ConfigureAwait(false);
-        logger.LogInformation("Guest leased {Ip}; publishing {Count} endpoint(s).", ip, endpoints.Count);
+        HcsCtlVmAddressDocument leased = await hcsctl
+            .WaitForAddressAsync(resource.VmId, AddressTimeout, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        // hcsctl reports CIDR; an endpoint wants the bare address.
+        string ip = leased.Addresses.FirstOrDefault()?.Split('/')[0]
+            ?? throw new InvalidOperationException(
+                $"hcsctl reported no address for '{resource.Name}' despite succeeding.");
+
+        logger.LogInformation("Guest leased {Ip} after {Elapsed} ms; publishing {Count} endpoint(s).",
+            ip, leased.WaitedMs, endpoints.Count);
 
         foreach (EndpointAnnotation endpoint in endpoints)
         {
@@ -703,7 +775,7 @@ internal sealed class HcsVmInstance(
             endpoint.AllocatedEndpoint = new AllocatedEndpoint(endpoint, ip, port);
         }
 
-        // Drives the orchestrator's URL processing — WithUrl callbacks and the dashboard's URL list
+        // Drives the orchestrator's URL processing -- WithUrl callbacks and the dashboard's URL list
         // both hang off this event, and nothing raises it for a non-DCP resource.
         await eventing.PublishAsync(new ResourceEndpointsAllocatedEvent(resource, services), cancellationToken).ConfigureAwait(false);
 
@@ -715,103 +787,25 @@ internal sealed class HcsVmInstance(
         }).ConfigureAwait(false);
     }
 
-    private async Task<string> WaitForLeasedIpAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    /// <summary>
+    /// The boot disk, checked here so a missing one is a clear message rather than an hcsctl exit
+    /// 64 about <c>--vhdx</c>. hcsctl makes the differencing child itself and removes it with the
+    /// VM, so nothing on this side manages a work directory any more.
+    /// </summary>
+    private string RequireBootDisk()
     {
-        DateTime deadline = DateTime.UtcNow + timeout;
-        while (true)
-        {
-            string? properties = HcnClient.QueryEndpointProperties(resource.HcnEndpointId);
-            string? ip = properties is null ? null : JsonNode.Parse(properties)?["IPAddress"]?.GetValue<string>();
-            if (ip is not null)
-            {
-                return ip;
-            }
-
-            if (DateTime.UtcNow >= deadline)
-            {
-                throw new TimeoutException(
-                    $"The guest of '{resource.Name}' did not obtain a DHCP lease within {timeout}. " +
-                    "Ensure the guest image configures its NIC for DHCP.");
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private string PrepareBootDisk(BootLedger ledger)
-    {
-        string? basePath = resource.VhdxPath;
-        if (string.IsNullOrEmpty(basePath))
+        if (string.IsNullOrEmpty(resource.VhdxPath))
         {
             throw new InvalidOperationException(
                 $"Resource '{resource.Name}' has no boot disk. Call WithVhdx(...) with the path to a bootable Gen2/UEFI VHDX.");
         }
-        if (!File.Exists(basePath))
+        if (!File.Exists(resource.VhdxPath))
         {
-            throw new FileNotFoundException($"Boot VHDX for resource '{resource.Name}' not found.", basePath);
+            throw new FileNotFoundException($"Boot VHDX for resource '{resource.Name}' not found.", resource.VhdxPath);
         }
-
-        if (!resource.CopyOnWrite)
-        {
-            return basePath;
-        }
-
-        string workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", resource.VmId);
-        Directory.CreateDirectory(workDir);
-        // Entered before the differencing disk is created so even a failure inside
-        // CreateDifferencing leaves nothing behind.
-        ledger.Add($"work directory '{workDir}'", () =>
-        {
-            if (Directory.Exists(workDir))
-            {
-                Directory.Delete(workDir, recursive: true);
-            }
-        });
-
-        string diffPath = Path.Combine(workDir, "boot-diff.vhdx");
-
-        // A restart boots from a fresh differencing disk, discarding the previous run's writes —
-        // the same contract as a container restart, and the reason the base image is never touched.
-        if (File.Exists(diffPath))
-        {
-            File.Delete(diffPath);
-        }
-
-        VirtualDisk.CreateDifferencing(basePath, diffPath);
-        return diffPath;
+        return resource.VhdxPath;
     }
 
-    private ComputeSystemDocument BuildDocument(string bootDisk) => new()
-    {
-        // 2.5 is required for Services.Shutdown (graceful shutdown); silently ignored below that.
-        SchemaVersion = new() { Major = 2, Minor = 5 },
-        Owner = "AspireHcs",
-        ShouldTerminateOnLastHandleClosed = true,
-        VirtualMachine = new()
-        {
-            Chipset = new() { Uefi = new() { BootThis = new() { DevicePath = "Primary disk", DiskNumber = 0 } } },
-            ComputeTopology = new()
-            {
-                Memory = new() { SizeInMB = resource.MemoryMb },
-                Processor = new() { Count = resource.ProcessorCount },
-            },
-            Devices = new()
-            {
-                Scsi = new()
-                {
-                    ["Primary disk"] = new() { Attachments = new() { ["0"] = new() { Path = bootDisk } } },
-                },
-                ComPorts = new()
-                {
-                    ["0"] = new() { NamedPipe = @"\\.\pipe\" + resource.SerialPipeName },
-                },
-                NetworkAdapters = resource.NetworkEnabled
-                    ? new() { ["ext"] = new() { EndpointId = resource.HcnEndpointId.ToString(), MacAddress = resource.MacAddress } }
-                    : null,
-            },
-            Services = new() { Shutdown = new() },
-        },
-    };
 
     /// <summary>
     /// One boot's identity and holdings. The epoch stamps notifications so a replaced VM cannot

@@ -10,7 +10,6 @@
     <Project Path="samples/HcsSample.AppHost/HcsSample.AppHost.csproj" />
   </Folder>
   <Folder Name="/spikes/">
-    <Project Path="spikes/GuestReadinessProbeSpike/GuestReadinessProbeSpike.csproj" />
     <Project Path="spikes/HcsBootSpike/HcsBootSpike.csproj" />
   </Folder>
 </Solution>

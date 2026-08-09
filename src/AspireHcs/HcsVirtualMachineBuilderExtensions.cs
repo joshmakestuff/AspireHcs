@@ -42,15 +42,31 @@ public static class HcsVirtualMachineBuilderExtensions
         return vm;
     }
 
-    /// <summary>Sets the boot disk. <paramref name="copyOnWrite"/> (default) boots a differencing child, leaving the base VHDX untouched.</summary>
+    /// <summary>
+    /// Sets the boot disk: a bootable Gen2/UEFI VHDX. The VM always boots a differencing child of
+    /// it, so the image itself is never written to and can back several resources at once.
+    /// </summary>
     public static IResourceBuilder<HcsVirtualMachineResource> WithVhdx(
-        this IResourceBuilder<HcsVirtualMachineResource> builder, string path, bool copyOnWrite = true)
+        this IResourceBuilder<HcsVirtualMachineResource> builder, string path)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
         builder.Resource.VhdxPath = Path.GetFullPath(path);
-        builder.Resource.CopyOnWrite = copyOnWrite;
+        return builder;
+    }
+
+    /// <summary>
+    /// Points this resource at a specific <c>hcsctl.exe</c> and store, instead of discovering the
+    /// binary and using hcsctl's per-user default store.
+    /// </summary>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithHcsCtl(
+        this IResourceBuilder<HcsVirtualMachineResource> builder, string? executablePath = null, string? storePath = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        builder.Resource.HcsCtlPath = executablePath;
+        builder.Resource.StorePath = storePath;
         return builder;
     }
 
