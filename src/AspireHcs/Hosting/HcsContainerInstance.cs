@@ -274,9 +274,21 @@ internal sealed class HcsContainerInstance(
             // Resolved before anything is created. An empty value is rejected here (#49), and a
             // resource that cannot be configured correctly should fail before it has acquired a
             // compute system and a scratch layer to clean up.
-            IReadOnlyDictionary<string, string> environment = await ContainerEnvironment
+            IReadOnlyDictionary<string, string> environment = await GuestEnvironment
                 .ResolveAsync(resource, services.GetRequiredService<DistributedApplicationExecutionContext>(), stopping)
                 .ConfigureAwait(false);
+
+            // WithReference hands the guest the same values a host process would get — endpoints
+            // on the host's loopback, which no HCS guest can reach (#58). Redirected before the
+            // container exists, so an injected value never names an address nothing answers at:
+            // the relay forward is standing by the time the workload can read the variable (#62).
+            environment = await GuestReferences.RedirectLoopbackAsync(
+                resource.Name,
+                resource.NetworkName,
+                environment,
+                hcsctl.ListNetworksAsync,
+                services.GetRequiredService<DockerRelay>().EnsurePublishedAsync,
+                stopping).ConfigureAwait(false);
 
             logger.LogInformation("Creating container {ContainerId} from {Image} ({MemoryMb} MB, {Processors} vCPU)",
                 resource.ContainerId, image, resource.MemoryMb, resource.ProcessorCount);

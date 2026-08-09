@@ -4,8 +4,9 @@ using Aspire.Hosting.ApplicationModel;
 namespace AspireHcs.Hosting;
 
 /// <summary>
-/// Resolves a container resource's <c>WithEnvironment</c> annotations into the name/value pairs
-/// hcsctl takes as <c>--env</c>.
+/// Resolves a resource's <c>WithEnvironment</c> annotations — <c>WithReference</c> compiles down
+/// to these — into name/value pairs. Containers pass them to hcsctl as <c>--env</c>; VMs write
+/// them to <c>/etc/aspire.env</c> in the guest.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,11 +22,16 @@ namespace AspireHcs.Hosting;
 /// loudly instead of dropping.
 /// </para>
 /// </remarks>
-internal static class ContainerEnvironment
+internal static class GuestEnvironment
 {
     /// <summary>
     /// Runs the resource's environment callbacks and resolves every value to a string.
     /// </summary>
+    /// <remarks>
+    /// A referenced endpoint that is not allocated yet does not fail here: Aspire's value
+    /// providers wait for the allocation, so a consumer that boots before DCP has published its
+    /// proxies simply resolves late, under the caller's cancellation token.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">A value resolved to null or empty.</exception>
     public static async Task<IReadOnlyDictionary<string, string>> ResolveAsync(
         IResource resource,
@@ -66,6 +72,50 @@ internal static class ContainerEnvironment
 
         return resolved;
     }
+
+    /// <summary>
+    /// Renders the resolved environment as an env file — one <c>NAME=value</c> line per variable,
+    /// the format <c>/etc/aspire.env</c> promises a VM guest's workload.
+    /// </summary>
+    /// <remarks>
+    /// A line-oriented format cannot carry line breaks, and a name containing <c>=</c> would split
+    /// wrong on read. Both are rejected here, by name, rather than silently writing a file whose
+    /// reader would see different variables than the model set — the same honesty rule as the
+    /// empty-value check above.
+    /// </remarks>
+    public static string BuildEnvFile(string resourceName, IReadOnlyDictionary<string, string> environment)
+    {
+        ArgumentNullException.ThrowIfNull(environment);
+
+        System.Text.StringBuilder file = new();
+        foreach ((string name, string value) in environment)
+        {
+            if (name.AsSpan().ContainsAny(NameBreakers))
+            {
+                throw new InvalidOperationException(
+                    $"Environment variable '{name}' on resource '{resourceName}' has a name an env file " +
+                    "cannot carry: '=' or a line break would change which variables the guest reads back.");
+            }
+
+            if (value.AsSpan().ContainsAny(LineBreakers))
+            {
+                throw new InvalidOperationException(
+                    $"Environment variable '{name}' on resource '{resourceName}' has a value containing a " +
+                    "line break, which /etc/aspire.env cannot carry: each line is one variable, so the guest " +
+                    "would read a truncated value plus stray lines.");
+            }
+
+            file.Append(name).Append('=').Append(value).Append('\n');
+        }
+
+        return file.ToString();
+    }
+
+    private static readonly System.Buffers.SearchValues<char> NameBreakers =
+        System.Buffers.SearchValues.Create("=\r\n");
+
+    private static readonly System.Buffers.SearchValues<char> LineBreakers =
+        System.Buffers.SearchValues.Create("\r\n");
 
     /// <summary>
     /// Aspire's callbacks put strings, parameters, endpoint references and expressions into the

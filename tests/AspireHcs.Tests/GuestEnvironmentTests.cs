@@ -13,7 +13,7 @@ namespace AspireHcs.Tests;
 // Aspire makes empty values likely rather than exotic — an unresolved parameter or a
 // not-yet-allocated endpoint reference produces one — so the decision is to fail loudly.
 [SupportedOSPlatform("windows10.0.17763")]
-public class ContainerEnvironmentTests
+public class GuestEnvironmentTests
 {
     private static DistributedApplicationExecutionContext RunMode => new(DistributedApplicationOperation.Run);
 
@@ -23,7 +23,7 @@ public class ContainerEnvironmentTests
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
         IResourceBuilder<HcsContainerResource> container = builder.AddHcsContainer("worker");
 
-        Assert.Empty(await ContainerEnvironment.ResolveAsync(container.Resource, RunMode));
+        Assert.Empty(await GuestEnvironment.ResolveAsync(container.Resource, RunMode));
     }
 
     [Fact]
@@ -35,7 +35,7 @@ public class ContainerEnvironmentTests
             .WithEnvironment("COUNT", "3");
 
         IReadOnlyDictionary<string, string> resolved =
-            await ContainerEnvironment.ResolveAsync(container.Resource, RunMode);
+            await GuestEnvironment.ResolveAsync(container.Resource, RunMode);
 
         Assert.Equal("hello", resolved["GREETING"]);
         Assert.Equal("3", resolved["COUNT"]);
@@ -56,7 +56,7 @@ public class ContainerEnvironmentTests
             .WithEnvironment("AWKWARD", value);
 
         IReadOnlyDictionary<string, string> resolved =
-            await ContainerEnvironment.ResolveAsync(container.Resource, RunMode);
+            await GuestEnvironment.ResolveAsync(container.Resource, RunMode);
 
         Assert.Equal(value, resolved["AWKWARD"]);
     }
@@ -69,7 +69,7 @@ public class ContainerEnvironmentTests
             .WithEnvironment("EMPTY", "");
 
         InvalidOperationException thrown = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => ContainerEnvironment.ResolveAsync(container.Resource, RunMode));
+            () => GuestEnvironment.ResolveAsync(container.Resource, RunMode));
 
         // The message must name the variable and the resource; "an environment variable was
         // empty" would leave a developer grepping their AppHost.
@@ -87,7 +87,7 @@ public class ContainerEnvironmentTests
         container.WithEnvironment(context => context.EnvironmentVariables["NOTHING"] = null!);
 
         InvalidOperationException thrown = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => ContainerEnvironment.ResolveAsync(container.Resource, RunMode));
+            () => GuestEnvironment.ResolveAsync(container.Resource, RunMode));
 
         Assert.Contains("NOTHING", thrown.Message);
     }
@@ -104,8 +104,49 @@ public class ContainerEnvironmentTests
             .WithEnvironment("ConnectionStrings__db", secret);
 
         IReadOnlyDictionary<string, string> resolved =
-            await ContainerEnvironment.ResolveAsync(container.Resource, RunMode);
+            await GuestEnvironment.ResolveAsync(container.Resource, RunMode);
 
         Assert.Equal("Server=localhost;Db=orders", resolved["ConnectionStrings__db"]);
+    }
+
+    // The env-file rendering VM delivery writes to /etc/aspire.env (#62). Line-oriented: one
+    // NAME=value per line, LF endings — what a POSIX shell or an EnvironmentFile= reader parses.
+    [Fact]
+    public void The_env_file_is_one_variable_per_line()
+    {
+        string file = GuestEnvironment.BuildEnvFile("rockyvm", new Dictionary<string, string>
+        {
+            ["ConnectionStrings__cache"] = "172.18.176.1:55007,password=hunter2",
+            ["GREETING"] = "hello",
+        });
+
+        Assert.Equal("ConnectionStrings__cache=172.18.176.1:55007,password=hunter2\nGREETING=hello\n", file);
+    }
+
+    // A value with a line break would truncate on read and leave stray lines the guest parses as
+    // other variables. Rejected by name rather than written wrong.
+    [Fact]
+    public void A_value_with_a_line_break_is_rejected_naming_the_variable()
+    {
+        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(
+            () => GuestEnvironment.BuildEnvFile("rockyvm", new Dictionary<string, string>
+            {
+                ["BROKEN"] = "line1\nline2",
+            }));
+
+        Assert.Contains("BROKEN", thrown.Message);
+        Assert.Contains("rockyvm", thrown.Message);
+    }
+
+    // '=' in a name splits wrong on read: the guest would see a different variable holding the
+    // remainder. Aspire does not produce such names, but WithEnvironment accepts any string.
+    [Fact]
+    public void A_name_with_an_equals_sign_is_rejected()
+    {
+        Assert.Throws<InvalidOperationException>(
+            () => GuestEnvironment.BuildEnvFile("rockyvm", new Dictionary<string, string>
+            {
+                ["BAD=NAME"] = "value",
+            }));
     }
 }

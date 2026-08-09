@@ -158,6 +158,6 @@ internal static class HcsCtlVirtualMachines
     /// .NET's own round-trip formats are not durations hcsctl accepts and a rejected one is exit
     /// 64 — an argument bug dressed up as a configuration error.
     /// </summary>
-    private static string FormatDuration(TimeSpan timeout)
+    internal static string FormatDuration(TimeSpan timeout)
         => $"{Math.Max(1, (long)Math.Ceiling(timeout.TotalSeconds)).ToString(CultureInfo.InvariantCulture)}s";
 }

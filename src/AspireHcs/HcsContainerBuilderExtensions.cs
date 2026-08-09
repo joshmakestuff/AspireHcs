@@ -2,6 +2,7 @@ using AspireHcs;
 using AspireHcs.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 // Extensions live in Aspire.Hosting so they are in scope as soon as the package is referenced.
@@ -32,6 +33,11 @@ public static class HcsContainerBuilderExtensions
             // Fail fast at model-build time, not at container-start time, per the package contract.
             HcsPlatform.ThrowIfUnsupported();
         }
+
+        // One relay per AppHost session, shared by every HCS consumer — the multiplexing shape
+        // #62 chose. Registered here so the instance can resolve it; it starts nothing until a
+        // reference actually needs forwarding.
+        builder.Services.TryAddSingleton<DockerRelay>();
 
         HcsContainerResource resource = new(name);
 

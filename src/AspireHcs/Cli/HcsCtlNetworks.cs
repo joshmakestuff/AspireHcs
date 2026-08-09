@@ -29,4 +29,21 @@ internal static class HcsCtlNetworks
         return hcsctl.InvokeAsync(arguments,
             HcsCtlJsonContext.Default.HcsCtlNetworkEndpointsDocument, cancellationToken: cancellationToken);
     }
+
+    /// <summary>
+    /// Lists the host's HNS networks with their subnets, read live from HCN.
+    /// </summary>
+    /// <remarks>
+    /// This is where a guest's gateway comes from (#62): the subnet's base address plus one is
+    /// the address every guest on the network routes host-bound traffic through. Read per
+    /// consumer rather than cached, because networks are host state that another tool can change
+    /// under a running AppHost.
+    /// </remarks>
+    public static Task<HcsCtlNetworkListDocument> ListNetworksAsync(
+        this HcsCtl hcsctl, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        return hcsctl.InvokeAsync(["network", "ls"],
+            HcsCtlJsonContext.Default.HcsCtlNetworkListDocument, cancellationToken: cancellationToken);
+    }
 }

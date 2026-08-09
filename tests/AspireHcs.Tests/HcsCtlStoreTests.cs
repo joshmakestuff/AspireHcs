@@ -81,6 +81,35 @@ public class HcsCtlStoreTests
                 HcsCtlJsonContext.Default.HcsCtlResultDocument));
     }
 
+    // The guest group is excluded too: a guest is addressed by VM id over hvsocket, and hcsctl
+    // rejects --store there with exit 64. If the exclusion were missing, this rejection would be
+    // "unknown option --store" — instead the seam must strip it and let the verb complain about
+    // what is actually missing. No VM is needed: the pin is entirely in argument handling.
+    [SkippableFact]
+    public async Task The_guest_group_runs_even_when_a_store_is_configured()
+    {
+        HcsCtl hcsctl = new(RequireBinary(), CorruptStore());
+
+        HcsCtlUsageException thrown = await Assert.ThrowsAsync<HcsCtlUsageException>(
+            () => hcsctl.InvokeAsync(["guest", "exec"], HcsCtlJsonContext.Default.HcsCtlGuestExecDocument));
+
+        Assert.Contains("--vmid", thrown.Message);
+        Assert.DoesNotContain("--store", thrown.Message);
+    }
+
+    // The other side of the same pin: the exclusion exists because hcsctl really does reject it.
+    [SkippableFact]
+    public async Task The_guest_group_still_rejects_an_explicit_store()
+    {
+        HcsCtl hcsctl = new(RequireBinary());
+
+        HcsCtlUsageException thrown = await Assert.ThrowsAsync<HcsCtlUsageException>(
+            () => hcsctl.InvokeAsync(["guest", "exec", "--store", CorruptStore()],
+                HcsCtlJsonContext.Default.HcsCtlGuestExecDocument));
+
+        Assert.Contains("--store", thrown.Message);
+    }
+
     // The images staged for #39. Reading them needs no elevation — only the import did, and that
     // already happened out of band.
     [SkippableFact]

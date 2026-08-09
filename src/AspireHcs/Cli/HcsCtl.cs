@@ -32,7 +32,7 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
     /// every other group accepts it, and passing it to one of these is exit 64. Pinned by
     /// <c>HcsCtlStoreTests</c> so a change in hcsctl breaks a test rather than a run.
     /// </summary>
-    private static readonly string[] GroupsWithoutStore = ["network"];
+    private static readonly string[] GroupsWithoutStore = ["network", "guest"];
 
     private HcsCtlInfoDocument? _info;
 

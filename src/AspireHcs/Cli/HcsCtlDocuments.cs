@@ -203,6 +203,77 @@ internal sealed record HcsCtlNetworkEndpointRow
     public string? MacAddress { get; init; }
 }
 
+/// <summary>
+/// <c>hcsctl network ls</c> — the host's HNS networks, read live from HCN.
+/// </summary>
+/// <remarks>
+/// What the reference relay derives the guest-visible gateway from (#62): a guest on an HNS
+/// network routes host-bound traffic through the network's gateway, which is the subnet's base
+/// address plus one — <c>172.18.176.1</c> for the Default Switch's <c>172.18.176.0/20</c>,
+/// measured in the #59 chain. The address is derived here rather than hardcoded because the
+/// subnet is the host's to assign, and it differs between hosts.
+/// </remarks>
+internal sealed record HcsCtlNetworkListDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("networks")]
+    public IReadOnlyList<HcsCtlNetworkRow> Networks { get => field ?? []; init; } = [];
+}
+
+/// <summary>One HNS network.</summary>
+internal sealed record HcsCtlNetworkRow
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    /// <summary>HNS's network flavor: <c>ICS</c>, <c>NAT</c>, <c>Transparent</c>, ...</summary>
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+
+    /// <summary>CIDR strings, e.g. <c>172.18.176.0/20</c>. Empty for a Transparent network.</summary>
+    [JsonPropertyName("subnets")]
+    public IReadOnlyList<string> Subnets { get => field ?? []; init; } = [];
+
+    [JsonPropertyName("endpoints")]
+    public int EndpointCount { get; init; }
+}
+
+/// <summary><c>hcsctl guest exec</c> — one command run inside a VM guest, over hvsocket.</summary>
+internal sealed record HcsCtlGuestExecDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("vmId")]
+    public string? VmId { get; init; }
+
+    /// <summary>The command line that ran, echoed back for attribution.</summary>
+    [JsonPropertyName("ran")]
+    public string? Ran { get; init; }
+
+    /// <summary>
+    /// The guest process's own exit code — never hcsctl's, which reports the two separately for
+    /// exactly this reason. <c>-1</c> when the guest never produced one.
+    /// </summary>
+    [JsonPropertyName("exitCode")]
+    public int ExitCode { get; init; }
+
+    [JsonPropertyName("timedOut")]
+    public bool TimedOut { get; init; }
+
+    /// <summary>The agent's error text for a process that ended abnormally, when there is one.</summary>
+    [JsonPropertyName("detail")]
+    public string? Detail { get; init; }
+
+    [JsonPropertyName("elapsedMs")]
+    public long ElapsedMs { get; init; }
+}
+
 /// <summary><c>hcsctl container ls</c> — the store and HCS reconciled.</summary>
 internal sealed record HcsCtlContainerListDocument
 {
@@ -598,6 +669,8 @@ internal static class HcsCtlVmState
 [JsonSerializable(typeof(HcsCtlContainerCreateDocument))]
 [JsonSerializable(typeof(HcsCtlContainerListDocument))]
 [JsonSerializable(typeof(HcsCtlNetworkEndpointsDocument))]
+[JsonSerializable(typeof(HcsCtlNetworkListDocument))]
+[JsonSerializable(typeof(HcsCtlGuestExecDocument))]
 [JsonSerializable(typeof(HcsCtlExecDocument))]
 [JsonSerializable(typeof(HcsCtlVmCreateDocument))]
 [JsonSerializable(typeof(HcsCtlVmStartDocument))]
