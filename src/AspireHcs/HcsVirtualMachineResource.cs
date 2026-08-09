@@ -3,10 +3,15 @@
 namespace Aspire.Hosting.ApplicationModel;
 
 /// <summary>
-/// A Hyper-V virtual machine hosted through the Windows Host Compute System (HCS) API.
-/// The VM is ephemeral: created when the AppHost starts and torn down when it exits,
-/// crash-safe via HCS's terminate-on-last-handle-closed semantics.
+/// A Hyper-V virtual machine, driven through the <c>hcsctl</c> CLI. The VM is ephemeral: created
+/// when the AppHost starts and torn down when it exits.
 /// </summary>
+/// <remarks>
+/// Crash safety is not terminate-on-last-handle-closed any more. hcsctl is a child process that
+/// exits as soon as each command completes, so no handle is held and a crashed AppHost leaves the
+/// VM running. What reclaims it instead is the label this run stamps on the VM: the next run lists
+/// what exists, finds a VM owned by a pid that is gone, and removes it (hcsctl#44).
+/// </remarks>
 public sealed class HcsVirtualMachineResource([ResourceName] string name)
     : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString
 {
@@ -35,38 +40,40 @@ public sealed class HcsVirtualMachineResource([ResourceName] string name)
     /// <summary>First endpoint declared via WithEndpoint; backs the connection string.</summary>
     internal string? PrimaryEndpointName { get; set; }
 
-    /// <summary>HCN endpoint id for this run's vNIC. Fresh per run, like the VM id.</summary>
-    internal Guid HcnEndpointId { get; } = Guid.NewGuid();
-
-    /// <summary>
-    /// Locally-administered MAC for the vNIC. HNS learns the guest's DHCP lease against this
-    /// MAC, which is how the endpoint's IP becomes discoverable host-side.
-    /// </summary>
-    internal string MacAddress { get; } = GenerateMac();
-
-    private static string GenerateMac()
-    {
-        byte[] tail = new byte[3];
-        Random.Shared.NextBytes(tail);
-        return $"02-15-5D-{tail[0]:X2}-{tail[1]:X2}-{tail[2]:X2}";
-    }
-
     /// <summary>Path to the boot VHDX (Gen2/UEFI). Set via <c>WithVhdx</c>.</summary>
     internal string? VhdxPath { get; set; }
-
-    /// <summary>When true, boot a differencing child so the base image is never mutated.</summary>
-    internal bool CopyOnWrite { get; set; } = true;
 
     internal int MemoryMb { get; set; } = 2048;
 
     internal int ProcessorCount { get; set; } = 2;
 
-    /// <summary>
-    /// HCS compute-system id. Includes a random suffix so a crashed AppHost's dying VM
-    /// (teardown is asynchronous) never collides with the next run's.
-    /// </summary>
-    internal string VmId { get; } = $"aspirehcs-{name}-{Guid.NewGuid():N}";
+    /// <summary>Explicit path to <c>hcsctl.exe</c>, or null to discover it.</summary>
+    internal string? HcsCtlPath { get; set; }
 
-    /// <summary>Named pipe carrying the guest's COM1 serial console.</summary>
-    internal string SerialPipeName => $"{VmId}-com1";
+    /// <summary>The hcsctl store to operate against, or null for hcsctl's per-user default.</summary>
+    internal string? StorePath { get; set; }
+
+    /// <summary>
+    /// The VM's id, and a GUID because hcsctl requires one: the id is also the VM's Hyper-V socket
+    /// address, so <c>hcsctl guest info --vmid</c> takes it unchanged. Fresh per resource, so a
+    /// crashed AppHost's leftover can never collide with the next run's.
+    /// </summary>
+    internal string VmId { get; } = Guid.NewGuid().ToString();
+
+    /// <summary>
+    /// Named pipe carrying the guest's COM1 serial console. Passed to hcsctl at create time; this
+    /// side only reads it, which is why the console survived the move to the CLI unchanged.
+    /// </summary>
+    internal string SerialPipeName => $"aspirehcs-{Name}-{VmId}-com1";
+
+    /// <summary>
+    /// The MAC and HCN endpoint hcsctl generated for this VM, learned from the create result. Both
+    /// are null until the VM has been created — nothing on this side chooses them, because the MAC
+    /// has to survive a stop/start for the DHCP lease to hold and hcsctl's store is what remembers
+    /// it.
+    /// </summary>
+    internal string? EndpointId { get; set; }
+
+    /// <inheritdoc cref="EndpointId"/>
+    internal string? MacAddress { get; set; }
 }

@@ -387,6 +387,160 @@ internal sealed record HcsCtlGuestProcess
     public TimeSpan CpuTime => TimeSpan.FromTicks(KernelTime100ns + UserTime100ns);
 }
 
+/// <summary><c>hcsctl vm create</c>.</summary>
+internal sealed record HcsCtlVmCreateDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    /// <summary>The differencing child this VM boots, not the base image it was made from.</summary>
+    [JsonPropertyName("diskPath")]
+    public string? DiskPath { get; init; }
+
+    [JsonPropertyName("serialPipe")]
+    public string? SerialPipe { get; init; }
+
+    [JsonPropertyName("network")]
+    public string? Network { get; init; }
+
+    [JsonPropertyName("endpointId")]
+    public string? EndpointId { get; init; }
+
+    [JsonPropertyName("macAddress")]
+    public string? MacAddress { get; init; }
+
+    /// <summary>
+    /// Always empty here, and that is the measured behaviour rather than a gap: an HCN endpoint
+    /// carries no address when it is created, none when it is attached to a NIC, and none while
+    /// the VM runs without a guest. The address comes from the guest's DHCP client, so it is
+    /// <see cref="HcsCtlVirtualMachines.WaitForAddressAsync"/> that produces one (hcsctl#43).
+    /// </summary>
+    [JsonPropertyName("addresses")]
+    public IReadOnlyList<string> Addresses { get => field ?? []; init; } = [];
+}
+
+/// <summary><c>hcsctl vm start</c>.</summary>
+internal sealed record HcsCtlVmStartDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("elapsedMs")]
+    public long ElapsedMs { get; init; }
+
+    /// <summary>
+    /// The firmware is running. It does <b>not</b> mean the guest OS is up — unlike a container,
+    /// where start returning is the guest being ready.
+    /// </summary>
+    [JsonPropertyName("started")]
+    public bool Started { get; init; }
+
+    /// <summary>
+    /// The compute system had to be rebuilt from hcsctl's store record because the previous one
+    /// exited. Same disk, so this is a power cycle rather than a fresh VM.
+    /// </summary>
+    [JsonPropertyName("recreated")]
+    public bool Recreated { get; init; }
+}
+
+/// <summary><c>hcsctl vm ip</c> — the address the guest leased.</summary>
+internal sealed record HcsCtlVmAddressDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("endpointId")]
+    public string? EndpointId { get; init; }
+
+    /// <summary>CIDR strings, e.g. <c>172.18.187.241/20</c>. Never empty on success.</summary>
+    [JsonPropertyName("addresses")]
+    public IReadOnlyList<string> Addresses { get => field ?? []; init; } = [];
+
+    [JsonPropertyName("waitedMs")]
+    public long WaitedMs { get; init; }
+}
+
+/// <summary><c>hcsctl vm ls</c>, and with <c>--all</c> the host's compute systems too.</summary>
+internal sealed record HcsCtlVmListDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    /// <summary>VMs in the store this AppHost is pointed at.</summary>
+    [JsonPropertyName("vms")]
+    public IReadOnlyList<HcsCtlVmRow> VirtualMachines { get => field ?? []; init; } = [];
+
+    /// <summary>
+    /// Every compute system on the host, present only when <c>--all</c> was passed. Other tools'
+    /// VMs are in here — WSL's, Hyper-V Manager's — so the owner is what separates ours.
+    /// </summary>
+    [JsonPropertyName("systems")]
+    public IReadOnlyList<HcsCtlComputeSystemRow> Systems { get => field ?? []; init; } = [];
+}
+
+/// <summary>One row of <c>vm ls</c>.</summary>
+internal sealed record HcsCtlVmRow
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    /// <summary>See <see cref="HcsCtlVmState"/>.</summary>
+    [JsonPropertyName("state")]
+    public string? State { get; init; }
+
+    /// <summary>
+    /// Opaque key/value pairs this AppHost stamped at create time. hcsctl never interprets them:
+    /// run ownership is the consumer's policy, which is to say ours (hcsctl#44).
+    /// </summary>
+    [JsonPropertyName("labels")]
+    public IReadOnlyDictionary<string, string> Labels { get => field ?? EmptyLabels; init; } = EmptyLabels;
+
+    private static readonly Dictionary<string, string> EmptyLabels = [];
+}
+
+/// <summary>One compute system from <c>vm ls --all</c>, straight from HcsEnumerateComputeSystems.</summary>
+internal sealed record HcsCtlComputeSystemRow
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    /// <summary>What the system's own document set. hcsctl's VMs say <c>hcsctl</c>.</summary>
+    [JsonPropertyName("owner")]
+    public string? Owner { get; init; }
+
+    [JsonPropertyName("runtimeId")]
+    public string? RuntimeId { get; init; }
+
+    /// <summary>Blank for a system created but never started — HCS reports no state for one.</summary>
+    [JsonPropertyName("state")]
+    public string? State { get; init; }
+}
+
+/// <summary>
+/// The states <c>vm ls</c> reports. Note that a VM's are not a container's: a container that is
+/// not running is <c>absent</c> because its scratch is gone, while a VM keeps its disk and store
+/// record, so it is <c>stopped</c> and can be started again.
+/// </summary>
+internal static class HcsCtlVmState
+{
+    /// <summary>No compute system. The disk and the record survive, so this is restartable.</summary>
+    public const string Stopped = "stopped";
+
+    /// <summary>Created but never started. HCS reports no state at all for one.</summary>
+    public const string Created = "created";
+
+    public const string Running = "running";
+}
+
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = false)]
 [JsonSerializable(typeof(HcsCtlStatsDocument))]
 [JsonSerializable(typeof(HcsCtlProcessListDocument))]
@@ -396,4 +550,8 @@ internal sealed record HcsCtlGuestProcess
 [JsonSerializable(typeof(HcsCtlContainerCreateDocument))]
 [JsonSerializable(typeof(HcsCtlContainerListDocument))]
 [JsonSerializable(typeof(HcsCtlExecDocument))]
+[JsonSerializable(typeof(HcsCtlVmCreateDocument))]
+[JsonSerializable(typeof(HcsCtlVmStartDocument))]
+[JsonSerializable(typeof(HcsCtlVmAddressDocument))]
+[JsonSerializable(typeof(HcsCtlVmListDocument))]
 internal sealed partial class HcsCtlJsonContext : JsonSerializerContext;

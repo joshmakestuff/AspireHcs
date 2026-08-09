@@ -18,4 +18,12 @@
     <ProjectReference Include="..\..\samples\HcsSample.AppHost\HcsSample.AppHost.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      Shared with the unit test project rather than duplicated: both need to resolve the same
+      hcsctl, and two copies of that rule would drift into testing two different binaries.
+    -->
+    <Compile Include="..\AspireHcs.Tests\RepositoryTools.cs" Link="RepositoryTools.cs" />
+  </ItemGroup>
+
 </Project>
