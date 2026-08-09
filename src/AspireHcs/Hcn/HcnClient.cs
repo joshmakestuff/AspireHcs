@@ -53,9 +53,12 @@ internal static unsafe class HcnClient
     }
 
     /// <summary>
-    /// The IPv4 address HNS reserved for the endpoint. On an ICS network the DHCP server
-    /// leases exactly this address to the endpoint's MAC, so it is known deterministically
-    /// before the guest even boots (verified empirically).
+    /// The IPv4 address the endpoint holds, once it has one. This is NOT available at endpoint
+    /// create time: an endpoint with nothing attached to it carries no IpConfigurations at all,
+    /// measured 2026-08-09 on build 26200 (hcsspike/probes/hcn/vmlease.go, hcsctl#43). An earlier
+    /// version of this comment claimed the address was reserved against the MAC and known before
+    /// the guest booted; that was wrong, and it propagated into hcsctl#34. Callers wait for it —
+    /// that is what HcsVmOrchestrator.WaitForLeasedIpAsync exists for.
     /// </summary>
     public static string GetEndpointAssignedIp(Guid endpointId)
     {
