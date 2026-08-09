@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Eventing;
@@ -320,7 +321,7 @@ internal sealed class HcsContainerInstance(
                     CancellationToken.None);
             }
 
-            AllocateEndpoints(created);
+            await AllocateEndpointsAsync(hcsctl, created, stopping).ConfigureAwait(false);
             await PublishEndpointsAsync(stopping).ConfigureAwait(false);
 
             // Boot-scoped like the workload: cancelling the source is what stops the polling, and
@@ -370,14 +371,27 @@ internal sealed class HcsContainerInstance(
     }
 
     /// <summary>
+    /// How long to wait for an ICS network to lease the container's endpoint an address after
+    /// start. Mirrors the VM path's timeout: measured leases land within seconds of the guest
+    /// coming up (probe-ds, 2026-08-09), so this is generous — and a network that never leases
+    /// fails the resource rather than hanging the AppHost.
+    /// </summary>
+    private static readonly TimeSpan AddressTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>How often the endpoint is re-read while waiting for its lease.</summary>
+    private static readonly TimeSpan AddressPollInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>
     /// Resolves the resource's declared endpoints against the container's own address.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// No waiting, no polling. A static HNS endpoint programs a container's network stack
-    /// directly, so <c>container create</c> reports the address before the container has started
-    /// — the #4 finding inverting in our favour exactly as #41 predicted. The VM path's ~14 s
-    /// DHCP-lease discovery has no analogue here.
+    /// When the address exists depends on the network. A NAT network assigns it at create, so the
+    /// create document already carries it — that fast path stays a read, no polling (#41's
+    /// measurement, 2026-08-07). An ICS network — the Default Switch, the default since #60 —
+    /// leases the address only after the guest is up, the same timing the VM path documents
+    /// (hcsctl#43), so there this is a bounded wait against a live HCN read. It cannot be a read
+    /// of any create-time snapshot: hcsctl's state.json never updates after create (#63).
     /// </para>
     /// <para>
     /// The address is the container's own on the host compute network, reachable from the host
@@ -385,7 +399,8 @@ internal sealed class HcsContainerInstance(
     /// the guest's port — nothing is translated.
     /// </para>
     /// </remarks>
-    private void AllocateEndpoints(HcsCtlContainerCreateDocument created)
+    private async Task AllocateEndpointsAsync(
+        HcsCtl hcsctl, HcsCtlContainerCreateDocument created, CancellationToken cancellationToken)
     {
         List<EndpointAnnotation> endpoints = [.. resource.Annotations.OfType<EndpointAnnotation>()];
         if (endpoints.Count == 0)
@@ -393,16 +408,35 @@ internal sealed class HcsContainerInstance(
             return;
         }
 
-        if (created.Addresses.Count == 0)
+        string address;
+        if (created.Addresses.Count > 0)
         {
-            throw new InvalidOperationException(
-                $"Resource '{resource.Name}' declares endpoints but the container has no address. " +
-                "Add WithNetwork() so it gets a NIC on a host compute network.");
+            // hcsctl reports the address in CIDR form (172.17.163.120/20). An endpoint wants the
+            // address alone; leaving the prefix on produces a host string nothing can connect to.
+            address = created.Addresses[0].Split('/')[0];
         }
+        else
+        {
+            // Guarded again here, not only before create, so this method cannot regress into
+            // waiting forever for an endpoint that was never attached. This message belongs to
+            // the no-network case alone — a resource WITH WithNetwork() whose address is merely
+            // late must never be told to add it (#63).
+            string network = resource.NetworkName ?? throw new InvalidOperationException(
+                $"Resource '{resource.Name}' declares endpoints but no network; add WithNetwork().");
 
-        // hcsctl reports the address in CIDR form (172.17.163.120/20). An endpoint wants the
-        // address alone; leaving the prefix on produces a host string nothing can connect to.
-        string address = created.Addresses[0].Split('/')[0];
+            string endpointId = created.Endpoint ?? throw new InvalidOperationException(
+                $"Resource '{resource.Name}' is on network '{network}' but hcsctl reported no " +
+                "endpoint for the container, so its address can never be discovered.");
+
+            address = await WaitForLeasedAddressAsync(
+                token => hcsctl.ListEndpointsAsync(network, token),
+                endpointId,
+                network,
+                resource.Name,
+                AddressTimeout,
+                AddressPollInterval,
+                cancellationToken).ConfigureAwait(false);
+        }
 
         logger.LogInformation("Container address {Address}; publishing {Count} endpoint(s).", address, endpoints.Count);
 
@@ -415,6 +449,59 @@ internal sealed class HcsContainerInstance(
             // constructor registers this same snapshot under the endpoint's default network,
             // which is what EndpointReference.IsAllocated consults.
             endpoint.AllocatedEndpoint = new AllocatedEndpoint(endpoint, address, port);
+        }
+    }
+
+    /// <summary>
+    /// Polls the live HCN endpoint listing until the container's endpoint carries an address, and
+    /// returns that address bare (hcsctl reports CIDR).
+    /// </summary>
+    /// <remarks>
+    /// The poll target is <c>network endpoints</c> and nothing else on purpose: hcsctl's
+    /// state.json — and <c>container inspect</c>, which reports that snapshot — records only the
+    /// create-time address list, which on an ICS network is empty forever. Only HCN's own view
+    /// changes when the lease lands, the same fact hcsctl#43 records on the VM side, where
+    /// <c>vm ip</c> does this wait inside hcsctl. There is no <c>container ip</c> verb, so the
+    /// container side waits here instead (#63).
+    /// </remarks>
+    internal static async Task<string> WaitForLeasedAddressAsync(
+        Func<CancellationToken, Task<HcsCtlNetworkEndpointsDocument>> readEndpoints,
+        string endpointId,
+        string networkName,
+        string resourceName,
+        TimeSpan timeout,
+        TimeSpan pollInterval,
+        CancellationToken cancellationToken)
+    {
+        long started = Stopwatch.GetTimestamp();
+        bool listed = false;
+
+        while (true)
+        {
+            HcsCtlNetworkEndpointsDocument listing = await readEndpoints(cancellationToken).ConfigureAwait(false);
+
+            // Ordinal-insensitive because these are GUIDs, and HCN is not consistent about their
+            // case across read paths — stats report them uppercase, the listing lowercase.
+            HcsCtlNetworkEndpointRow? endpoint = listing.Endpoints.FirstOrDefault(
+                e => string.Equals(e.Id, endpointId, StringComparison.OrdinalIgnoreCase));
+            listed |= endpoint is not null;
+
+            if (endpoint is { Addresses.Count: > 0 })
+            {
+                return endpoint.Addresses[0].Split('/')[0];
+            }
+
+            TimeSpan elapsed = Stopwatch.GetElapsedTime(started);
+            if (elapsed >= timeout)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resourceName}' declares endpoints, but endpoint {endpointId} on " +
+                    $"network '{networkName}' {(listed ? "still had no address" : "was never listed")} " +
+                    $"after waiting {elapsed.TotalSeconds:0.#} s. An ICS network leases the address " +
+                    "after the guest starts; a network that never leases one cannot serve these endpoints.");
+            }
+
+            await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
         }
     }
 
