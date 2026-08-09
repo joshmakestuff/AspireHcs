@@ -11,13 +11,21 @@ namespace AspireHcs.IntegrationTests;
 // Issue #5 acceptance: a TCP health check moves readiness from "the guest kernel is up" to
 // "the guest is serving", so WaitFor(vm) releases dependents against a workload.
 //
-// The reference Kali image ships sshd disabled, which makes it the ideal negative fixture: the
-// guest boots, leases an address and answers with an RST, so the check can reach it and still
-// correctly refuse to call it ready. That is precisely the window that used to be reported as
-// ready, and the assertion below is that it no longer is.
+// The negative fixture is a port nothing serves, declared on the resource for this test only.
+// It cannot be the guest's own SSH port: the reference image serves it, so the check would pass
+// and the test would wait forever for an unhealthy report. The guest boots, leases an address
+// and answers this port with an RST, so the check reaches it and still correctly refuses to call
+// the resource ready. That is precisely the window that used to be reported as ready.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class HealthCheckGatesReadinessTests(ITestOutputHelper output)
 {
+    /// <summary>
+    /// A port in the IANA dynamic range that the guest image does not serve. Any closed port
+    /// works; what matters is that the guest is reachable and answers with an RST, so a failure
+    /// here means "nothing is listening" rather than "the address is wrong".
+    /// </summary>
+    private const int DeadPort = 59999;
+
     [SkippableFact]
     public async Task Ready_is_withheld_while_nothing_is_listening_in_the_guest()
     {
@@ -33,7 +41,9 @@ public sealed class HealthCheckGatesReadinessTests(ITestOutputHelper output)
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
 
         HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
-        appHost.CreateResourceBuilder(vm).WithTcpHealthCheck();
+        appHost.CreateResourceBuilder(vm)
+            .WithEndpoint("dead", targetPort: DeadPort)
+            .WithTcpHealthCheck("dead");
 
         TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         appHost.Eventing.Subscribe<ResourceReadyEvent>((@event, _) =>
@@ -55,10 +65,10 @@ public sealed class HealthCheckGatesReadinessTests(ITestOutputHelper output)
         // orchestrator ordered those two things correctly.
         ResourceEvent unhealthy = await app.ResourceNotifications.WaitForResourceAsync(
             "appliance",
-            e => e.Snapshot.HealthReports.Any(h => h.Name == "appliance_ssh_tcp_check" && h.Status == HealthStatus.Unhealthy),
+            e => e.Snapshot.HealthReports.Any(h => h.Name == "appliance_dead_tcp_check" && h.Status == HealthStatus.Unhealthy),
             cts.Token);
 
-        HealthReportSnapshot report = unhealthy.Snapshot.HealthReports.Single(h => h.Name == "appliance_ssh_tcp_check");
+        HealthReportSnapshot report = unhealthy.Snapshot.HealthReports.Single(h => h.Name == "appliance_dead_tcp_check");
         output.WriteLine($"health report: {report.Status} — {report.Description}");
         Assert.Contains("not accepting connections", report.Description);
 

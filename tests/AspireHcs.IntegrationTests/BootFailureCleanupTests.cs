@@ -2,7 +2,6 @@ using System.Runtime.Versioning;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
-using AspireHcs.Hcn;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -28,15 +27,14 @@ public sealed class BootFailureCleanupTests(ITestOutputHelper output)
         IDistributedApplicationTestingBuilder appHost =
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
         HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
-        string workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", vm.VmId);
 
-        // Occupy the resource's own HCN endpoint id under a foreign owner. The orchestrator's
-        // scavenger only touches AspireHcs-owned endpoints, so it leaves this one alone, and
-        // endpoint creation then fails deterministically — after PrepareBootDisk, before any
-        // grant or compute system. Exactly the window this issue is about.
-        Guid networkId = HcnClient.FindIcsNetworkId();
-        HcnClient.CreateDhcpEndpoint(networkId, vm.HcnEndpointId, "02-15-5D-00-00-01",
-            owner: "AspireHcs.IntegrationTests.Conflict");
+        // Occupy the resource's own VM id out of band. hcsctl refuses to create a second VM
+        // under an id its store already holds, so the boot fails deterministically inside
+        // `vm create` — after the disk work, before anything is running. The scavenger cannot
+        // clear it either: this VM carries no owner label of ours, so it is not ours to reclaim.
+        Assert.True(
+            HcsCtlProbes.TryRun(["vm", "create", "--id", vm.VmId, "--vhdx", vhdx!], out string arranged, vm.StorePath),
+            $"could not arrange the conflict: {arranged}");
         try
         {
             await using DistributedApplication app = await appHost.BuildAsync(cts.Token);
@@ -45,15 +43,17 @@ public sealed class BootFailureCleanupTests(ITestOutputHelper output)
             await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.FailedToStart, cts.Token);
             output.WriteLine("boot failed at endpoint creation, as arranged");
 
-            // The failed boot's differencing disk used to survive here (cleanup was nested under
-            // "was a compute system created", which it never was).
-            Assert.False(Directory.Exists(workDir), $"failed boot left its work directory behind: {workDir}");
+            // The failed boot must not have touched the base image's ACL. hcsctl grants VM access
+            // inside `vm create` and revokes it in `vm rm`, so a create that failed and was not
+            // cleaned up would show here as an extra ACE.
             Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
 
             // Clear the conflict; a retry from the dashboard must now boot for real, which also
-            // proves the failed boot released everything a fresh one needs (same VM id, same
-            // endpoint id, same work directory).
-            HcnClient.DeleteEndpoint(vm.HcnEndpointId);
+            // proves the failed boot released everything a fresh one needs -- same VM id, same
+            // store, same disk.
+            Assert.True(
+                HcsCtlProbes.TryRun(["vm", "rm", "--id", vm.VmId, "--force"], out string cleared, vm.StorePath),
+                $"could not clear the conflict: {cleared}");
 
             ExecuteCommandResult retried = await app.ResourceCommands
                 .ExecuteCommandAsync("appliance", KnownResourceCommands.StartCommand, cts.Token);
@@ -63,19 +63,14 @@ public sealed class BootFailureCleanupTests(ITestOutputHelper output)
             output.WriteLine($"recovered to Running at {app.GetEndpoint("appliance", "ssh")}");
 
             await app.StopAsync(cts.Token);
-            Assert.False(Directory.Exists(workDir), $"work directory survived the run: {workDir}");
+            Assert.DoesNotContain(vm.VmId, HcsCtlProbes.VmIds(vm.StorePath));
             Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
         }
         finally
         {
-            try
-            {
-                HcnClient.DeleteEndpoint(vm.HcnEndpointId);
-            }
-            catch (Exception)
-            {
-                // Already deleted mid-test on the success path.
-            }
+            // Removed whatever happened: on the success path the retry already owns this id, and
+            // on any failure path the arranged conflict must not outlive the test.
+            _ = HcsCtlProbes.TryRun(["vm", "rm", "--id", vm.VmId, "--force"], out _, vm.StorePath);
         }
     }
 }

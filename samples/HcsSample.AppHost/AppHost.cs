@@ -13,8 +13,8 @@ var builder = DistributedApplication.CreateBuilder(args);
 string? vhdx = Environment.GetEnvironmentVariable("HCS_TEST_VHDX");
 if (!string.IsNullOrWhiteSpace(vhdx))
 {
-    builder.AddHcsVm("appliance")
-        .WithVhdx(vhdx, copyOnWrite: true)
+    IResourceBuilder<HcsVirtualMachineResource> appliance = builder.AddHcsVm("appliance")
+        .WithVhdx(vhdx)
         .WithMemory(gigabytes: 2)
         .WithProcessorCount(2)
         .WithNatNetwork()
@@ -23,6 +23,14 @@ if (!string.IsNullOrWhiteSpace(vhdx))
         // WithRdpCommand here because that image does not serve RDP — a connect button that
         // cannot connect is worse than no button.
         .WithSshCommand(userName: "Administrator");
+
+    // The VM path drives hcsctl too now, so it takes the same store the container half does. A
+    // VM store holds differencing disks rather than images, so pointing both at one directory is
+    // fine and keeps a run's leftovers in one place.
+    if (Environment.GetEnvironmentVariable("ASPIREHCS_TEST_STORE") is { Length: > 0 } vmStore)
+    {
+        appliance.WithHcsCtl(storePath: vmStore);
+    }
 }
 
 string? image = Environment.GetEnvironmentVariable("ASPIREHCS_TEST_IMAGE");

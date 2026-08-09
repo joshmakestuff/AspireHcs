@@ -2,7 +2,6 @@ using System.Runtime.Versioning;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
-using AspireHcs.Hcs;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -28,7 +27,6 @@ public sealed class UnexpectedExitRecoveryTests(ITestOutputHelper output)
         IDistributedApplicationTestingBuilder appHost =
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
         HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
-        string workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", vm.VmId);
 
         await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
         {
@@ -36,13 +34,12 @@ public sealed class UnexpectedExitRecoveryTests(ITestOutputHelper output)
             await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
             output.WriteLine($"booted at {app.GetEndpoint("appliance", "ssh")}");
 
-            // Kill the compute system out-of-band. From the orchestrator's point of view this is
-            // indistinguishable from the guest powering itself off: the only signal either way is
-            // the HcsEventSystemExited notification.
-            using (HcsComputeSystem doomed = HcsClient.OpenComputeSystem(vm.VmId))
-            {
-                await doomed.TerminateAsync(cts.Token);
-            }
+            // Kill the compute system out of band. From the orchestrator's point of view this is
+            // indistinguishable from the guest powering itself off -- both leave the store record
+            // in place with no compute system behind it, which is what the exit watch looks for.
+            Assert.True(
+                HcsCtlProbes.TryRun(["vm", "stop", "--id", vm.VmId, "--force"], out string killed, vm.StorePath),
+                $"could not kill the VM out of band: {killed}");
 
             await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Exited, cts.Token);
             output.WriteLine("VM exited out-of-band; issuing Start");
@@ -62,7 +59,7 @@ public sealed class UnexpectedExitRecoveryTests(ITestOutputHelper output)
             await app.StopAsync(cts.Token);
         }
 
-        Assert.False(Directory.Exists(workDir), $"work directory survived the run: {workDir}");
+        Assert.DoesNotContain(vm.VmId, HcsCtlProbes.VmIds(vm.StorePath));
         Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
     }
 }

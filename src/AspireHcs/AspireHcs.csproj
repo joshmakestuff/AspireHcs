@@ -14,15 +14,15 @@
     <None Include="README.md" Pack="true" PackagePath="\" />
     <InternalsVisibleTo Include="AspireHcs.Tests" />
     <InternalsVisibleTo Include="AspireHcs.IntegrationTests" />
-    <InternalsVisibleTo Include="GuestReadinessProbeSpike" />
   </ItemGroup>
 
   <ItemGroup>
+    <!--
+      No CsWin32, and no P/Invoke of any kind. Everything that touches HCS, HNS or VirtDisk goes
+      through the hcsctl child process now (hcsctl#30). If a native call looks necessary here, the
+      surface it needs belongs in hcsctl instead.
+    -->
     <PackageReference Include="Aspire.Hosting" />
-    <PackageReference Include="Microsoft.Windows.CsWin32">
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-      <PrivateAssets>all</PrivateAssets>
-    </PackageReference>
   </ItemGroup>
 
 </Project>
