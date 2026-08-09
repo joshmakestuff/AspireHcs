@@ -33,6 +33,8 @@ internal static partial class GuestReferences
     /// <summary>
     /// The distinct host-loopback ports referenced anywhere in the resolved environment, in
     /// ascending order. Each is a target the relay must forward before the consumer exists.
+    /// Covers both shapes Aspire injects: a host:port embedded in one value, and the split
+    /// <c>X_HOST</c>/<c>X_PORT</c> variable pair.
     /// </summary>
     public static IReadOnlyList<int> FindLoopbackPorts(IReadOnlyDictionary<string, string> environment)
     {
@@ -50,8 +52,52 @@ internal static partial class GuestReferences
             }
         }
 
+        foreach ((_, _, int port) in FindSplitPairs(environment))
+        {
+            ports.Add(port);
+        }
+
         return [.. ports];
     }
+
+    /// <summary>The suffixes of Aspire's split reference pair, e.g. <c>CACHE_HOST</c>/<c>CACHE_PORT</c>.</summary>
+    private const string HostSuffix = "_HOST";
+
+    /// <inheritdoc cref="HostSuffix"/>
+    private const string PortSuffix = "_PORT";
+
+    /// <summary>
+    /// Aspire's other injected shape, observed live from <c>WithReference(cache)</c>: the
+    /// endpoint split across two variables — <c>CACHE_HOST=localhost</c>,
+    /// <c>CACHE_PORT=62310</c>. No single value carries host and port together, so the
+    /// value-level match above cannot see it; the pair is joined here by name convention
+    /// instead. A <c>_HOST</c> without a parseable sibling <c>_PORT</c> is left alone — there is
+    /// nothing to forward.
+    /// </summary>
+    private static IEnumerable<(string HostName, string PortName, int Port)> FindSplitPairs(
+        IReadOnlyDictionary<string, string> environment)
+    {
+        foreach ((string name, string value) in environment)
+        {
+            if (!name.EndsWith(HostSuffix, StringComparison.OrdinalIgnoreCase) || !IsLoopbackHost(value))
+            {
+                continue;
+            }
+
+            string portName = string.Concat(name.AsSpan(0, name.Length - HostSuffix.Length), PortSuffix);
+            if (environment.TryGetValue(portName, out string? portValue)
+                && int.TryParse(portValue, NumberStyles.None, CultureInfo.InvariantCulture, out int port)
+                && port is >= 1 and <= 65535)
+            {
+                yield return (name, portName, port);
+            }
+        }
+    }
+
+    /// <summary>The value must be the loopback host alone — this is a whole-variable judgement.</summary>
+    private static bool IsLoopbackHost(string value)
+        => value.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || value is "127.0.0.1" or "::1" or "[::1]";
 
     /// <summary>
     /// Substitutes <c>&lt;gateway&gt;:&lt;relay port&gt;</c> for every loopback endpoint whose
@@ -76,6 +122,18 @@ internal static partial class GuestReferences
                 TryReadPort(match, out int port) && relayPorts.TryGetValue(port, out int relayPort)
                     ? FormattableString.Invariant($"{gateway}:{relayPort}")
                     : match.Value);
+        }
+
+        // The split pair is rewritten as a pair: the host variable to the gateway, the port
+        // variable to the relay port. Rewriting only one half would hand the guest an address
+        // spliced from two perspectives, worse than either whole.
+        foreach ((string hostName, string portName, int port) in FindSplitPairs(environment))
+        {
+            if (relayPorts.TryGetValue(port, out int relayPort))
+            {
+                rewritten[hostName] = gateway;
+                rewritten[portName] = relayPort.ToString(CultureInfo.InvariantCulture);
+            }
         }
 
         return rewritten;

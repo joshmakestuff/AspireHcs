@@ -67,6 +67,28 @@ public class GuestReferencesTests
         Assert.Empty(GuestReferences.FindLoopbackPorts(Env(("V", value))));
     }
 
+    // Aspire's other injected shape, observed live: the endpoint split across two variables.
+    // No single value carries host and port together, so the value-level match cannot see it.
+    [Fact]
+    public void A_split_host_and_port_pair_is_a_target()
+    {
+        IReadOnlyList<int> ports = GuestReferences.FindLoopbackPorts(
+            Env(("CACHE_HOST", "localhost"), ("CACHE_PORT", "62310")));
+
+        Assert.Equal([62310], ports);
+    }
+
+    [Theory]
+    [InlineData("CACHE_HOST", "localhost", "OTHER_PORT", "62310")]  // no sibling: nothing to forward
+    [InlineData("CACHE_HOST", "172.18.184.17", "CACHE_PORT", "62310")]  // not loopback: guest-reachable already
+    [InlineData("CACHE_HOST", "localhost", "CACHE_PORT", "not-a-port")]
+    [InlineData("CACHEHOST", "localhost", "CACHEPORT", "62310")]  // not the pair convention
+    public void A_pair_that_is_not_a_loopback_host_with_a_port_is_not_a_target(
+        string hostName, string hostValue, string portName, string portValue)
+    {
+        Assert.Empty(GuestReferences.FindLoopbackPorts(Env((hostName, hostValue), (portName, portValue))));
+    }
+
     // ---- RewriteLoopback: what the guest reads instead ----
 
     [Fact]
@@ -101,6 +123,44 @@ public class GuestReferencesTests
 
         Assert.Equal("172.18.184.17:8080", rewritten["PEER"]);
         Assert.Equal("fast", rewritten["MODE"]);
+    }
+
+    // The pair is rewritten as a pair — host to the gateway, port to the relay port. One half
+    // alone would splice an address from two perspectives, worse than either whole.
+    [Fact]
+    public void A_split_pair_is_rewritten_together()
+    {
+        IReadOnlyDictionary<string, string> rewritten = GuestReferences.RewriteLoopback(
+            Env(("CACHE_HOST", "localhost"), ("CACHE_PORT", "62310")),
+            gateway: "172.18.176.1",
+            relayPorts: new Dictionary<int, int> { [62310] = 62315 });
+
+        Assert.Equal("172.18.176.1", rewritten["CACHE_HOST"]);
+        Assert.Equal("62315", rewritten["CACHE_PORT"]);
+    }
+
+    // The exact environment WithReference(cache) injected in the live run (2026-08-09, password
+    // altered): every shape Aspire produces, rewritten coherently or deliberately left alone.
+    [Fact]
+    public async Task The_live_redis_reference_environment_rewrites_coherently()
+    {
+        IReadOnlyDictionary<string, string> result = await GuestReferences.RedirectLoopbackAsync(
+            "rockyvm", "Default Switch",
+            Env(
+                ("ConnectionStrings__cache", "localhost:62310,password=hunter2,ssl=true"),
+                ("CACHE_HOST", "localhost"),
+                ("CACHE_PORT", "62310"),
+                ("CACHE_PASSWORD", "hunter2"),
+                ("CACHE_URI", "rediss://:hunter2@localhost:62310")),
+            _ => Task.FromResult(Networks(Network("Default Switch", "172.18.176.0/20"))),
+            (target, _) => Task.FromResult(target == 62310 ? 62315 : throw new InvalidOperationException("one target expected")),
+            CancellationToken.None);
+
+        Assert.Equal("172.18.176.1:62315,password=hunter2,ssl=true", result["ConnectionStrings__cache"]);
+        Assert.Equal("172.18.176.1", result["CACHE_HOST"]);
+        Assert.Equal("62315", result["CACHE_PORT"]);
+        Assert.Equal("hunter2", result["CACHE_PASSWORD"]);
+        Assert.Equal("rediss://:hunter2@172.18.176.1:62315", result["CACHE_URI"]);
     }
 
     // ---- GatewayAddress: derived from `network ls`, never hardcoded ----
