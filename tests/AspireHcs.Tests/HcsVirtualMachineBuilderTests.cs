@@ -43,16 +43,18 @@ public class HcsVirtualMachineBuilderTests
     }
 
     [Fact]
-    public void WithNatNetwork_and_WithEndpoint_configure_networking()
+    public void WithNetwork_and_WithEndpoint_configure_networking()
     {
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
 
         IResourceBuilder<HcsVirtualMachineResource> vm = builder.AddHcsVm("vm")
-            .WithNatNetwork()
+            .WithNetwork()
             .WithEndpoint("ssh", targetPort: 22)
             .WithEndpoint("api", targetPort: 8080);
 
-        Assert.True(vm.Resource.NetworkEnabled);
+        // The literal string on purpose: it is the wire value hcsctl resolves by name, and the
+        // same one containers default to — co-location is the point (#58, #60).
+        Assert.Equal("Default Switch", vm.Resource.NetworkName);
         Assert.Equal("ssh", vm.Resource.PrimaryEndpointName);
 
         // The MAC and the endpoint id are hcsctl's to choose, and are unknown until the VM has
