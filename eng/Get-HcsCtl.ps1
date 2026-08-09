@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # The hcsctl release tag to fetch. Changing this requires changing ExpectedSha256 too.
-    [string] $Version = 'v0.1.0-preview.1',
+    [string] $Version = 'v0.2.0',
 
     # Where to put hcsctl.exe. Defaults to tools/hcsctl beside this script's repository.
     [string] $Destination,
@@ -39,11 +39,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Published in the release notes for v0.1.0-preview.1. This is the artifact's only identity:
-# the preview binary has no version command.
-$ExpectedSha256 = '5A74CA1474B1D8B175450C2BC7CE6B2922055B43549D0A6759F65AA72C323350'
+# The hash of hcsctl.exe ITSELF, not of the zip around it -- the exe is what gets verified below
+# and what actually runs. The release's SHA256SUMS covers the zip, so the two numbers differ on
+# purpose; do not paste one where the other belongs.
+#
+# Since v0.2.0 the binary reports its own version, so the hash is no longer its only identity and
+# the install is checked both ways (hcsctl#29).
+$ExpectedSha256 = 'F4F72B42C211ECC94CFE31160272896435EDD88A6B8C9C23208FE7FD00425764'
 $Repository = 'joshmakestuff/hcsctl'
-$Asset = "hcsctl-$Version-windows-amd64.zip"
+
+# v0.1.0-preview.1 embedded the version in the asset name; the release workflow added in
+# hcsctl#35 does not. Pinning an older version means changing this too.
+$Asset = 'hcsctl-windows-amd64.zip'
 
 if (-not $Destination) {
     $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -105,11 +112,20 @@ try {
               "  actual   $actual"
     }
 
+    # The binary's own account of itself, checked against the tag it was downloaded under. The
+    # hash already proves it is the artifact that was pinned; this proves the pin names the
+    # version it says it does. They fail differently: a wrong hash means the wrong file, a wrong
+    # version means a release built from the wrong commit or an unstamped build.
+    $reported = (& $extracted version --json | ConvertFrom-Json).toolVersion
+    if ($reported -ne $Version) {
+        throw "hcsctl from $Version reports its version as '$reported'. Nothing was installed."
+    }
+
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     Move-Item -Path $extracted -Destination $target -Force
 
     Write-Host ""
-    Write-Host "Installed hcsctl $Version to $target"
+    Write-Host "Installed hcsctl $reported to $target"
     Write-Host "  SHA256 $actual"
     Write-Host ""
     Write-Host "The test suite finds this automatically. To use it from an AppHost or a shell:"
