@@ -100,8 +100,8 @@ public sealed class HcsContainerResource([ResourceName] string name)
     /// <remarks>
     /// The network must already exist — hcsctl cannot create one
     /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>), so this
-    /// names one rather than making it. <c>nat</c> is the conventional default and is what
-    /// Windows container hosts normally have.
+    /// names one rather than making it. <c>WithNetwork()</c> defaults it to the Default Switch,
+    /// the same network VMs default to, so the two resource kinds co-locate (#58, #60).
     /// </remarks>
     internal string? NetworkName { get; set; }
 

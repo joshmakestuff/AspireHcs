@@ -80,7 +80,7 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
         appHost.CreateResourceBuilder(resource)
             .WithImage(image)
             .WithBindMount(scripts, @"C:\scripts", isReadOnly: true)
-            .WithNatNetwork(network)
+            .WithNetwork(network)
             .WithEndpoint("probe", GuestPort);
 
         string containerId = resource.ContainerId;
@@ -132,7 +132,7 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
         appHost.CreateResourceBuilder(resource)
             .WithImage(image)
             .WithBindMount(scripts, @"C:\scripts", isReadOnly: true)
-            .WithNatNetwork(network)
+            .WithNetwork(network)
             .WithEndpoint("probe", GuestPort)
             .WithTcpHealthCheck();
 

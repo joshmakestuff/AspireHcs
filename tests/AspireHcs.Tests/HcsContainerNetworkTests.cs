@@ -20,22 +20,26 @@ public class HcsContainerNetworkTests
         Assert.Null(builder.AddHcsContainer("worker").Resource.NetworkName);
     }
 
+    // The literal string is asserted on purpose: it is the wire value hcsctl resolves by name,
+    // and it must be the SAME one the VM side defaults to — co-location is the point (#58, #60).
     [Fact]
-    public void WithNatNetwork_defaults_to_the_conventional_nat_network()
+    public void WithNetwork_defaults_to_the_Default_Switch_shared_with_VMs()
     {
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
 
-        Assert.Equal("nat", builder.AddHcsContainer("worker").WithNatNetwork().Resource.NetworkName);
+        Assert.Equal("Default Switch", builder.AddHcsContainer("worker").WithNetwork().Resource.NetworkName);
+        Assert.Equal(HcsNetwork.DefaultSwitchName, builder.AddHcsVm("vm").WithNetwork().Resource.NetworkName);
     }
 
     // hcsctl cannot create a network (hcsctl#15), so this names an existing one — which means a
-    // non-default network has to be nameable.
+    // non-default network has to be nameable. `nat` in particular stays expressible: a container
+    // placed there deliberately cannot see the Default Switch residents (#58).
     [Fact]
     public void A_named_network_is_honoured()
     {
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
 
-        Assert.Equal("LAB", builder.AddHcsContainer("worker").WithNatNetwork("LAB").Resource.NetworkName);
+        Assert.Equal("nat", builder.AddHcsContainer("worker").WithNetwork("nat").Resource.NetworkName);
     }
 
     [Fact]
@@ -44,7 +48,7 @@ public class HcsContainerNetworkTests
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
 
         IResourceBuilder<HcsContainerResource> container = builder.AddHcsContainer("worker")
-            .WithNatNetwork()
+            .WithNetwork()
             .WithEndpoint("http", 8080);
 
         Assert.Equal("http", container.Resource.PrimaryEndpointName);
@@ -60,7 +64,7 @@ public class HcsContainerNetworkTests
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
 
         IResourceBuilder<HcsContainerResource> container = builder.AddHcsContainer("worker")
-            .WithNatNetwork()
+            .WithNetwork()
             .WithEndpoint("http", 8080)
             .WithTcpHealthCheck();
 
@@ -84,7 +88,7 @@ public class HcsContainerNetworkTests
     {
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
         IResourceBuilder<HcsContainerResource> container = builder.AddHcsContainer("worker")
-            .WithNatNetwork()
+            .WithNetwork()
             .WithEndpoint("http", 8080);
 
         InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(

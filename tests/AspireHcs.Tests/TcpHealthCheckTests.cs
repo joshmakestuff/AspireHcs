@@ -20,7 +20,7 @@ public class TcpHealthCheckTests
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
 
         IResourceBuilder<HcsVirtualMachineResource> vm = builder.AddHcsVm("vm")
-            .WithNatNetwork()
+            .WithNetwork()
             .WithEndpoint("ssh", targetPort: 22)
             .WithTcpHealthCheck();
 
@@ -42,7 +42,7 @@ public class TcpHealthCheckTests
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
 
         IResourceBuilder<HcsVirtualMachineResource> vm = builder.AddHcsVm("vm")
-            .WithNatNetwork()
+            .WithNetwork()
             .WithEndpoint("ssh", targetPort: 22)
             .WithEndpoint("api", targetPort: 8080)
             .WithTcpHealthCheck("api");

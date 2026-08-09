@@ -18,16 +18,10 @@ namespace AspireHcs.Cli;
 internal static class HcsCtlVirtualMachines
 {
     /// <summary>
-    /// The <c>--network</c> value that asks hcsctl to choose. It resolves the Hyper-V Default
-    /// Switch, the ICS network whose built-in DHCP serves an arbitrary guest image, and refuses to
-    /// guess when a host has several ICS networks. A network genuinely named "default" wins over
-    /// it, which is hcsctl's rule and not ours to second-guess.
-    /// </summary>
-    public const string DefaultNetwork = "default";
-
-    /// <summary>
     /// Creates the compute system and its differencing disk, attaches a DHCP endpoint, and does
-    /// not start it.
+    /// not start it. A null <paramref name="network"/> means no NIC at all. Networks are named
+    /// literally — the shared default lives in <see cref="HcsNetwork"/>, which also records why
+    /// hcsctl's <c>--network default</c> sentinel is not used here.
     /// </summary>
     /// <param name="labels">
     /// Opaque key/value pairs recorded in hcsctl's store and never interpreted by it. This is how
@@ -40,7 +34,7 @@ internal static class HcsCtlVirtualMachines
         string vhdxPath,
         int processorCount,
         int memoryMb,
-        string? network = DefaultNetwork,
+        string? network = null,
         string? serialPipe = null,
         IReadOnlyDictionary<string, string>? labels = null,
         IProgress<string>? progress = null,

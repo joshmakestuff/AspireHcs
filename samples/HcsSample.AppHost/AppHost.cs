@@ -17,7 +17,7 @@ if (!string.IsNullOrWhiteSpace(vhdx))
         .WithVhdx(vhdx)
         .WithMemory(gigabytes: 2)
         .WithProcessorCount(2)
-        .WithNatNetwork()
+        .WithNetwork()
         .WithEndpoint("ssh", targetPort: 22)
         // The account depends on the image HCS_TEST_VHDX names, so it is configurable and
         // defaults to the Linux fixture hcs-images builds: Rocky 10, whose kickstart creates

@@ -33,7 +33,7 @@ public sealed class NoNetworkTeardownTests(ITestOutputHelper output)
 
         // Strip the sample down to a network-less VM; the orchestrator refuses endpoints
         // without a network, so both go.
-        vm.NetworkEnabled = false;
+        vm.NetworkName = null;
         vm.PrimaryEndpointName = null;
         foreach (EndpointAnnotation endpoint in vm.Annotations.OfType<EndpointAnnotation>().ToList())
         {

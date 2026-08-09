@@ -399,10 +399,10 @@ internal sealed class HcsVmInstance(
             }).ConfigureAwait(false);
 
             List<EndpointAnnotation> endpoints = [.. resource.Annotations.OfType<EndpointAnnotation>()];
-            if (endpoints.Count > 0 && !resource.NetworkEnabled)
+            if (endpoints.Count > 0 && resource.NetworkName is null)
             {
                 throw new InvalidOperationException(
-                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNatNetwork().");
+                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNetwork().");
             }
 
             // Nothing publishes BeforeResourceStartedEvent for resources Aspire does not own,
@@ -445,7 +445,7 @@ internal sealed class HcsVmInstance(
                 RequireBootDisk(),
                 resource.ProcessorCount,
                 resource.MemoryMb,
-                network: resource.NetworkEnabled ? HcsCtlVirtualMachines.DefaultNetwork : null,
+                network: resource.NetworkName,
                 serialPipe: @"\\.\pipe\" + resource.SerialPipeName,
                 labels: new Dictionary<string, string> { [HcsVmOrchestrator.OwnerPidLabel] = HcsVmOrchestrator.OwnerPidValue },
                 progress: new Progress<string>(line => logger.LogDebug("hcsctl: {Line}", line)),
@@ -453,7 +453,7 @@ internal sealed class HcsVmInstance(
 
             resource.EndpointId = created.EndpointId;
             resource.MacAddress = created.MacAddress;
-            if (resource.NetworkEnabled)
+            if (resource.NetworkName is not null)
             {
                 logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on {Network}",
                     created.MacAddress, created.EndpointId, created.Network);
@@ -468,7 +468,7 @@ internal sealed class HcsVmInstance(
             // measured to be a no-op: the lease wait was doing the work all along. Nothing was lost
             // by deleting it, and a VM with no network genuinely has no readiness signal short of
             // asking the guest agent — which is `hcsctl guest info`, and a separate concern.
-            if (resource.NetworkEnabled)
+            if (resource.NetworkName is not null)
             {
                 logger.LogInformation("VM started; waiting for the guest to take a DHCP lease...");
                 await AllocateEndpointsAsync(hcsctl, endpoints, stopping).ConfigureAwait(false);
