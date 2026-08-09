@@ -151,8 +151,56 @@ internal sealed record HcsCtlContainerCreateDocument
     [JsonPropertyName("endpoint")]
     public string? Endpoint { get; init; }
 
+    /// <summary>
+    /// CIDR strings, populated only when the network assigns the address at create — NAT does. An
+    /// ICS network like the Default Switch leases the address after the guest starts, so this list
+    /// is empty there and the current address must be read from <c>network endpoints</c> (#63; the
+    /// VM side documents the same timing as hcsctl#43).
+    /// </summary>
     [JsonPropertyName("addresses")]
     public IReadOnlyList<string> Addresses { get => field ?? []; init; } = [];
+}
+
+/// <summary>
+/// <c>hcsctl network endpoints</c> — the host's HNS endpoints, read live from HCN.
+/// </summary>
+/// <remarks>
+/// This is the only address source that tracks an ICS lease. hcsctl's state.json — and with it
+/// <c>container inspect</c>, which reports that snapshot plus HCS properties carrying no
+/// addresses — records the create-time address list and never updates it, so on an ICS network
+/// it stays empty forever. This document reports the endpoint's current <c>IpConfigurations</c>
+/// instead, unelevated.
+/// </remarks>
+internal sealed record HcsCtlNetworkEndpointsDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("endpoints")]
+    public IReadOnlyList<HcsCtlNetworkEndpointRow> Endpoints { get => field ?? []; init; } = [];
+}
+
+/// <summary>One HNS endpoint with its current addresses.</summary>
+internal sealed record HcsCtlNetworkEndpointRow
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    [JsonPropertyName("networkId")]
+    public string? NetworkId { get; init; }
+
+    [JsonPropertyName("network")]
+    public string? Network { get; init; }
+
+    /// <summary>CIDR strings. Empty on an ICS network until the guest's lease arrives.</summary>
+    [JsonPropertyName("addresses")]
+    public IReadOnlyList<string> Addresses { get => field ?? []; init; } = [];
+
+    [JsonPropertyName("mac")]
+    public string? MacAddress { get; init; }
 }
 
 /// <summary><c>hcsctl container ls</c> — the store and HCS reconciled.</summary>
@@ -549,6 +597,7 @@ internal static class HcsCtlVmState
 [JsonSerializable(typeof(HcsCtlInfoDocument))]
 [JsonSerializable(typeof(HcsCtlContainerCreateDocument))]
 [JsonSerializable(typeof(HcsCtlContainerListDocument))]
+[JsonSerializable(typeof(HcsCtlNetworkEndpointsDocument))]
 [JsonSerializable(typeof(HcsCtlExecDocument))]
 [JsonSerializable(typeof(HcsCtlVmCreateDocument))]
 [JsonSerializable(typeof(HcsCtlVmStartDocument))]

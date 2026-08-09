@@ -5,10 +5,11 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// #41. The container's networking is simpler than the VM's in the one place the VM path cost the
-// most: a static HNS endpoint programs a container's stack directly, so the address is known when
-// the container is CREATED rather than discovered by polling for a DHCP lease. Measured
-// 2026-08-07, along with the address being reachable from the host without port publishing.
+// #41's measurement (2026-08-07, on `nat`): a static HNS endpoint programs a container's stack
+// directly, so the address is known when the container is CREATED — and it is reachable from the
+// host without port publishing. That inversion holds on NAT networks only. An ICS network — the
+// Default Switch, the default since #60 — leases the address after the guest starts, so the
+// instance waits for it there; ContainerAddressLeaseTests pins that wait (#63).
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsContainerNetworkTests
 {
