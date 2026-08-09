@@ -403,5 +403,5 @@ public class ConnectCommandTests
     }
 
     private static IResourceBuilder<HcsVirtualMachineResource> Vm()
-        => DistributedApplication.CreateBuilder([]).AddHcsVm("vm").WithNatNetwork();
+        => DistributedApplication.CreateBuilder([]).AddHcsVm("vm").WithNetwork();
 }

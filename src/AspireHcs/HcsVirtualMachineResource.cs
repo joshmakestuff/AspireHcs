@@ -34,8 +34,12 @@ public sealed class HcsVirtualMachineResource([ResourceName] string name)
         }
     }
 
-    /// <summary>Whether the VM gets a NIC on the host's Default Switch (ICS DHCP/NAT) network.</summary>
-    internal bool NetworkEnabled { get; set; }
+    /// <summary>
+    /// The host compute network the VM's NIC attaches to, by name or id. Null means no NIC.
+    /// Defaults to the Default Switch via <c>WithNetwork()</c> so VMs and HCS containers
+    /// co-locate — guests on different HNS networks cannot reach each other (#58).
+    /// </summary>
+    internal string? NetworkName { get; set; }
 
     /// <summary>First endpoint declared via WithEndpoint; backs the connection string.</summary>
     internal string? PrimaryEndpointName { get; set; }
