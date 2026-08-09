@@ -2,7 +2,6 @@ using System.Runtime.Versioning;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
-using AspireHcs.Hcn;
 using AspireHcs.Hosting;
 using Xunit;
 using Xunit.Abstractions;
@@ -31,7 +30,6 @@ public sealed class NoNetworkTeardownTests(ITestOutputHelper output)
         IDistributedApplicationTestingBuilder appHost =
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
         HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
-        string workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", vm.VmId);
 
         // Strip the sample down to a network-less VM; the orchestrator refuses endpoints
         // without a network, so both go.
@@ -48,18 +46,20 @@ public sealed class NoNetworkTeardownTests(ITestOutputHelper output)
         await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
         output.WriteLine("booted to Running without a network");
 
-        // A network-less boot must not have created an HCN endpoint at all. Enumerated without
-        // an owner filter: owners are run-scoped now, and a filtered query that names the wrong
-        // owner would make this assertion pass vacuously.
-        Assert.DoesNotContain(vm.HcnEndpointId, HcnClient.EnumerateEndpointIds());
+        // A network-less boot must not have created an HCN endpoint at all. hcsctl reports the
+        // endpoint it made in the create document, so a null here is the tool's own account of
+        // having made none.
+        Assert.Null(vm.EndpointId);
 
         ExecuteCommandResult stopped = await app.ResourceCommands
             .ExecuteCommandAsync("appliance", KnownResourceCommands.StopCommand, cts.Token);
         Assert.True(stopped.Success, $"Stop failed: {stopped.Message}");
         await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Exited, cts.Token);
 
-        // The shorter ledger — two grants and a work directory, no endpoint — must drain fully.
-        Assert.False(Directory.Exists(workDir), $"Stop left the work directory behind: {workDir}");
+        // The VM, its differencing disk and its access grants all go with `vm rm`. The disk now
+        // lives in hcsctl's store rather than a work directory of ours, so the store's own
+        // account of what exists is the residue check.
+        Assert.DoesNotContain(vm.VmId, HcsCtlProbes.VmIds(vm.StorePath));
         Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
 
         await app.StopAsync(cts.Token);

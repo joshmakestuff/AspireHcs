@@ -19,8 +19,8 @@ public class HcsVirtualMachineBuilderTests
         Assert.Equal("appliance", resource.Name);
         Assert.Equal(2048, resource.MemoryMb);
         Assert.Equal(2, resource.ProcessorCount);
-        Assert.True(resource.CopyOnWrite);
-        Assert.StartsWith("aspirehcs-appliance-", resource.VmId);
+        // The id is a GUID because hcsctl requires one: it is also the VM's hvsocket address.
+        Assert.True(Guid.TryParse(resource.VmId, out _), $"VmId '{resource.VmId}' is not a GUID.");
 
         // A local VM must never land in a publish manifest.
         Assert.Contains(resource.Annotations, a => a is ManifestPublishingCallbackAnnotation);
@@ -33,12 +33,11 @@ public class HcsVirtualMachineBuilderTests
         IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
 
         IResourceBuilder<HcsVirtualMachineResource> vm = builder.AddHcsVm("vm")
-            .WithVhdx(@"c:\images\test.vhdx", copyOnWrite: false)
+            .WithVhdx(@"c:\images\test.vhdx")
             .WithMemory(gigabytes: 4)
             .WithProcessorCount(6);
 
         Assert.Equal(@"c:\images\test.vhdx", vm.Resource.VhdxPath);
-        Assert.False(vm.Resource.CopyOnWrite);
         Assert.Equal(4096, vm.Resource.MemoryMb);
         Assert.Equal(6, vm.Resource.ProcessorCount);
     }
@@ -55,7 +54,12 @@ public class HcsVirtualMachineBuilderTests
 
         Assert.True(vm.Resource.NetworkEnabled);
         Assert.Equal("ssh", vm.Resource.PrimaryEndpointName);
-        Assert.Matches("^02-15-5D(-[0-9A-F]{2}){3}$", vm.Resource.MacAddress);
+
+        // The MAC and the endpoint id are hcsctl's to choose, and are unknown until the VM has
+        // been created. The MAC in particular has to survive a stop/start for the DHCP lease to
+        // hold, so hcsctl's store is what remembers it rather than this process.
+        Assert.Null(vm.Resource.MacAddress);
+        Assert.Null(vm.Resource.EndpointId);
 
         List<EndpointAnnotation> endpoints = [.. vm.Resource.Annotations.OfType<EndpointAnnotation>()];
         Assert.Equal(2, endpoints.Count);
