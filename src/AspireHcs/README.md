@@ -113,6 +113,7 @@ Containers:
 - The host compute network named by `WithNatNetwork()` must already exist — `nat` by default. AspireHcs names a network; it does not create one.
 - Concurrent AppHosts are supported here too, and by the same discipline: containers carry the owning process id in their id, and a leftover is reclaimed only once that process is gone.
 
-## Status
+## Where more details are
 
-Pre-alpha. The API above is the design target; see the [repository](https://github.com/joshmakestuff/AspireHcs) for the current roadmap.
+This package is pre-alpha, and the API above is the design target. The roadmap and work in
+progress are in the [repository issues](https://github.com/joshmakestuff/AspireHcs/issues).
