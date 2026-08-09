@@ -91,17 +91,22 @@ public static class HcsVirtualMachineBuilderExtensions
     }
 
     /// <summary>
-    /// Attaches a NIC on the host's NAT network (the Hyper-V Default Switch). The switch's
-    /// built-in DHCP leases the guest an address, which AspireHcs discovers host-side and
-    /// uses to resolve the VM's endpoints. The guest image must configure its NIC for DHCP
-    /// (the default for stock Linux and Windows images).
+    /// Attaches a NIC on an existing host compute network, defaulting to the Hyper-V Default
+    /// Switch — the same default HCS containers get, so a VM and a container in one AppHost reach
+    /// each other out of the box. Guests on different HNS networks are isolated (measured, #58),
+    /// so naming another network here is the isolation opt-in. The network's DHCP leases the
+    /// guest an address, which AspireHcs discovers host-side and uses to resolve the VM's
+    /// endpoints; the guest image must configure its NIC for DHCP (the default for stock Linux
+    /// and Windows images), and a network without a DHCP server leaves the guest addressless —
+    /// only ICS networks like the Default Switch are measured to serve a full VM.
     /// </summary>
-    public static IResourceBuilder<HcsVirtualMachineResource> WithNatNetwork(
-        this IResourceBuilder<HcsVirtualMachineResource> builder)
+    public static IResourceBuilder<HcsVirtualMachineResource> WithNetwork(
+        this IResourceBuilder<HcsVirtualMachineResource> builder, string networkName = HcsNetwork.DefaultSwitchName)
     {
         ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(networkName);
 
-        builder.Resource.NetworkEnabled = true;
+        builder.Resource.NetworkName = networkName;
         return builder;
     }
 
@@ -109,7 +114,7 @@ public static class HcsVirtualMachineBuilderExtensions
     /// Declares a service the guest exposes on <paramref name="targetPort"/>. Registered as a
     /// non-proxied Aspire endpoint (DCP cannot proxy into a VM) that resolves to the guest's
     /// DHCP-leased IP once it boots. The first endpoint declared backs the resource's
-    /// connection string. Requires <see cref="WithNatNetwork"/>.
+    /// connection string. Requires <see cref="WithNetwork"/>.
     /// </summary>
     public static IResourceBuilder<HcsVirtualMachineResource> WithEndpoint(
         this IResourceBuilder<HcsVirtualMachineResource> builder, string name, int targetPort)

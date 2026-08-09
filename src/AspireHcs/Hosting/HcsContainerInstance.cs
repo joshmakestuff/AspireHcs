@@ -240,7 +240,7 @@ internal sealed class HcsContainerInstance(
             if (resource.Annotations.OfType<EndpointAnnotation>().Any() && resource.NetworkName is null)
             {
                 throw new InvalidOperationException(
-                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNatNetwork().");
+                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNetwork().");
             }
 
             HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath);
@@ -397,7 +397,7 @@ internal sealed class HcsContainerInstance(
         {
             throw new InvalidOperationException(
                 $"Resource '{resource.Name}' declares endpoints but the container has no address. " +
-                "Add WithNatNetwork() so it gets a NIC on a host compute network.");
+                "Add WithNetwork() so it gets a NIC on a host compute network.");
         }
 
         // hcsctl reports the address in CIDR form (172.17.163.120/20). An endpoint wants the

@@ -192,23 +192,28 @@ public static class HcsContainerBuilderExtensions
     }
 
     /// <summary>
-    /// Attaches a NIC on an existing host compute network, defaulting to <c>nat</c> — the network
-    /// a Windows container host normally has.
+    /// Attaches a NIC on an existing host compute network, defaulting to the Hyper-V Default
+    /// Switch — the same default HCS VMs get, so a container and a VM in one AppHost reach each
+    /// other out of the box. Guests on different HNS networks are isolated (measured, #58), so
+    /// naming another network here — <c>nat</c>, say, the one a Windows container host normally
+    /// has — is the isolation opt-in.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Unlike the VM path, there is no DHCP dance. A static HNS endpoint programs a container's
     /// network stack directly, so the address is known when the container is <em>created</em>
     /// rather than discovered afterwards — measured 2026-08-07, along with the fact that the
-    /// address is reachable from the host, so no port publishing is involved.
+    /// address is reachable from the host, so no port publishing is involved. On the Default
+    /// Switch the endpoint takes its address from the same switch pool that leases the VMs
+    /// theirs, measured working in both directions (#60).
     /// </para>
     /// <para>
     /// The network must already exist: hcsctl cannot create one
     /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>).
     /// </para>
     /// </remarks>
-    public static IResourceBuilder<HcsContainerResource> WithNatNetwork(
-        this IResourceBuilder<HcsContainerResource> builder, string networkName = "nat")
+    public static IResourceBuilder<HcsContainerResource> WithNetwork(
+        this IResourceBuilder<HcsContainerResource> builder, string networkName = HcsNetwork.DefaultSwitchName)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(networkName);
@@ -220,7 +225,7 @@ public static class HcsContainerBuilderExtensions
     /// <summary>
     /// Declares a service the guest exposes on <paramref name="targetPort"/>, as a non-proxied
     /// Aspire endpoint resolving to the container's own address. The first endpoint declared
-    /// backs the resource's connection string. Requires <see cref="WithNatNetwork"/>.
+    /// backs the resource's connection string. Requires <see cref="WithNetwork"/>.
     /// </summary>
     public static IResourceBuilder<HcsContainerResource> WithEndpoint(
         this IResourceBuilder<HcsContainerResource> builder, string name, int targetPort)
