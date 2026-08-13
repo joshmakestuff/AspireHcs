@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # The hcsctl release tag to fetch. Changing this requires changing ExpectedSha256 too.
-    [string] $Version = 'v0.2.0',
+    [string] $Version = 'v0.3.0',
 
     # Where to put hcsctl.exe. Defaults to tools/hcsctl beside this script's repository.
     [string] $Destination,
@@ -45,7 +45,7 @@ $ErrorActionPreference = 'Stop'
 #
 # Since v0.2.0 the binary reports its own version, so the hash is no longer its only identity and
 # the install is checked both ways (hcsctl#29).
-$ExpectedSha256 = 'F4F72B42C211ECC94CFE31160272896435EDD88A6B8C9C23208FE7FD00425764'
+$ExpectedSha256 = '259E59E945D796B70636F935BE537C9E288150A702C2A82D026AE631CCC09FCD'
 $Repository = 'joshmakestuff/hcsctl'
 
 # v0.1.0-preview.1 embedded the version in the asset name; the release workflow added in
