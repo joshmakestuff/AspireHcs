@@ -5,7 +5,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>true</IsPackable>
     <PackageId>AspireHcs</PackageId>
-    <Description>Experimental Aspire hosting integration for the Windows Host Compute System (HCS): Hyper-V virtual machines and Hyper-V-isolated Windows containers as Aspire resources. VMs are driven through the HCS API directly; containers are driven through the hcsctl CLI, which must be installed separately. Windows-only by design; fails fast elsewhere.</Description>
+    <Description>Experimental Aspire hosting integration for the Windows Host Compute System (HCS): Hyper-V virtual machines and Hyper-V-isolated Windows containers as Aspire resources. Both resource kinds are driven through the hcsctl CLI, which must be installed separately. Windows-only by design; fails fast elsewhere.</Description>
     <PackageTags>aspire;hosting;hyper-v;hcs;virtual-machine;windows;windows-containers</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>

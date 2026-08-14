@@ -24,10 +24,10 @@ internal readonly record struct HcsContainerMount(string Source, string Target, 
 /// and torn down when it exits, with leftovers from a crashed run scavenged on the next one.
 /// </summary>
 /// <remarks>
-/// Hyper-V isolation is the only mode, and that is permanent rather than pending. Process
-/// isolation needs an enabled <c>BUILTIN\Administrators</c> SID at <c>PrepareLayer</c>, which runs
-/// at <em>every</em> container start — a group check no user-rights assignment satisfies in a
-/// UAC-filtered token. See the workspace's <c>docs/findings.md</c> (preserved detail: <c>docs/old/AspireHcs/docs/containers.md</c>).
+/// AspireHcs currently exposes Hyper-V isolation only. Process isolation needs an enabled
+/// <c>BUILTIN\Administrators</c> SID at <c>PrepareLayer</c>, which runs at <em>every</em> container
+/// start — a group check no user-rights assignment satisfies in a UAC-filtered token. That is an
+/// AspireHcs product constraint, not an exclusion from hcsctl's scope.
 /// </remarks>
 public sealed class HcsContainerResource([ResourceName] string name)
     : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString, IResourceWithEnvironment
@@ -62,8 +62,9 @@ public sealed class HcsContainerResource([ResourceName] string name)
     internal string? ImageReference { get; set; }
 
     /// <summary>
-    /// What the container runs. hcsctl has no notion of a primary process, so this is executed as
-    /// a guest process that the AppHost stays attached to for its lifetime.
+    /// What the container runs. AspireHcs currently launches it with <c>container exec</c> and
+    /// stays attached for its lifetime; hcsctl also has a recorded primary-process path that this
+    /// integration has not adopted.
     /// </summary>
     internal string? Command { get; set; }
 
@@ -98,9 +99,8 @@ public sealed class HcsContainerResource([ResourceName] string name)
     /// The host compute network to attach an endpoint on, by name or id. Null means no NIC.
     /// </summary>
     /// <remarks>
-    /// The network must already exist — hcsctl cannot create one
-    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>), so this
-    /// names one rather than making it. <c>WithNetwork()</c> defaults it to the Default Switch,
+    /// AspireHcs names an existing network rather than asking hcsctl to create one. hcsctl does
+    /// expose HCN network creation. <c>WithNetwork()</c> defaults to the Default Switch,
     /// the same network VMs default to, so the two resource kinds co-locate (#58, #60).
     /// </remarks>
     internal string? NetworkName { get; set; }

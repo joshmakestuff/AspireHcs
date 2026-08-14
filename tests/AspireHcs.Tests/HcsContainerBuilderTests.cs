@@ -97,8 +97,8 @@ public class HcsContainerBuilderTests
         Assert.Throws<ArgumentOutOfRangeException>(() => container.WithProcessorCount(value));
     }
 
-    // There is no isolation switch by design: process isolation is permanently out of scope and
-    // hcsctl does not implement it, so there is nothing that could default wrongly (#46).
+    // There is no isolation switch in the current AspireHcs API. hcsctl has not implemented its
+    // in-scope process-isolation path yet, so there is nothing that could default wrongly today.
     [Fact]
     public void No_builder_method_offers_process_isolation()
     {

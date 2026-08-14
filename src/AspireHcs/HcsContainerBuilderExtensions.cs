@@ -18,10 +18,10 @@ public static class HcsContainerBuilderExtensions
     /// run this way has no deployment story.
     /// </summary>
     /// <remarks>
-    /// There is no isolation option. Hyper-V isolation is the only mode AspireHcs supports and
-    /// the only one hcsctl implements — process isolation is refused rather than attempted,
-    /// because its gate runs at every container start and no grant satisfies it in a
-    /// UAC-filtered token. See the workspace's <c>docs/findings.md</c> (preserved detail: <c>docs/old/AspireHcs/docs/containers.md</c>).
+    /// There is no isolation option today. AspireHcs supports Hyper-V isolation; hcsctl has not
+    /// yet implemented its in-scope process-isolation surface. Process isolation's gate runs at
+    /// every container start and no user-rights grant supplies the required enabled
+    /// Administrators SID in a UAC-filtered token.
     /// </remarks>
     public static IResourceBuilder<HcsContainerResource> AddHcsContainer(
         this IDistributedApplicationBuilder builder, [ResourceName] string name)
@@ -214,8 +214,8 @@ public static class HcsContainerBuilderExtensions
     /// theirs, measured working in both directions (#60).
     /// </para>
     /// <para>
-    /// The network must already exist: hcsctl cannot create one
-    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>).
+    /// AspireHcs names an existing network. hcsctl can create HCN networks, but this builder does
+    /// not own or provision one.
     /// </para>
     /// </remarks>
     public static IResourceBuilder<HcsContainerResource> WithNetwork(

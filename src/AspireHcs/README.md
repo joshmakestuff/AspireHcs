@@ -31,9 +31,9 @@ var worker = builder.AddHcsContainer("worker")
     .WithTcpHealthCheck();
 ```
 
-**Containers additionally require [hcsctl](https://github.com/joshmakestuff/hcsctl)**, which is not
-bundled with this package. AspireHcs drives it rather than calling HCS directly for containers, and
-resolves it from an explicit path, the `ASPIREHCS_HCSCTL` environment variable, or `PATH`. Images
+**Both resource kinds require [hcsctl](https://github.com/joshmakestuff/hcsctl)**, which is not
+bundled with this package. AspireHcs drives it rather than calling HCS directly, and resolves it
+from an explicit path, the `ASPIREHCS_HCSCTL` environment variable, or `PATH`. Container images
 must already be imported into an hcsctl store — a one-time step, and the import needs elevation:
 
 ```
@@ -41,18 +41,19 @@ hcsctl image pull   --ref <ref> --store <dir>
 hcsctl image import --ref <ref> --store <dir>   # elevated, once per image
 ```
 
-**Hyper-V isolation is the only container mode**, permanently. Process isolation requires an
-enabled `BUILTIN\Administrators` SID at `PrepareLayer`, which runs at *every* container start — a
-group check no user-rights assignment satisfies in a UAC-filtered token. It is refused up front
-rather than attempted.
+**AspireHcs currently exposes only Hyper-V isolation.** Process isolation requires an enabled
+`BUILTIN\Administrators` SID at `PrepareLayer`, which runs at *every* container start — a group
+check no user-rights assignment satisfies in a UAC-filtered token. AspireHcs refuses it up front
+today because that does not fit its local-dev-loop posture. This is an AspireHcs product choice,
+not an exclusion from hcsctl's scope.
 
 A container has no separate guest-kernel readiness signal, so `WithTcpHealthCheck()` is the **only**
 readiness gate: without it a container is declared ready the moment it reports Running, which is
 before anything inside it is listening.
 
-Known gap: container logs currently carry hcsctl's whole stderr — the guest's output and hcsctl's
-own progress lines interleaved — because the two are not separable yet
-([hcsctl#28](https://github.com/joshmakestuff/hcsctl/issues/28)).
+Known gap: AspireHcs currently invokes hcsctl with `--json` but not its available `--stream-json`
+framing, so container logs still receive raw stderr with guest output and progress interleaved.
+Adopting the structured stream is AspireHcs work; hcsctl#28 is closed.
 
 ## Networking
 
@@ -108,9 +109,10 @@ Delivery differs by resource kind:
 
 ## Readiness
 
-A VM reports **Running** once its guest kernel is up and its endpoints resolve to the address the
-guest leased. On the reference image that is ~9 s (integration drivers) and ~14 s (DHCP) after
-start.
+A networked VM reports **Running** once its endpoint resolves to the address the guest leased.
+Measured with the Rocky image, that lease took 16 s on a cold boot and 10 s on restart, each
+bounded by the poll interval. A networkless VM has no equivalent guest-readiness signal; there,
+Running means the HCS start completed plus any requested agent-based environment delivery.
 
 Running is not the same as serving. Aspire declares a resource with no health checks ready the
 moment it reports Running, so `WaitFor(vm)` would release dependents while the guest was still
@@ -154,15 +156,16 @@ Both resource types:
 
 Virtual machines:
 
-- The guest image must load the Hyper-V integration drivers (`hv_balloon` on Linux, in-box on Windows). The readiness probe resizes guest memory, which only the guest can satisfy; an image without them fails with a `TimeoutException` naming the cause rather than reporting a false ready.
-- The guest image must configure its NIC for DHCP when using `WithNetwork()`, and AspireHcs discovers the leased address afterwards — the default for stock Linux and Windows images. (Containers do **not** work this way: their address is assigned statically and known before the container starts.)
+- The guest image must configure its NIC for DHCP when using `WithNetwork()`, because AspireHcs currently expects a DHCP-serving network and discovers the lease afterwards. The Default Switch supplies that service; an hcsctl-created NAT does not. Container address timing depends on the network: NAT allocates at endpoint creation, while the Default Switch lease appears after start.
 - Concurrent AppHosts on one host are supported: each run tags its HCN endpoints with its process id, and leftover endpoints from crashed runs are scavenged only once their owning process is gone. Two caveats: builds predating this scheme tag endpoints without a pid and can still have a starting VM's NIC scavenged out from under them, so don't run old builds concurrently with anything; and all VMs share the Default Switch's DHCP pool.
 
-Containers:
+hcsctl:
 
-- `hcsctl` on `PATH`, in `ASPIREHCS_HCSCTL`, or given via `WithHcsCtl(path)`.
+- Both resource kinds need `hcsctl` on `PATH`, in `ASPIREHCS_HCSCTL`, or given via `WithHcsCtl(path)`.
+
+Containers:
 - The image already imported into an hcsctl store (the import is elevated, once per image). A missing image fails resource start with the exact two commands to run.
-- The host compute network named by `WithNetwork()` must already exist — the Default Switch by default, which every Windows client SKU with Hyper-V has. AspireHcs names a network; it does not create one.
+- The host compute network named by `WithNetwork()` must already exist. AspireHcs defaults to the Default Switch, which Windows client Hyper-V normally provides, and fails if it is absent. hcsctl can create HCN networks; AspireHcs currently names one rather than provisioning it.
 - Concurrent AppHosts are supported here too, and by the same discipline: containers carry the owning process id in their id, and a leftover is reclaimed only once that process is gone.
 
 ## Where more details are

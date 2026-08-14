@@ -32,8 +32,8 @@ public class HcsContainerNetworkTests
         Assert.Equal(HcsNetwork.DefaultSwitchName, builder.AddHcsVm("vm").WithNetwork().Resource.NetworkName);
     }
 
-    // hcsctl cannot create a network (hcsctl#15), so this names an existing one — which means a
-    // non-default network has to be nameable. `nat` in particular stays expressible: a container
+    // AspireHcs names an existing network rather than provisioning one, so a non-default network
+    // has to be nameable. `nat` in particular stays expressible: a container
     // placed there deliberately cannot see the Default Switch residents (#58).
     [Fact]
     public void A_named_network_is_honoured()

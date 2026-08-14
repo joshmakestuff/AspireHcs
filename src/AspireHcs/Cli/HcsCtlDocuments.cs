@@ -42,9 +42,9 @@ internal sealed record HcsCtlInfoDocument
     [JsonPropertyName("ok")]
     public bool Ok { get; init; }
 
-    // Named "host" deliberately. hcsctl's "version" field is the *host OS* build, not hcsctl's
-    // own version — the tool has no machine-readable version yet (hcsctl#29), and a property
-    // called Version here would be read as one.
+    // Named "host" deliberately. hcsctl's "version" field is the host OS build; its own
+    // identity is emitted separately as toolVersion and contractVersion. AspireHcs does not bind
+    // or enforce those fields yet.
 
     [JsonPropertyName("build")]
     public int HostBuild { get; init; }
@@ -104,8 +104,8 @@ internal sealed record HcsCtlImageInfo
     public string? OsVersion { get; init; }
 
     /// <summary>
-    /// Reported for completeness only. AspireHcs never acts on it: process isolation is out of
-    /// scope permanently (#46), and hcsctl does not implement it at all.
+    /// Reported for completeness. AspireHcs currently exposes Hyper-V isolation only; process
+    /// isolation remains in hcsctl's scope but is not implemented there yet.
     /// </summary>
     [JsonPropertyName("processIsolationCompatible")]
     public bool ProcessIsolationCompatible { get; init; }

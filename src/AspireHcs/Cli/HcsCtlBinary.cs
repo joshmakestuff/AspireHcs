@@ -3,10 +3,9 @@ using System.Diagnostics.CodeAnalysis;
 namespace AspireHcs.Cli;
 
 /// <summary>
-/// Finds <c>hcsctl.exe</c>. Distribution is unsettled — the tool is not packaged with AspireHcs
-/// and there is no version handshake yet (hcsctl#29) — so resolution is explicit and its failure
-/// message names every place that was searched, rather than leaving a developer to guess which
-/// of three mechanisms was supposed to apply.
+/// Finds <c>hcsctl.exe</c>. The tool is not packaged with AspireHcs, so resolution is explicit and
+/// its failure message names every place that was searched. hcsctl emits tool and contract
+/// versions; AspireHcs does not yet enforce that handshake.
 /// </summary>
 internal static class HcsCtlBinary
 {
@@ -72,7 +71,7 @@ internal static class HcsCtlBinary
             return true;
         }
 
-        failure = $"{FileName} was not found. AspireHcs runs Windows containers by driving hcsctl " +
+        failure = $"{FileName} was not found. AspireHcs runs HCS resources by driving hcsctl " +
             "(https://github.com/joshmakestuff/hcsctl); it does not call HCS directly. Searched, in order: " +
             $"the path configured on the resource, the {EnvironmentVariable} environment variable, and PATH.";
         return false;

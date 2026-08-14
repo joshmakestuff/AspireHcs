@@ -791,9 +791,10 @@ internal sealed class HcsContainerInstance(
     }
 
     /// <summary>
-    /// Forwards hcsctl's stderr to the resource's log. In <c>--json</c> mode that stream carries
-    /// both hcsctl's progress and the guest's own output, and the two are not distinguishable
-    /// (hcsctl#28) — so this is honest plumbing, not the separated log pipeline of #40.
+    /// Forwards hcsctl's stderr to the resource's log. hcsctl supports typed NDJSON framing with
+    /// <c>--stream-json</c>, but AspireHcs currently requests only <c>--json</c>; this path therefore
+    /// still receives raw progress and guest output. Adopting and parsing the framing is remaining
+    /// AspireHcs work, not an hcsctl gap.
     /// </summary>
     private sealed class Progress(ILogger logger) : IProgress<string>
     {
