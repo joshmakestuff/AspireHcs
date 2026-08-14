@@ -13,6 +13,7 @@ public class HcsCtlPreflightTests
 {
     private static HcsCtlInfoDocument Healthy(
         bool hyperVAdministrators = true,
+        string? contractVersion = HcsCtlPreflight.SupportedContractVersion,
         Dictionary<string, string>? services = null,
         HcsCtlStoreInfo? store = null,
         IReadOnlyList<HcsCtlImageInfo>? images = null) => new()
@@ -20,6 +21,7 @@ public class HcsCtlPreflightTests
             Ok = true,
             HostBuild = 26200,
             HostOsVersion = "10.0.26200.8894",
+            ContractVersion = contractVersion,
             Elevated = false,
             HyperVAdministrators = hyperVAdministrators,
             Services = services ?? new Dictionary<string, string>
@@ -37,6 +39,20 @@ public class HcsCtlPreflightTests
     {
         // The whole posture in one assertion: elevation is not a prerequisite for running.
         Assert.Null(HcsCtlPreflight.DescribeBlocker(Healthy()));
+    }
+
+    // The contract gate runs before every other rule: without a recognized contractVersion the
+    // document shape is unknowable, so no service or group check is safe to interpret. "1" is the
+    // only supported value and is covered by A_healthy_unelevated_host_has_no_blocker above.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("0")]
+    [InlineData("2")]
+    public void An_unknown_or_missing_contract_version_is_a_blocker(string? contractVersion)
+    {
+        Assert.NotNull(HcsCtlPreflight.DescribeBlocker(Healthy(contractVersion: contractVersion)));
     }
 
     [Fact]

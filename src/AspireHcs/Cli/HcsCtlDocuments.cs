@@ -43,8 +43,7 @@ internal sealed record HcsCtlInfoDocument
     public bool Ok { get; init; }
 
     // Named "host" deliberately. hcsctl's "version" field is the *host OS* build, not hcsctl's
-    // own version — the tool has no machine-readable version yet (hcsctl#29), and a property
-    // called Version here would be read as one.
+    // own identity — that is emitted separately as toolVersion and contractVersion.
 
     [JsonPropertyName("build")]
     public int HostBuild { get; init; }
@@ -54,6 +53,14 @@ internal sealed record HcsCtlInfoDocument
 
     [JsonPropertyName("version")]
     public string? HostOsVersion { get; init; }
+
+    /// <summary>hcsctl's own release identity, e.g. <c>v0.3.0</c>.</summary>
+    [JsonPropertyName("toolVersion")]
+    public string? ToolVersion { get; init; }
+
+    /// <summary>The wire-contract version AspireHcs parses against. Missing means unknown shape.</summary>
+    [JsonPropertyName("contractVersion")]
+    public string? ContractVersion { get; init; }
 
     /// <summary>Whether the calling token is elevated. Running a xenon should not require it.</summary>
     [JsonPropertyName("elevated")]
@@ -589,6 +596,22 @@ internal static class HcsCtlVmState
     public const string Running = "running";
 }
 
+/// <summary>
+/// One framed line of <c>hcsctl --stream-json</c> stderr. Progress is
+/// <c>{"stream":"progress","msg":…}</c>; guest output is <c>{"stream":"stdout"|"stderr","data":…}</c>.
+/// </summary>
+internal sealed record HcsCtlStreamRecord
+{
+    [JsonPropertyName("stream")]
+    public string? Stream { get; init; }
+
+    [JsonPropertyName("msg")]
+    public string? Msg { get; init; }
+
+    [JsonPropertyName("data")]
+    public string? Data { get; init; }
+}
+
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = false)]
 [JsonSerializable(typeof(HcsCtlStatsDocument))]
 [JsonSerializable(typeof(HcsCtlProcessListDocument))]
@@ -599,6 +622,7 @@ internal static class HcsCtlVmState
 [JsonSerializable(typeof(HcsCtlContainerListDocument))]
 [JsonSerializable(typeof(HcsCtlNetworkEndpointsDocument))]
 [JsonSerializable(typeof(HcsCtlExecDocument))]
+[JsonSerializable(typeof(HcsCtlStreamRecord))]
 [JsonSerializable(typeof(HcsCtlVmCreateDocument))]
 [JsonSerializable(typeof(HcsCtlVmStartDocument))]
 [JsonSerializable(typeof(HcsCtlVmAddressDocument))]

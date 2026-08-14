@@ -138,6 +138,72 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
         return Interpret(process.ExitCode, stdout, commandLine, string.Join(Environment.NewLine, diagnostics), resultType);
     }
 
+    /// <summary>
+    /// Runs one hcsctl command under <c>--stream-json</c> and deserializes its single stdout
+    /// document, while its stderr is parsed as framed NDJSON (<see cref="HcsCtlStreamRecord"/>).
+    /// Mirrors <see cref="InvokeAsync"/> exactly, differing only in the two stream contracts:
+    /// <c>--stream-json</c> is appended after <c>--json</c>, and stderr must be typed records.
+    /// </summary>
+    /// <param name="progress">Receives every parsed stderr record, as it arrives.</param>
+    public async Task<TResult> InvokeStreamingAsync<TResult>(
+        IReadOnlyList<string> arguments,
+        JsonTypeInfo<TResult> resultType,
+        IProgress<HcsCtlStreamRecord>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ProcessStartInfo startInfo = new(ExecutablePath)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+        };
+
+        foreach (string argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        if (!string.IsNullOrEmpty(StorePath) && !RejectsStore(arguments))
+        {
+            startInfo.ArgumentList.Add("--store");
+            startInfo.ArgumentList.Add(StorePath);
+        }
+
+        startInfo.ArgumentList.Add("--json");
+        startInfo.ArgumentList.Add("--stream-json");
+
+        string commandLine = $"{Path.GetFileName(ExecutablePath)} {string.Join(' ', startInfo.ArgumentList)}";
+
+        using Process process = new() { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            throw new HcsCtlContractException(
+                $"Failed to start '{ExecutablePath}'.", commandLine, exitCode: -1, diagnostics: null);
+        }
+
+        Queue<string> diagnostics = new();
+        Task<string> readStdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        Task readStderr = PumpStandardErrorStreamingAsync(process, diagnostics, progress, commandLine, cancellationToken);
+
+        string stdout;
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            stdout = await readStdout.ConfigureAwait(false);
+            await readStderr.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            KillQuietly(process);
+            throw;
+        }
+
+        return Interpret(process.ExitCode, stdout, commandLine, string.Join(Environment.NewLine, diagnostics), resultType);
+    }
+
     private static bool RejectsStore(IReadOnlyList<string> arguments)
         => arguments.Count > 0 && GroupsWithoutStore.Contains(arguments[0], StringComparer.Ordinal);
 
@@ -155,6 +221,46 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
             if (diagnostics.Count > DiagnosticLineLimit)
             {
                 diagnostics.Dequeue();
+            }
+        }
+    }
+
+    private static async Task PumpStandardErrorStreamingAsync(
+        Process process,
+        Queue<string> diagnostics,
+        IProgress<HcsCtlStreamRecord>? progress,
+        string commandLine,
+        CancellationToken cancellationToken)
+    {
+        while (await process.StandardError.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+        {
+            HcsCtlStreamRecord record;
+            try
+            {
+                record = JsonSerializer.Deserialize(line, HcsCtlJsonContext.Default.HcsCtlStreamRecord)
+                    ?? throw new JsonException("the JSON literal null");
+            }
+            catch (JsonException)
+            {
+                // Thrown rather than reported to progress: a bare-text line means hcsctl ignored
+                // --stream-json, so the guest/progress split is not trustworthy. The exit code is
+                // not meaningful mid-stream, hence -1 like the failed-to-start path.
+                throw new HcsCtlContractException(
+                    $"hcsctl's stderr was not NDJSON under --stream-json: {line}",
+                    commandLine, exitCode: -1, diagnostics: null);
+            }
+
+            progress?.Report(record);
+
+            // Guest output is log content, never failure diagnostics, so only hcsctl's own
+            // progress lines feed the bounded tail that a failure message carries.
+            if (string.Equals(record.Stream, "progress", StringComparison.Ordinal))
+            {
+                diagnostics.Enqueue(record.Msg ?? string.Empty);
+                if (diagnostics.Count > DiagnosticLineLimit)
+                {
+                    diagnostics.Dequeue();
+                }
             }
         }
     }

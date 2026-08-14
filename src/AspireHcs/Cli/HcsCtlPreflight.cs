@@ -9,6 +9,9 @@ namespace AspireHcs.Cli;
 /// </summary>
 internal static class HcsCtlPreflight
 {
+    /// <summary>The one wire-contract version AspireHcs understands. Exact string match, not numeric.</summary>
+    public const string SupportedContractVersion = "1";
+
     /// <summary>Services that must be running before any compute system can be created.</summary>
     private static readonly string[] RequiredServices = ["vmcompute", "hvhost"];
 
@@ -21,6 +24,21 @@ internal static class HcsCtlPreflight
     public static string? DescribeBlocker(HcsCtlInfoDocument info)
     {
         ArgumentNullException.ThrowIfNull(info);
+
+        // The document shape is unknowable without a contractVersion, so this gate runs before
+        // anything else reads a field — a shape change would make every later rule a guess.
+        if (string.IsNullOrWhiteSpace(info.ContractVersion))
+        {
+            return "hcsctl did not report a contractVersion, so its document shape is unknown. " +
+                "Repin a supported build with ./eng/Get-HcsCtl.ps1 -Force.";
+        }
+
+        if (!string.Equals(info.ContractVersion, SupportedContractVersion, StringComparison.Ordinal))
+        {
+            return $"hcsctl {info.ToolVersion ?? "unknown"} reports contractVersion '{info.ContractVersion}'; " +
+                $"AspireHcs supports only '{SupportedContractVersion}'. " +
+                "Repin the supported build with ./eng/Get-HcsCtl.ps1 -Force.";
+        }
 
         foreach (string service in RequiredServices)
         {

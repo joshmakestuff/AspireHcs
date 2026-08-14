@@ -38,6 +38,8 @@ public class HcsCtlContractTests
         Assert.NotEmpty(info.Services);
         Assert.NotNull(info.Store);
         Assert.False(string.IsNullOrWhiteSpace(info.Store.Root));
+        Assert.Equal(HcsCtlPreflight.SupportedContractVersion, info.ContractVersion);
+        Assert.False(string.IsNullOrWhiteSpace(info.ToolVersion));
     }
 
     [SkippableFact]

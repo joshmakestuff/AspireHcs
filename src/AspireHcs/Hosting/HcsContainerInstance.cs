@@ -317,7 +317,7 @@ internal sealed class HcsContainerInstance(
             if (resource.Command is { Length: > 0 } command)
             {
                 _ = Task.Run(
-                    () => RunWorkloadAsync(hcsctl, boot, command, environment, progress, workloadCts.Token),
+                    () => RunWorkloadAsync(hcsctl, boot, command, environment, new StreamProgress(logger), workloadCts.Token),
                     CancellationToken.None);
             }
 
@@ -653,17 +653,16 @@ internal sealed class HcsContainerInstance(
 
     /// <summary>
     /// Follows the container's workload for its lifetime and reports its exit. Its output reaches
-    /// the dashboard through <see cref="Progress"/>, which carries hcsctl's whole stderr —
-    /// guest output and hcsctl's own progress lines are not separable there yet
-    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/28">hcsctl#28</see>), so this is
-    /// not the log pipeline #40 asks for.
+    /// the dashboard through <see cref="StreamProgress"/>, which parses hcsctl's <c>--stream-json</c>
+    /// stderr framing: guest stdout/stderr land on the resource log, while hcsctl's own progress
+    /// lines are debug-only.
     /// </summary>
     private async Task RunWorkloadAsync(
         HcsCtl hcsctl,
         BootRecord boot,
         string command,
         IReadOnlyDictionary<string, string> environment,
-        IProgress<string> progress,
+        IProgress<HcsCtlStreamRecord> progress,
         CancellationToken cancellationToken)
     {
         try
@@ -779,13 +778,34 @@ internal sealed class HcsContainerInstance(
     }
 
     /// <summary>
-    /// Forwards hcsctl's stderr to the resource's log. In <c>--json</c> mode that stream carries
-    /// both hcsctl's progress and the guest's own output, and the two are not distinguishable
-    /// (hcsctl#28) — so this is honest plumbing, not the separated log pipeline of #40.
+    /// Forwards hcsctl's create/start stderr to the resource's log. Those invocations run under
+    /// plain <c>--json</c>, where stderr is tool progress only — the workload's framed guest output
+    /// takes <see cref="StreamProgress"/> instead.
     /// </summary>
     private sealed class Progress(ILogger logger) : IProgress<string>
     {
         public void Report(string value) => logger.LogInformation("{Line}", value);
+    }
+
+    /// <summary>
+    /// Routes a parsed <see cref="HcsCtlStreamRecord"/>: guest stdout/stderr to the resource log,
+    /// distinguishable by stream; everything else — hcsctl's own progress — to debug.
+    /// </summary>
+    private sealed class StreamProgress(ILogger logger) : IProgress<HcsCtlStreamRecord>
+    {
+        public void Report(HcsCtlStreamRecord record)
+        {
+            switch (record.Stream)
+            {
+                case "stdout":
+                case "stderr":
+                    logger.LogInformation("{Stream}: {Data}", record.Stream, record.Data);
+                    break;
+                default:
+                    logger.LogDebug("{Msg}", record.Msg);
+                    break;
+            }
+        }
     }
 
     /// <summary>

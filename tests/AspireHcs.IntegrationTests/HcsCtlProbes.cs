@@ -32,6 +32,13 @@ internal static class HcsCtlProbes
             .Where(id => id is not null)
             .Select(id => id!) ?? []];
 
+    /// <summary>Every container id in the store, whatever state it is in.</summary>
+    public static IReadOnlyList<string> ContainerIds(string? storePath = null)
+        => [.. Query(["container", "ls"], storePath)["containers"]?.AsArray()
+            .Select(c => c?["id"]?.GetValue<string>())
+            .Where(id => id is not null)
+            .Select(id => id!) ?? []];
+
     /// <summary>
     /// Runs hcsctl out of band, the way a second tool or an operator would. Used to arrange
     /// conditions the AppHost cannot arrange for itself: a colliding VM id, or a guest killed

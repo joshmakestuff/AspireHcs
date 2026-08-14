@@ -91,7 +91,7 @@ internal static class HcsCtlContainers
         string id,
         string commandLine,
         IReadOnlyDictionary<string, string>? environment = null,
-        IProgress<string>? progress = null,
+        IProgress<HcsCtlStreamRecord>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(hcsctl);
@@ -104,7 +104,7 @@ internal static class HcsCtlContainers
             arguments.Add($"{name}={value}");
         }
 
-        return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlExecDocument, progress, cancellationToken);
+        return hcsctl.InvokeStreamingAsync(arguments, HcsCtlJsonContext.Default.HcsCtlExecDocument, progress, cancellationToken);
     }
 
     public static Task<HcsCtlResultDocument> StopAsync(
