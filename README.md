@@ -6,36 +6,40 @@ It adds two resource types to the Aspire local dev loop, both ephemeral — crea
 `aspire run`, torn down on exit, with state and logs in the dashboard:
 
 - **Hyper-V virtual machines** — boot a VHDX as an HCS compute system, with serial-console
-  logs, NAT endpoints, TCP health checks, and Connect (SSH/RDP) buttons in the dashboard.
+  logs, endpoints on the guest's leased address, TCP health checks, and Connect (SSH/RDP)
+  buttons in the dashboard.
 - **Hyper-V-isolated Windows containers** — run images from an
-  [hcsctl](https://github.com/joshmakestuff/hcsctl) store. Process isolation is permanently
-  out of scope; it is refused up front rather than attempted.
+  [hcsctl](https://github.com/joshmakestuff/hcsctl) store. Process isolation is out of scope
+  and is refused up front.
 
-Code under `spikes/` is not part of the shipped package.
+All HCS access goes through [hcsctl](https://github.com/joshmakestuff/hcsctl)'s `--json`
+contract; this package contains no HCS interop of its own.
 
 ## Getting started
 
 **Consumer documentation** — the builder API, requirements, and setup — is the package README:
 [src/AspireHcs/README.md](src/AspireHcs/README.md).
 
-Guest VM images come from [hcs-images](https://github.com/joshmakestuff/hcs-images) (Packer,
-ISO to VHDX). Container images come from a registry through `hcsctl image pull` and an
-elevated `hcsctl image import` — elevation that is inherent, not incidental.
+**Sample** — a Linux VM, a Windows VM and a Windows container in one AppHost, with the steps to
+prepare each image: [samples/HcsSample.AppHost](samples/HcsSample.AppHost/README.md).
+
+You supply the guest VM image (a bootable Gen2/UEFI VHDX). AspireHcs does not install operating
+systems or bootstrap guests. Container images come from a registry through `hcsctl image pull`
+and an elevated `hcsctl image import`.
+
+## Building
+
+```
+./eng/Get-HcsCtl.ps1      # fetch a pinned hcsctl release into tools/hcsctl
+dotnet build
+dotnet test               # unit tests; hcsctl contract tests skip when hcsctl is absent
+```
+
+Integration tests need Hyper-V and prepared images. Set `HCS_TEST_VHDX` (Linux VM),
+`HCS_TEST_WINDOWS_VHDX` (Windows VM), `ASPIREHCS_TEST_IMAGE` + `ASPIREHCS_TEST_STORE`
+(container) to enable them; without those variables they skip.
 
 ## Where more details are
 
-- **Work in progress** lives in the [issues](https://github.com/joshmakestuff/AspireHcs/issues),
-  not in this file.
-- **Measured facts and standing decisions** live in the workspace's `docs/findings.md` and
-  `docs/decisions.md`, beside this repo rather than inside it. This repo's earlier
-  `docs/containers.md` and `docs/connect-ux.md` are preserved verbatim in the workspace under
-  `docs/old/AspireHcs/`.
-- **The hcsctl migration** — all HCS access is moving behind
-  [hcsctl](https://github.com/joshmakestuff/hcsctl)'s `--json` contract, and the in-repo
-  `Hcs`/`Hcn` interop retires when the VM path moves
-  ([hcsctl#34](https://github.com/joshmakestuff/hcsctl/issues/34)).
-
-| Repo | Role |
-|---|---|
-| [hcsctl](https://github.com/joshmakestuff/hcsctl) | Go CLI over HCS. All HCS access goes through it. |
-| [hcs-images](https://github.com/joshmakestuff/hcs-images) | Packer templates. Builds the guest VM images. |
+Work in progress lives in the [issues](https://github.com/joshmakestuff/AspireHcs/issues), not
+in this file.
