@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Runtime.Versioning;
-using System.Text.Json;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
@@ -24,21 +23,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
     {
         string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_TEST_WINDOWS_VHDX");
         Skip.If(string.IsNullOrEmpty(windowsVhdx),
-            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image to run the connect-UX tests.");
-
-        // The image build refuses to seal unless TermService was observed listening on 3389
-        // during burn-in, and records that in the provenance sidecar. An image without that
-        // record skips the test.
-        string provenancePath = Path.ChangeExtension(windowsVhdx, ".provenance.json");
-        Skip.If(!File.Exists(provenancePath), $"No provenance beside {windowsVhdx}; cannot tell whether it serves RDP.");
-        using JsonDocument provenance = JsonDocument.Parse(await File.ReadAllTextAsync(provenancePath));
-        string? burnInRdp = provenance.RootElement.TryGetProperty("burnIn", out JsonElement burnIn)
-            && burnIn.TryGetProperty("rdp", out JsonElement rdp)
-                ? rdp.GetString()
-                : null;
-        Skip.If(burnInRdp != "Listening",
-            $"{Path.GetFileName(windowsVhdx)} records burnIn.rdp='{burnInRdp ?? "<absent>"}' — built before the RDP edit.");
-        output.WriteLine($"fixture provenance: burnIn.rdp={burnInRdp}");
+            "Set HCS_TEST_WINDOWS_VHDX to a Windows guest image that serves Remote Desktop for Administrator to run the connect-UX tests.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
@@ -108,10 +93,8 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
 
             Assert.True(connected,
                 $"{allocated.Address}:{allocated.Port} never accepted a connection within {rdpTimeout}. " +
-                $"The image's provenance records burnIn.rdp='{burnInRdp}', but that witnessed TermService during the " +
-                "IMAGE BUILD boot only. A timeout rather than a refusal narrows it to something dropping packets — the " +
-                "guest firewall, the host firewall, or the HCN path — and does not by itself distinguish those from a " +
-                "service that failed to start on this boot. Check the guest directly over SSH. " +
+                "A timeout rather than a refusal points at something dropping packets (guest firewall, host firewall, " +
+                "HCN path) or at TermService not running on this boot. Check the guest directly. " +
                 $"Last failure: {lastFailure?.GetType().Name}: {lastFailure?.Message}");
             output.WriteLine($"TCP {allocated.Address}:{allocated.Port} -> connected after {reachable.Elapsed.TotalSeconds:0.0}s");
 
@@ -139,7 +122,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
     {
         string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_TEST_WINDOWS_VHDX");
         Skip.If(string.IsNullOrEmpty(windowsVhdx),
-            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (built by hcs-images) to run the connect-UX test.");
+            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image to run the connect-UX test.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 

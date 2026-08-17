@@ -22,7 +22,7 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
     {
         string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_TEST_WINDOWS_VHDX");
         Skip.If(string.IsNullOrEmpty(windowsVhdx),
-            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (built by hcs-images) to run the positive-fixture tests.");
+            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image to run the positive-fixture tests.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 

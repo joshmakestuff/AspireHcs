@@ -57,7 +57,7 @@ hcsctl vm ip     --id <id>                             # must print an address: 
 hcsctl vm rm     --id <id> --force
 ```
 
-### Linux VM (reference: Rocky Linux 10)
+### Linux VM (example: Rocky Linux 10)
 
 - Install from the distribution ISO into a Gen2 VM. Secure Boot: off, or the "Microsoft UEFI
   Certificate Authority" template.

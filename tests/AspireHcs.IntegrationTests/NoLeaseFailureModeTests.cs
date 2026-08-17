@@ -18,7 +18,7 @@ public sealed class NoLeaseFailureModeTests(ITestOutputHelper output)
     {
         string? noLeaseVhdx = Environment.GetEnvironmentVariable("HCS_TEST_NOLEASE_VHDX");
         Skip.If(string.IsNullOrEmpty(noLeaseVhdx),
-            "Set HCS_TEST_NOLEASE_VHDX to the StaticNoDhcp probe variant (built by hcs-images) to run the never-leases pin. Takes ~2 minutes by design (the 90 s lease timeout is the subject).");
+            "Set HCS_TEST_NOLEASE_VHDX to a guest image whose NIC has a static address and no DHCP client to run the never-leases pin. Takes ~2 minutes by design (the 90 s lease timeout is the subject).");
 
         // Boot (~20 s) + the 90 s lease timeout under test + teardown.
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
