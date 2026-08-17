@@ -54,10 +54,8 @@ jobs:
           $hypervisor = (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
           Write-Host "HypervisorPresent=$hypervisor"
 
-  # The real "advertised claims" gate for HCS: the VM-booting integration tests gate
-  # on WaitForGuestReadyAsync succeeding against a real guest. Manual + self-hosted
-  # until a runner with Hyper-V exists. Spikes (including GuestReadinessProbeSpike)
-  # are on-demand investigations and are not run here.
+  # VM-booting integration tests: gate on WaitForGuestReadyAsync succeeding against
+  # a real guest. Manual + self-hosted; requires a runner with Hyper-V.
   hcs-integration:
     if: github.event_name == 'workflow_dispatch' && inputs.run-hcs-integration
     runs-on: [self-hosted, windows, hyperv]

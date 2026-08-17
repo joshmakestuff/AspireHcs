@@ -13,7 +13,7 @@
     <PackageProjectUrl>https://github.com/joshmakestuff/AspireHcs</PackageProjectUrl>
     <RepositoryUrl>https://github.com/joshmakestuff/AspireHcs</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <!-- Projects opt in explicitly; spikes and tests must never end up on a feed. -->
+    <!-- Projects opt in explicitly; tests must never end up on a feed. -->
     <IsPackable>false</IsPackable>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
