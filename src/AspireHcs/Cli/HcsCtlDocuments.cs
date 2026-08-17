@@ -3,19 +3,18 @@ using System.Text.Json.Serialization;
 namespace AspireHcs.Cli;
 
 // Every result document hcsctl emits under --json is bound here, with explicit wire names. The
-// names are the contract with a separate repo, so they are pinned rather than derived from a
-// naming policy: a rename on either side should break a test, not silently bind to null.
+// names are the contract with a separate repo, so they are pinned; a rename on either side
+// breaks a test.
 //
-// EVERY collection property reads `field ?? []`, and that is not defensive habit. hcsctl is Go,
-// and Go marshals a nil slice or map as JSON `null`, not `[]` — so `"containers": null` and
-// `"addresses": null` are both normal, routine output for "none". A plain `= []` initializer does
-// not survive that: the deserializer assigns the null straight over it. Measured the hard way,
-// by a teardown verification that threw instead of verifying.
+// EVERY collection property reads `field ?? []`. hcsctl is Go, and Go marshals a nil slice or map
+// as JSON `null`, not `[]`, so `"containers": null` and `"addresses": null` are routine output
+// for "none". A plain `= []` initializer does not survive that: the deserializer assigns the null
+// over it.
 
 /// <summary>
 /// The shape hcsctl emits on every failure path: <c>{"ok":false,"stage":...,"error":...}</c>.
-/// Deliberately parsed from the same stdout as a success document — hcsctl's contract is that a
-/// consumer parses one shape whether the command worked or not.
+/// Parsed from the same stdout as a success document; hcsctl puts one document there whether the
+/// command worked or not.
 /// </summary>
 internal sealed record HcsCtlFailureDocument
 {
@@ -31,9 +30,8 @@ internal sealed record HcsCtlFailureDocument
 }
 
 /// <summary>
-/// <c>hcsctl info --json</c>. This is the whole preflight: it reports what the caller's token
-/// actually holds rather than what the machine could hold, which is the distinction that makes
-/// every elevation question in this repo answerable.
+/// <c>hcsctl info --json</c>. Reports what the caller's token holds, not what the machine could
+/// hold.
 /// </summary>
 internal sealed record HcsCtlInfoDocument
 {
@@ -42,8 +40,8 @@ internal sealed record HcsCtlInfoDocument
     [JsonPropertyName("ok")]
     public bool Ok { get; init; }
 
-    // Named "host" deliberately. hcsctl's "version" field is the *host OS* build, not hcsctl's
-    // own identity — that is emitted separately as toolVersion and contractVersion.
+    // hcsctl's "build" and "version" fields are the host OS build, not hcsctl's own identity;
+    // that is toolVersion and contractVersion.
 
     [JsonPropertyName("build")]
     public int HostBuild { get; init; }
@@ -111,8 +109,8 @@ internal sealed record HcsCtlImageInfo
     public string? OsVersion { get; init; }
 
     /// <summary>
-    /// Reported for completeness only. AspireHcs never acts on it: process isolation is out of
-    /// scope permanently (#46), and hcsctl does not implement it at all.
+    /// AspireHcs does not act on it. Process isolation is out of scope, and hcsctl does not
+    /// implement it.
     /// </summary>
     [JsonPropertyName("processIsolationCompatible")]
     public bool ProcessIsolationCompatible { get; init; }
@@ -159,10 +157,9 @@ internal sealed record HcsCtlContainerCreateDocument
     public string? Endpoint { get; init; }
 
     /// <summary>
-    /// CIDR strings, populated only when the network assigns the address at create — NAT does. An
-    /// ICS network like the Default Switch leases the address after the guest starts, so this list
-    /// is empty there and the current address must be read from <c>network endpoints</c> (#63; the
-    /// VM side documents the same timing as hcsctl#43).
+    /// CIDR strings, populated only when the network assigns the address at create, as NAT does.
+    /// An ICS network like the Default Switch leases the address after the guest starts, so this
+    /// list is empty there and the current address must be read from <c>network endpoints</c>.
     /// </summary>
     [JsonPropertyName("addresses")]
     public IReadOnlyList<string> Addresses { get => field ?? []; init; } = [];
@@ -172,11 +169,10 @@ internal sealed record HcsCtlContainerCreateDocument
 /// <c>hcsctl network endpoints</c> — the host's HNS endpoints, read live from HCN.
 /// </summary>
 /// <remarks>
-/// This is the only address source that tracks an ICS lease. hcsctl's state.json — and with it
-/// <c>container inspect</c>, which reports that snapshot plus HCS properties carrying no
-/// addresses — records the create-time address list and never updates it, so on an ICS network
-/// it stays empty forever. This document reports the endpoint's current <c>IpConfigurations</c>
-/// instead, unelevated.
+/// The only address source that tracks an ICS lease. hcsctl's state.json, and with it
+/// <c>container inspect</c>, records the create-time address list and never updates it, so on an
+/// ICS network it stays empty. This document reports the endpoint's current
+/// <c>IpConfigurations</c>, unelevated.
 /// </remarks>
 internal sealed record HcsCtlNetworkEndpointsDocument
 {
@@ -231,9 +227,8 @@ internal sealed record HcsCtlContainerRow
 
     /// <summary>
     /// HCS's view, with two values hcsctl supplies rather than HCS: <c>absent</c> when no compute
-    /// system exists, and <c>created</c> for one created but never started — which HCS itself
-    /// reports as a <em>blank</em> state. Conflating blank with absent is the trap named in #48,
-    /// and it is hcsctl that keeps them apart here. See <see cref="HcsCtlContainerState"/>.
+    /// system exists, and <c>created</c> for one created but never started, which HCS itself
+    /// reports as a <em>blank</em> state. See <see cref="HcsCtlContainerState"/>.
     /// </summary>
     [JsonPropertyName("state")]
     public string? State { get; init; }
@@ -265,9 +260,8 @@ internal sealed record HcsCtlExecDocument
     public int Pid { get; init; }
 
     /// <summary>
-    /// The guest process's own exit code — never hcsctl's. Null when the process was killed on
-    /// a timeout: the guest never produced one, and inventing it would make "we gave up" look
-    /// like "it exited".
+    /// The guest process's own exit code, never hcsctl's. Null when the process was killed on a
+    /// timeout; the guest never produced one.
     /// </summary>
     [JsonPropertyName("exitCode")]
     public int? ExitCode { get; init; }
@@ -281,13 +275,12 @@ internal sealed record HcsCtlExecDocument
 }
 
 // The statistics and process documents are hcsshim structs marshalled straight through, so their
-// names are PascalCase and come from hcsshim's tags rather than hcsctl's. Every name below was
-// read off a live container rather than inferred from the Go field names — which differ: the Go
-// field is `UsageCommitBytes` but the wire name is `MemoryUsageCommitBytes`.
+// names are PascalCase and come from hcsshim's tags, not hcsctl's. The wire names differ from the
+// Go field names: the Go field is `UsageCommitBytes` but the wire name is
+// `MemoryUsageCommitBytes`.
 //
-// Fields are `omitempty` throughout, so a zero counter is an ABSENT key. Every numeric is
-// therefore nullable or defaults to zero on purpose: absent and zero mean the same thing here,
-// and treating absent as an error would make a freshly started container look broken.
+// Fields are `omitempty` throughout, so a zero counter is an ABSENT key. Absent and zero mean the
+// same thing here, so every numeric is nullable or defaults to zero.
 
 /// <summary><c>hcsctl container stats</c>.</summary>
 internal sealed record HcsCtlStatsDocument
@@ -311,7 +304,7 @@ internal sealed record HcsCtlStatistics
     [JsonPropertyName("ContainerStartTime")]
     public DateTimeOffset? ContainerStartTime { get; init; }
 
-    /// <summary>Uptime in 100-nanosecond ticks — the unit HCS reports, not one a person wants.</summary>
+    /// <summary>Uptime in 100-nanosecond ticks, the unit HCS reports.</summary>
     [JsonPropertyName("Uptime100ns")]
     public long Uptime100ns { get; init; }
 
@@ -408,9 +401,8 @@ internal sealed record HcsCtlProcessListDocument
 /// One process inside the guest.
 /// </summary>
 /// <remarks>
-/// <b>There is no parent process id, and there cannot be one.</b> HCS does not report it, so this
-/// is a flat list and no amount of presentation work will make it a tree. Confirmed against a live
-/// container: 18 processes, not one carrying a parent. Anything built on this must be a list.
+/// <b>There is no parent process id.</b> HCS does not report one, so this is a flat list and
+/// cannot be presented as a tree.
 /// </remarks>
 internal sealed record HcsCtlGuestProcess
 {
@@ -468,10 +460,9 @@ internal sealed record HcsCtlVmCreateDocument
     public string? MacAddress { get; init; }
 
     /// <summary>
-    /// Always empty here, and that is the measured behaviour rather than a gap: an HCN endpoint
-    /// carries no address when it is created, none when it is attached to a NIC, and none while
-    /// the VM runs without a guest. The address comes from the guest's DHCP client, so it is
-    /// <see cref="HcsCtlVirtualMachines.WaitForAddressAsync"/> that produces one (hcsctl#43).
+    /// Always empty: an HCN endpoint carries no address when it is created, none when it is
+    /// attached to a NIC, and none while the VM runs without a guest. The address comes from the
+    /// guest's DHCP client; <see cref="HcsCtlVirtualMachines.WaitForAddressAsync"/> produces one.
     /// </summary>
     [JsonPropertyName("addresses")]
     public IReadOnlyList<string> Addresses { get => field ?? []; init; } = [];
@@ -553,8 +544,8 @@ internal sealed record HcsCtlVmRow
     public string? State { get; init; }
 
     /// <summary>
-    /// Opaque key/value pairs this AppHost stamped at create time. hcsctl never interprets them:
-    /// run ownership is the consumer's policy, which is to say ours (hcsctl#44).
+    /// Opaque key/value pairs this AppHost stamped at create time. hcsctl never interprets them;
+    /// run ownership is the consumer's policy.
     /// </summary>
     [JsonPropertyName("labels")]
     public IReadOnlyDictionary<string, string> Labels { get => field ?? EmptyLabels; init; } = EmptyLabels;
@@ -581,9 +572,9 @@ internal sealed record HcsCtlComputeSystemRow
 }
 
 /// <summary>
-/// The states <c>vm ls</c> reports. Note that a VM's are not a container's: a container that is
-/// not running is <c>absent</c> because its scratch is gone, while a VM keeps its disk and store
-/// record, so it is <c>stopped</c> and can be started again.
+/// The states <c>vm ls</c> reports. A container that is not running is <c>absent</c> because its
+/// scratch is gone; a VM keeps its disk and store record, so it is <c>stopped</c> and can be
+/// started again.
 /// </summary>
 internal static class HcsCtlVmState
 {

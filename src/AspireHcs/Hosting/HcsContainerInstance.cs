@@ -11,9 +11,9 @@ using Microsoft.Extensions.Logging;
 namespace AspireHcs.Hosting;
 
 /// <summary>
-/// One container's boot, run and teardown. Mirrors <c>HcsVmInstance</c>'s concurrency shape — one
+/// One container's boot, run and teardown. Same concurrency shape as <c>HcsVmInstance</c>: one
 /// gate over boot and teardown, a ledger per boot, an epoch so a dead boot's notification cannot
-/// publish over a live one — but the work underneath is hcsctl invocations rather than HCS calls.
+/// publish over a live one. The work underneath is hcsctl invocations.
 /// </summary>
 internal sealed class HcsContainerInstance(
     HcsContainerResource resource,
@@ -33,9 +33,8 @@ internal sealed class HcsContainerInstance(
     private CancellationToken _appStopping;
 
     /// <summary>
-    /// The tool for the live boot. Held so the dashboard commands can reach it — they run long
-    /// after BootAsync's locals are gone, and resolving the binary again per click would let a
-    /// command act on a different hcsctl than the one that created the container.
+    /// The tool for the live boot. Dashboard commands use this instance, so they act on the same
+    /// hcsctl that created the container.
     /// </summary>
     private HcsCtl? _hcsctl;
 
@@ -44,11 +43,10 @@ internal sealed class HcsContainerInstance(
         IHostApplicationLifetime lifetime = services.GetRequiredService<IHostApplicationLifetime>();
         _appStopping = lifetime.ApplicationStopping;
 
-        // Registered once for the resource's whole life rather than per boot, so repeated
-        // Start/Stop cycles do not stack up shutdown callbacks. This hook owns teardown at
-        // shutdown, keeping host shutdown blocked until cleanup has actually finished. The wait
-        // is bounded so a stuck hcsctl cannot stall shutdown indefinitely; past the bound the
-        // drain proceeds without the gate, and the ledger's seal semantics keep that safe.
+        // Registered once for the resource's whole life, not per boot. This hook owns teardown at
+        // shutdown and keeps host shutdown blocked until cleanup has finished. The wait for the
+        // gate is bounded; past the bound the drain proceeds without the gate, which the ledger's
+        // seal semantics permit.
         lifetime.ApplicationStopping.Register(() =>
         {
             bool acquired = _gate.Wait(TimeSpan.FromSeconds(30));
@@ -69,9 +67,8 @@ internal sealed class HcsContainerInstance(
     }
 
     /// <summary>
-    /// Boots the container if it is not already running. Runs against the AppHost's lifetime
-    /// rather than an invoking command's token: a boot must not be abandoned half-built because
-    /// a dashboard request completed.
+    /// Boots the container if it is not already running. Runs against the AppHost's lifetime,
+    /// not an invoking command's token: a completed dashboard request must not abandon a boot.
     /// </summary>
     public async Task StartAsync()
     {
@@ -106,8 +103,7 @@ internal sealed class HcsContainerInstance(
     }
 
     /// <summary>
-    /// Suspends the container. A paused workload demonstrably stops making progress — that is the
-    /// point of the command, and it is what distinguishes pause from stop.
+    /// Suspends the container. A paused workload stops making progress.
     /// </summary>
     public async Task PauseAsync()
     {
@@ -159,10 +155,8 @@ internal sealed class HcsContainerInstance(
     /// Writes the guest's process list to the resource log and returns a one-line summary.
     /// </summary>
     /// <remarks>
-    /// A flat table, and it can be nothing else: HCS reports no parent process ids, so there is no
-    /// tree to build here or in any UI downstream. It goes to the log rather than to a snapshot
-    /// property because it is tens of rows that a developer reads once while diagnosing, not a
-    /// value worth showing continuously.
+    /// A flat table: HCS reports no parent process ids, so there is no tree to build. It goes to
+    /// the log, not to a snapshot property.
     /// </remarks>
     public async Task<string> ListGuestProcessesAsync()
     {
@@ -235,9 +229,7 @@ internal sealed class HcsContainerInstance(
             string image = resource.ImageReference ?? throw new InvalidOperationException(
                 $"Resource '{resource.Name}' has no image; call WithImage(reference) before running it.");
 
-            // Caught here rather than after the container exists: a resource whose endpoints can
-            // never resolve is misconfigured, and finding that out post-create means cleaning up
-            // a compute system to say so.
+            // Checked before the container exists: endpoints without a network can never resolve.
             if (resource.Annotations.OfType<EndpointAnnotation>().Any() && resource.NetworkName is null)
             {
                 throw new InvalidOperationException(
@@ -247,8 +239,7 @@ internal sealed class HcsContainerInstance(
             HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath);
             _hcsctl = hcsctl;
 
-            // Preflight before anything is acquired. Every condition here is knowable in advance,
-            // and each has a fix a developer can act on — which a bare exit code would not.
+            // Preflight before anything is acquired. Each condition has a fix a developer can act on.
             HcsCtlInfoDocument info = await hcsctl.GetInfoAsync(stopping).ConfigureAwait(false);
             if (HcsCtlPreflight.DescribeBlocker(info) is { } blocker)
             {
@@ -261,8 +252,8 @@ internal sealed class HcsContainerInstance(
             }
 
             // Nothing publishes BeforeResourceStartedEvent for resources Aspire does not own, and
-            // the orchestrator implements WaitFor in its handler for that event — so without this,
-            // WaitFor(...) on a container would never hold the boot back.
+            // the orchestrator implements WaitFor in its handler for that event. Without this,
+            // WaitFor(...) on a container would not hold the boot back.
             await eventing.PublishAsync(new BeforeResourceStartedEvent(resource, services), stopping).ConfigureAwait(false);
 
             await HcsContainerOrchestrator
@@ -271,9 +262,8 @@ internal sealed class HcsContainerInstance(
 
             Progress progress = new(logger);
 
-            // Resolved before anything is created. An empty value is rejected here (#49), and a
-            // resource that cannot be configured correctly should fail before it has acquired a
-            // compute system and a scratch layer to clean up.
+            // Resolved before anything is created. An empty value is rejected here, before a
+            // compute system and a scratch layer exist.
             IReadOnlyDictionary<string, string> environment = await ContainerEnvironment
                 .ResolveAsync(resource, services.GetRequiredService<DistributedApplicationExecutionContext>(), stopping)
                 .ConfigureAwait(false);
@@ -294,9 +284,8 @@ internal sealed class HcsContainerInstance(
                     stopping)
                 .ConfigureAwait(false);
 
-            // Release with rm, not stop: rm is what removes the scratch layer, and a scratch
-            // outlives its compute system. Registered immediately after create so a failure
-            // anywhere below still reclaims it.
+            // Release with rm, not stop: rm removes the scratch layer, which outlives its compute
+            // system. Registered immediately after create so a failure below still reclaims it.
             boot.Ledger.Add($"container {resource.ContainerId}", () => Remove(hcsctl, resource.ContainerId));
 
             logger.LogInformation("Layer chain resolved to {LayerCount} layer(s); scratch at {Scratch}",
@@ -305,8 +294,8 @@ internal sealed class HcsContainerInstance(
             await hcsctl.StartAsync(resource.ContainerId, progress, stopping).ConfigureAwait(false);
 
             // The workload runs detached from this boot's await chain: hcsctl's exec stays
-            // attached for the guest process's whole life, so awaiting it here would mean the
-            // boot never completes. Cancelling this source is what tears the exec down.
+            // attached for the guest process's whole life. Cancelling this source tears the exec
+            // down.
             CancellationTokenSource workloadCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             boot.Ledger.Add("workload", () =>
             {
@@ -324,9 +313,9 @@ internal sealed class HcsContainerInstance(
             await AllocateEndpointsAsync(hcsctl, created, stopping).ConfigureAwait(false);
             await PublishEndpointsAsync(stopping).ConfigureAwait(false);
 
-            // Boot-scoped like the workload: cancelling the source is what stops the polling, and
-            // a poller left over from a previous boot would publish a dead container's numbers
-            // over a live one's.
+            // Boot-scoped like the workload: cancelling the source stops the polling. A poller
+            // left over from a previous boot would publish a dead container's numbers over a live
+            // one's.
             CancellationTokenSource statsCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             boot.Ledger.Add("statistics poller", () =>
             {
@@ -337,10 +326,9 @@ internal sealed class HcsContainerInstance(
 
             ThrowIfExitedMidBoot(boot);
 
-            // Running is published last. Aspire's health monitor starts the moment a resource
-            // reports Running, and a resource with no health check annotations is declared ready
-            // right there — so publishing early would release WaitFor dependents against a
-            // container that is not up.
+            // Running is published last. Aspire's health monitor starts when a resource reports
+            // Running, and a resource with no health check annotations is declared ready at that
+            // moment; WaitFor dependents would be released against a container that is not up.
             await notifications.PublishUpdateAsync(resource, s => s with
             {
                 State = KnownResourceStates.Running,
@@ -348,16 +336,16 @@ internal sealed class HcsContainerInstance(
         }
         catch (Exception) when (stopping.IsCancellationRequested)
         {
-            // AppHost shutting down mid-boot: shutdown noise, not a boot failure. Deliberately no
-            // drain here — unwinding quickly releases the gate to the shutdown hook, which does
-            // the full drain synchronously and keeps host shutdown blocked until it finishes.
+            // AppHost shutting down mid-boot: not a boot failure. No drain here: unwinding
+            // releases the gate to the shutdown hook, which does the full drain synchronously and
+            // keeps host shutdown blocked until it finishes.
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to start HCS container '{Name}'.", resource.Name);
 
-            // Release whatever the failed boot did claim — however far it got — so Start can be
-            // retried from the dashboard without leaking a compute system or a scratch layer.
+            // Release whatever the failed boot claimed so Start can be retried from the dashboard
+            // without leaking a compute system or a scratch layer.
             await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
 
             await notifications.PublishUpdateAsync(resource, s => s with
@@ -372,9 +360,8 @@ internal sealed class HcsContainerInstance(
 
     /// <summary>
     /// How long to wait for an ICS network to lease the container's endpoint an address after
-    /// start. Mirrors the VM path's timeout: measured leases land within seconds of the guest
-    /// coming up (probe-ds, 2026-08-09), so this is generous — and a network that never leases
-    /// fails the resource rather than hanging the AppHost.
+    /// start. Leases land within seconds of the guest coming up. A network that never leases
+    /// fails the resource; it does not hang the AppHost.
     /// </summary>
     private static readonly TimeSpan AddressTimeout = TimeSpan.FromSeconds(90);
 
@@ -387,16 +374,14 @@ internal sealed class HcsContainerInstance(
     /// <remarks>
     /// <para>
     /// When the address exists depends on the network. A NAT network assigns it at create, so the
-    /// create document already carries it — that fast path stays a read, no polling (#41's
-    /// measurement, 2026-08-07). An ICS network — the Default Switch, the default since #60 —
-    /// leases the address only after the guest is up, the same timing the VM path documents
-    /// (hcsctl#43), so there this is a bounded wait against a live HCN read. It cannot be a read
-    /// of any create-time snapshot: hcsctl's state.json never updates after create (#63).
+    /// create document carries it: no polling. An ICS network (the Default Switch, the default)
+    /// leases the address only after the guest is up, so there this is a bounded wait against a
+    /// live HCN read. hcsctl's state.json never updates after create, so a create-time snapshot
+    /// cannot serve.
     /// </para>
     /// <para>
     /// The address is the container's own on the host compute network, reachable from the host
-    /// directly (measured 2026-08-07). There is no host port mapping, so an endpoint's port is
-    /// the guest's port — nothing is translated.
+    /// directly. There is no host port mapping: an endpoint's port is the guest's port.
     /// </para>
     /// </remarks>
     private async Task AllocateEndpointsAsync(
@@ -412,15 +397,14 @@ internal sealed class HcsContainerInstance(
         if (created.Addresses.Count > 0)
         {
             // hcsctl reports the address in CIDR form (172.17.163.120/20). An endpoint wants the
-            // address alone; leaving the prefix on produces a host string nothing can connect to.
+            // address alone.
             address = created.Addresses[0].Split('/')[0];
         }
         else
         {
-            // Guarded again here, not only before create, so this method cannot regress into
-            // waiting forever for an endpoint that was never attached. This message belongs to
-            // the no-network case alone — a resource WITH WithNetwork() whose address is merely
-            // late must never be told to add it (#63).
+            // Guarded again here, not only before create, so this method cannot wait forever for
+            // an endpoint that was never attached. This message is for the no-network case only;
+            // a resource with WithNetwork() whose address is late must not be told to add it.
             string network = resource.NetworkName ?? throw new InvalidOperationException(
                 $"Resource '{resource.Name}' declares endpoints but no network; add WithNetwork().");
 
@@ -457,12 +441,10 @@ internal sealed class HcsContainerInstance(
     /// returns that address bare (hcsctl reports CIDR).
     /// </summary>
     /// <remarks>
-    /// The poll target is <c>network endpoints</c> and nothing else on purpose: hcsctl's
-    /// state.json — and <c>container inspect</c>, which reports that snapshot — records only the
-    /// create-time address list, which on an ICS network is empty forever. Only HCN's own view
-    /// changes when the lease lands, the same fact hcsctl#43 records on the VM side, where
-    /// <c>vm ip</c> does this wait inside hcsctl. There is no <c>container ip</c> verb, so the
-    /// container side waits here instead (#63).
+    /// The poll target is <c>network endpoints</c>: hcsctl's state.json (and <c>container
+    /// inspect</c>, which reports that snapshot) records only the create-time address list, which
+    /// on an ICS network is empty. Only HCN's own view changes when the lease lands. hcsctl has
+    /// no <c>container ip</c> verb, so the container side waits here.
     /// </remarks>
     internal static async Task<string> WaitForLeasedAddressAsync(
         Func<CancellationToken, Task<HcsCtlNetworkEndpointsDocument>> readEndpoints,
@@ -480,8 +462,8 @@ internal sealed class HcsContainerInstance(
         {
             HcsCtlNetworkEndpointsDocument listing = await readEndpoints(cancellationToken).ConfigureAwait(false);
 
-            // Ordinal-insensitive because these are GUIDs, and HCN is not consistent about their
-            // case across read paths — stats report them uppercase, the listing lowercase.
+            // Case-insensitive: these are GUIDs, and HCN is not consistent about their case across
+            // read paths (stats report them uppercase, the listing lowercase).
             HcsCtlNetworkEndpointRow? endpoint = listing.Endpoints.FirstOrDefault(
                 e => string.Equals(e.Id, endpointId, StringComparison.OrdinalIgnoreCase));
             listed |= endpoint is not null;
@@ -514,8 +496,7 @@ internal sealed class HcsContainerInstance(
     /// </summary>
     /// <remarks>
     /// Failures are logged at debug and the loop continues. A stats call can fail for reasons that
-    /// are not faults — the container is paused, or is mid-teardown — and a poller that gave up on
-    /// the first error would leave the dashboard frozen on stale numbers with no indication why.
+    /// are not faults: the container is paused, or is mid-teardown.
     /// </remarks>
     private async Task PollStatisticsAsync(HcsCtl hcsctl, HcsCtlContainerCreateDocument created, CancellationToken cancellationToken)
     {
@@ -562,8 +543,7 @@ internal sealed class HcsContainerInstance(
 
     /// <summary>
     /// The properties the dashboard shows for a container, mirroring what the VM resource
-    /// surfaces. Byte counts and HCS's 100-nanosecond ticks are formatted here rather than shown
-    /// raw — a dashboard row reading <c>1088274432</c> is data, not information.
+    /// surfaces. Byte counts and HCS's 100-nanosecond ticks are formatted here.
     /// </summary>
     private ImmutableArray<ResourcePropertySnapshot> Describe(
         HcsCtlContainerCreateDocument created, HcsCtlStatistics stats)
@@ -594,8 +574,7 @@ internal sealed class HcsContainerInstance(
             properties.Add(new("hcs.storage.write", $"{storage.WriteCount} ops, {FormatBytes(storage.WriteBytes)}"));
         }
 
-        // Indexed because a container can carry more than one endpoint, and an unindexed name
-        // would silently show only the last.
+        // Indexed: a container can carry more than one endpoint.
         for (int i = 0; i < stats.Network.Count; i++)
         {
             HcsCtlNetworkStats network = stats.Network[i];
@@ -638,13 +617,13 @@ internal sealed class HcsContainerInstance(
             return;
         }
 
-        // Drives the orchestrator's URL processing — WithUrl callbacks and the dashboard's URL
+        // Drives the orchestrator's URL processing: WithUrl callbacks and the dashboard's URL
         // list both hang off this event, and nothing raises it for a non-DCP resource.
         await eventing.PublishAsync(new ResourceEndpointsAllocatedEvent(resource, services), cancellationToken)
             .ConfigureAwait(false);
 
-        // The orchestrator publishes endpoint-derived URLs as inactive (hidden), on the
-        // assumption that whoever allocated them activates them. That is us.
+        // The orchestrator publishes endpoint-derived URLs as inactive (hidden); whoever
+        // allocated them activates them.
         await notifications.PublishUpdateAsync(resource, s => s with
         {
             Urls = [.. s.Urls.Select(u => u with { IsInactive = false })],
@@ -671,14 +650,13 @@ internal sealed class HcsContainerInstance(
                 .ExecAsync(resource.ContainerId, command, environment, progress, cancellationToken)
                 .ConfigureAwait(false);
 
-            // The guest's exit code, never hcsctl's. hcsctl reports the two separately for
-            // exactly this reason.
+            // The guest's exit code, not hcsctl's. hcsctl reports the two separately.
             logger.LogInformation("Container workload exited with code {ExitCode}.", result.ExitCode);
             await OnWorkloadExitedAsync(boot, result.ExitCode).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            // Torn down deliberately — a Stop, a Restart, or AppHost shutdown. Not an exit.
+            // Torn down by a Stop, a Restart, or AppHost shutdown. Not an exit.
         }
         catch (Exception ex)
         {
@@ -741,14 +719,13 @@ internal sealed class HcsContainerInstance(
     }
 
     /// <summary>
-    /// Removes the container and <b>verifies it is gone by absence</b>, never by the call
-    /// returning. <c>DestroyLayer</c> can report success and leave the tree, so a return code is
-    /// not evidence of teardown (#48).
+    /// Removes the container and <b>verifies it is gone by absence</b>, not by the call
+    /// returning. <c>DestroyLayer</c> can report success and leave the tree.
     /// </summary>
     private void Remove(HcsCtl hcsctl, string containerId)
     {
-        // Synchronous by necessity: this runs from the ledger, which the shutdown hook drains on
-        // a callback that cannot await. The timeout keeps a wedged hcsctl from stalling shutdown.
+        // Synchronous: this runs from the ledger, which the shutdown hook drains on a callback
+        // that cannot await. The timeout keeps a wedged hcsctl from stalling shutdown.
         using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(2));
 
         hcsctl.RemoveAsync(containerId, force: true, timeout.Token).GetAwaiter().GetResult();
@@ -759,10 +736,8 @@ internal sealed class HcsContainerInstance(
 
         if (survivor is not null)
         {
-            // Deliberately thrown rather than logged: the ledger catches and logs it, so teardown
-            // continues, but the failure is reported instead of being silently accepted. A
-            // container still listed after rm is a leak, not a formality — and "created" is not
-            // "absent".
+            // Thrown, not logged: the ledger catches and logs it, and teardown continues. A
+            // container still listed after rm is a leak; "created" is not "absent".
             throw new InvalidOperationException(
                 $"hcsctl reported removing container '{containerId}', but it is still listed with state " +
                 $"'{survivor.State}'. Its scratch layer may survive; check `hcsctl container ls`.");
@@ -811,12 +786,11 @@ internal sealed class HcsContainerInstance(
     /// <summary>
     /// One boot's identity and holdings. The epoch stamps exits so a replaced container cannot
     /// speak for its successor; <see cref="Exited"/> flips when the workload exits on its own,
-    /// which is what lets Start tell a live boot from one awaiting cleanup.
+    /// which lets Start tell a live boot from one awaiting cleanup.
     /// </summary>
     /// <remarks>
-    /// <see cref="Exited"/> is a volatile field rather than an auto-property because it is
-    /// written from the workload's thread-pool thread and read from whichever thread calls Start
-    /// — the same reason the VM path declares it that way.
+    /// <see cref="Exited"/> is a volatile field: it is written from the workload's thread-pool
+    /// thread and read from whichever thread calls Start.
     /// </remarks>
     private sealed class BootRecord(int epoch, BootLedger ledger)
     {

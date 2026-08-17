@@ -1,10 +1,8 @@
 namespace AspireHcs.Cli;
 
 /// <summary>
-/// The <c>network</c> verbs, as methods. Same reason as <see cref="HcsCtlContainers"/>: an option
-/// spelled wrong is exit 64, indistinguishable from a bad value in a resource's configuration.
-/// The group is read-only and unelevated, and it rejects <c>--store</c> — which <see cref="HcsCtl"/>
-/// already knows, so nothing here has to.
+/// The <c>network</c> verbs, as methods. The group is read-only and unelevated, and it rejects
+/// <c>--store</c>; <see cref="HcsCtl"/> omits it for this group.
 /// </summary>
 internal static class HcsCtlNetworks
 {
@@ -13,10 +11,9 @@ internal static class HcsCtlNetworks
     /// to one network by name or id.
     /// </summary>
     /// <remarks>
-    /// This is what the container path polls for an ICS lease. hcsctl's state.json — and
-    /// <c>container inspect</c>, which reports that snapshot — keeps only the create-time address
-    /// list, empty forever on an ICS network; this listing is the one view that updates when the
-    /// lease lands (#63; hcsctl#43 is the same timing on the VM side, where <c>vm ip</c> waits).
+    /// The container path polls this for an ICS lease. hcsctl's state.json, and
+    /// <c>container inspect</c> which reports that snapshot, keep only the create-time address
+    /// list, which is empty on an ICS network. This listing updates when the lease lands.
     /// </remarks>
     public static Task<HcsCtlNetworkEndpointsDocument> ListEndpointsAsync(
         this HcsCtl hcsctl, string? network = null, CancellationToken cancellationToken = default)

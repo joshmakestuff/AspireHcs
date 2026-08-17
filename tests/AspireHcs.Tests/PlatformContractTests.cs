@@ -3,8 +3,8 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// The package advertises "Windows-only, fails fast elsewhere". These tests pin that
-// claim to the shipped assembly rather than trusting the label.
+// The package advertises "Windows-only, fails fast elsewhere". These tests pin that claim to
+// the shipped assembly.
 [SupportedOSPlatform("windows10.0.17763")]
 public class PlatformContractTests
 {
@@ -23,8 +23,8 @@ public class PlatformContractTests
     [Fact]
     public void ThrowIfUnsupported_passes_on_a_supported_windows_host()
     {
-        // CI and dev machines for this repo are Windows 10 1809+; on anything older or
-        // non-Windows the guard is *supposed* to throw, so only assert the happy path here.
+        // On anything older than Windows 10 1809, or non-Windows, the guard throws; only the
+        // happy path is asserted here.
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 17763))
         {
             return;

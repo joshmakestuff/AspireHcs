@@ -5,11 +5,10 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// Issue #18 acceptance: the serial console is guest-controlled input crossing a trust
-// boundary, so the framer — not the guest — decides how much the host buffers. These pin the
-// bound, the truncation visibility, the stateful UTF-8 decode across reads, and the overwrite
-// semantics of carriage returns (deliberately whole-frame, not a real terminal's
-// character-level splice).
+// The serial console is guest-controlled input crossing a trust boundary, so the framer, not
+// the guest, decides how much the host buffers. These pin the bound, the truncation visibility,
+// the stateful UTF-8 decode across reads, and the overwrite semantics of carriage returns
+// (whole-frame, not a real terminal's character-level splice).
 [SupportedOSPlatform("windows10.0.17763")]
 public class SerialLineFramerTests
 {
@@ -38,8 +37,7 @@ public class SerialLineFramerTests
         SerialLineFramer framer = Framer();
         byte[] bytes = Bytes("héllo wörld 🚀\n");
 
-        // Feed one byte at a time: every multi-byte sequence is split across appends, which
-        // the old per-read Encoding.UTF8.GetString decoded as replacement characters.
+        // Feed one byte at a time: every multi-byte sequence is split across appends.
         foreach (byte b in bytes)
         {
             framer.Append([b]);
@@ -54,8 +52,8 @@ public class SerialLineFramerTests
     {
         SerialLineFramer framer = Framer(maxLineLength: 32);
 
-        // A newline-free stream far beyond the cap — the guest-driven-OOM shape. One marked
-        // record, nothing else, no matter how much more arrives.
+        // A newline-free stream far beyond the cap (the guest-driven-OOM shape). One marked
+        // record, nothing else, however much more arrives.
         for (int i = 0; i < 1000; i++)
         {
             framer.Append(Bytes(new string('A', 100)));
@@ -97,8 +95,8 @@ public class SerialLineFramerTests
     {
         SerialLineFramer framer = Framer(maxLineLength: 8);
 
-        // The CR ends the discard and the LF must go down with the truncated line — split
-        // across reads too, since that is how a pipe delivers it.
+        // The CR ends the discard and the LF must go down with the truncated line, also when
+        // split across reads, as a pipe delivers it.
         framer.Append(Bytes("AAAAAAAAAAAAAAAA\r"));
         framer.Append(Bytes("\nnext\r\n"));
 
@@ -134,9 +132,8 @@ public class SerialLineFramerTests
     {
         SerialLineFramer framer = Framer();
 
-        // Deliberate overwrite semantics, pinned: a real terminal would splice to "X2345";
-        // this framer keeps the last frame whole because for a log record the final repaint
-        // is the meaningful one.
+        // Overwrite semantics: a real terminal splices to "X2345"; this framer keeps the last
+        // frame whole. For a log record the final repaint is the meaningful one.
         framer.Append(Bytes("12345\rX\n"));
 
         Assert.Equal(["X"], _emitted);

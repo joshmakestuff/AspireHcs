@@ -24,10 +24,9 @@ public class TcpHealthCheckTests
             .WithEndpoint("ssh", targetPort: 22)
             .WithTcpHealthCheck();
 
-        // The annotation is what stops Aspire declaring the resource ready the instant it
-        // reports Running; the registration is what the monitor resolves the key against.
-        // Both are required — an annotation whose key matches no registration reports
-        // unhealthy forever.
+        // The annotation stops Aspire declaring the resource ready the instant it reports
+        // Running; the registration is what the monitor resolves the key against. Both are
+        // required: an annotation whose key matches no registration reports unhealthy forever.
         HealthCheckAnnotation annotation = Assert.Single(vm.Resource.Annotations.OfType<HealthCheckAnnotation>());
         Assert.Equal("vm_ssh_tcp_check", annotation.Key);
 
@@ -71,8 +70,8 @@ public class TcpHealthCheckTests
 
         HealthCheckResult result = await Check(resource, "ssh").CheckHealthAsync(new HealthCheckContext());
 
-        // Before the guest leases an address there is nothing to connect to. Reporting healthy
-        // here would release WaitFor dependents against a VM that has no address at all.
+        // Before the guest leases an address there is nothing to connect to. Healthy here would
+        // release WaitFor dependents against a VM that has no address.
         Assert.Equal(HealthStatus.Unhealthy, result.Status);
         Assert.Contains("not allocated", result.Description);
     }
@@ -94,9 +93,8 @@ public class TcpHealthCheckTests
         HealthCheckResult listening = await check.CheckHealthAsync(new HealthCheckContext());
         Assert.Equal(HealthStatus.Healthy, listening.Status);
 
-        // A refused connection proves the stack is up but nothing is serving — which is exactly
-        // the gap this check exists to close, so it must not count as ready. The reference Kali
-        // image ships sshd disabled and lands here.
+        // A refused connection proves the stack is up but nothing is serving; it must not count
+        // as ready.
         listener.Stop();
         HealthCheckResult refused = await check.CheckHealthAsync(new HealthCheckContext());
         Assert.Equal(HealthStatus.Unhealthy, refused.Status);
@@ -115,8 +113,8 @@ public class TcpHealthCheckTests
         HealthCheckResult result = await Check(resource, "ssh", TimeSpan.FromMilliseconds(250))
             .CheckHealthAsync(new HealthCheckContext());
 
-        // Without its own timeout this would block for the OS SYN-retry budget (~21 s on
-        // Windows), far longer than the health monitor's polling interval.
+        // Without its own timeout this blocks for the OS SYN-retry budget (~21 s on Windows),
+        // longer than the health monitor's polling interval.
         Assert.Equal(HealthStatus.Unhealthy, result.Status);
         Assert.Contains("did not answer", result.Description);
     }

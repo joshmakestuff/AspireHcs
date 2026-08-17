@@ -7,10 +7,9 @@ namespace AspireHcs.Tests;
 /// <summary>
 /// Finds the repo-local hcsctl that <c>eng/Get-HcsCtl.ps1</c> installs.
 ///
-/// This lives in the test project on purpose. The shipped assembly must never look for a
-/// repository layout — a NuGet consumer has no <c>tools/hcsctl</c> — so the repo-local
-/// convenience stops at the test boundary and <see cref="HcsCtlBinary"/> stays honest about the
-/// three mechanisms it documents.
+/// Test-project only. The shipped assembly must not look for a repository layout (a NuGet
+/// consumer has no <c>tools/hcsctl</c>); <see cref="HcsCtlBinary"/> documents the three
+/// mechanisms it uses.
 /// </summary>
 [SupportedOSPlatform("windows10.0.17763")]
 internal static class RepositoryTools
@@ -20,8 +19,8 @@ internal static class RepositoryTools
 
     /// <summary>
     /// Resolves hcsctl for a test: the repo-local drop first, then whatever
-    /// <see cref="HcsCtlBinary"/> would find. Repo-local wins so a developer's global install
-    /// cannot silently substitute a different build for the pinned one.
+    /// <see cref="HcsCtlBinary"/> finds. Repo-local wins so a developer's global install cannot
+    /// substitute a different build for the pinned one.
     /// </summary>
     public static bool TryFindHcsCtl([NotNullWhen(true)] out string? path, [NotNullWhen(false)] out string? failure)
     {

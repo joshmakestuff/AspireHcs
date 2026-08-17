@@ -4,17 +4,12 @@
     Fetches the pinned hcsctl preview drop into tools/hcsctl.
 
 .DESCRIPTION
-    AspireHcs drives hcsctl rather than calling HCS directly (see issue #30), and hcsctl's
-    packaging story is undecided (hcsctl#35). This script is the interim answer: a fixed,
-    hash-verified artifact kept local to the repo.
+    AspireHcs drives hcsctl and does not call HCS directly. This script installs a fixed,
+    hash-verified hcsctl binary local to the repo.
 
-    The binary is deliberately NOT committed. It is ~10 MB of build output that would live in
-    git history forever, and it is reproducible from the release. What is committed is this
-    script and the hash it pins — which is what makes the artifact identifiable, since the
-    preview binary cannot report its own version (hcsctl#25/#29).
+    The binary is NOT committed. This script and the hash it pins are.
 
-    A hash mismatch aborts and installs nothing. A binary that is not the one this repo was
-    tested against is worse than no binary: it fails in ways the test suite has never seen.
+    A hash mismatch aborts and installs nothing.
 
 .EXAMPLE
     ./eng/Get-HcsCtl.ps1
@@ -39,17 +34,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# The hash of hcsctl.exe ITSELF, not of the zip around it -- the exe is what gets verified below
-# and what actually runs. The release's SHA256SUMS covers the zip, so the two numbers differ on
-# purpose; do not paste one where the other belongs.
+# The hash of hcsctl.exe ITSELF, not of the zip around it. The release's SHA256SUMS covers the
+# zip, so the two numbers differ; do not paste one where the other belongs.
 #
-# Since v0.2.0 the binary reports its own version, so the hash is no longer its only identity and
-# the install is checked both ways (hcsctl#29).
+# The binary also reports its own version; the install is checked both ways.
 $ExpectedSha256 = '259E59E945D796B70636F935BE537C9E288150A702C2A82D026AE631CCC09FCD'
 $Repository = 'joshmakestuff/hcsctl'
 
-# v0.1.0-preview.1 embedded the version in the asset name; the release workflow added in
-# hcsctl#35 does not. Pinning an older version means changing this too.
+# The asset name carries no version. Check it when changing $Version.
 $Asset = 'hcsctl-windows-amd64.zip'
 
 if (-not $Destination) {
@@ -103,8 +95,8 @@ try {
         throw "$Asset did not contain hcsctl.exe."
     }
 
-    # Verify before installing, never after: a binary that fails this check must not be left
-    # somewhere the test suite or an AppHost could pick it up.
+    # Verify before installing: a binary that fails this check must not be left where the test
+    # suite or an AppHost could pick it up.
     $actual = Get-Sha256 $extracted
     if ($actual -ne $ExpectedSha256) {
         throw "SHA256 mismatch for hcsctl.exe from $Version. Nothing was installed.`n" +
@@ -112,10 +104,9 @@ try {
               "  actual   $actual"
     }
 
-    # The binary's own account of itself, checked against the tag it was downloaded under. The
-    # hash already proves it is the artifact that was pinned; this proves the pin names the
-    # version it says it does. They fail differently: a wrong hash means the wrong file, a wrong
-    # version means a release built from the wrong commit or an unstamped build.
+    # The hash proves this is the pinned artifact. The reported version proves the pin names the
+    # version it says it does: a mismatch means a release built from the wrong commit or an
+    # unstamped build.
     $reported = (& $extracted version --json | ConvertFrom-Json).toolVersion
     if ($reported -ne $Version) {
         throw "hcsctl from $Version reports its version as '$reported'. Nothing was installed."

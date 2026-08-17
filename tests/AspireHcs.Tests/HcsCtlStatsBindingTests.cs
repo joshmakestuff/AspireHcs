@@ -6,18 +6,16 @@ using Xunit;
 namespace AspireHcs.Tests;
 
 // The statistics and process documents are hcsshim structs marshalled straight through, so their
-// wire names come from hcsshim's tags — NOT from hcsctl, and not from the Go field names, which
+// wire names come from hcsshim's tags, not from hcsctl and not from the Go field names, which
 // differ (the field is UsageCommitBytes; the wire name is MemoryUsageCommitBytes).
 //
-// Every payload below was captured verbatim from a live container on 2026-08-07. That is the
-// point: a binding tested against a document I invented would only prove I can spell my own
-// property names.
+// Every payload below was captured verbatim from a live container.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlStatsBindingTests
 {
     // Captured from `hcsctl container stats --json` against a running servercore container with
-    // a NAT endpoint. Note what is ABSENT: Processor carries only TotalRuntime100ns, because the
-    // user/kernel splits were zero and every field is omitempty.
+    // a NAT endpoint. Processor carries only TotalRuntime100ns: the user/kernel splits were zero
+    // and every field is omitempty.
     private const string LiveStats = """
         {
           "command": "container stats",
@@ -74,8 +72,7 @@ public class HcsCtlStatsBindingTests
         Assert.Equal(5787, network.BytesSent);
     }
 
-    // HCS reports 100-nanosecond ticks, which is also .NET's TimeSpan tick. Getting this wrong by
-    // a factor of 100 either way produces a plausible-looking number, which is the dangerous kind.
+    // HCS reports 100-nanosecond ticks, which is also .NET's TimeSpan tick.
     [Fact]
     public void Uptime_ticks_convert_to_the_duration_hcsctl_prints()
     {
@@ -85,8 +82,8 @@ public class HcsCtlStatsBindingTests
         Assert.Equal(3.0560508, document.Statistics!.Uptime.TotalSeconds, precision: 4);
     }
 
-    // A container with no endpoint has no Network key at all — measured, not supposed. Binding it
-    // to null would NRE the property formatter on the most ordinary container there is.
+    // A container with no endpoint has no Network key at all. Binding it to null would NRE the
+    // property formatter.
     [Fact]
     public void A_container_with_no_network_binds_to_an_empty_collection()
     {
@@ -101,8 +98,8 @@ public class HcsCtlStatsBindingTests
         Assert.Equal(0, document.Statistics.Processor?.TotalRuntime100ns ?? 0);
     }
 
-    // Captured from `hcsctl container ps --json`. Two rows on purpose: one with both CPU fields
-    // present, one with neither — omitempty means a zero counter is an absent key.
+    // Captured from `hcsctl container ps --json`. Two rows: one with both CPU fields present, one
+    // with neither; omitempty means a zero counter is an absent key.
     private const string LiveProcesses = """
         {
           "command": "container ps",
@@ -154,9 +151,8 @@ public class HcsCtlStatsBindingTests
         Assert.Equal(TimeSpan.Zero, document.Processes.Single(p => p.ProcessId == 240).CpuTime);
     }
 
-    // The caveat that shapes any UI built on this: HCS reports no parent process id, so the list
-    // is flat and cannot be made a tree. If a ParentProcessId ever appears on the wire, this test
-    // is where the assumption should be revisited.
+    // HCS reports no parent process id, so the list is flat and cannot be made a tree. If a
+    // ParentProcessId appears on the wire, this test is where to revisit that.
     [Fact]
     public void The_process_shape_carries_no_parent_pid()
     {

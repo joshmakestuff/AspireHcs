@@ -23,7 +23,7 @@ public static class HcsVirtualMachineBuilderExtensions
 
         if (builder.ExecutionContext.IsRunMode)
         {
-            // Fail fast at model-build time, not at VM-start time, per the package contract.
+            // The package contract: an unsupported host fails at model-build time.
             HcsPlatform.ThrowIfUnsupported();
         }
 
@@ -92,13 +92,13 @@ public static class HcsVirtualMachineBuilderExtensions
 
     /// <summary>
     /// Attaches a NIC on an existing host compute network, defaulting to the Hyper-V Default
-    /// Switch — the same default HCS containers get, so a VM and a container in one AppHost reach
-    /// each other out of the box. Guests on different HNS networks are isolated (measured, #58),
-    /// so naming another network here is the isolation opt-in. The network's DHCP leases the
-    /// guest an address, which AspireHcs discovers host-side and uses to resolve the VM's
-    /// endpoints; the guest image must configure its NIC for DHCP (the default for stock Linux
-    /// and Windows images), and a network without a DHCP server leaves the guest addressless —
-    /// only ICS networks like the Default Switch are measured to serve a full VM.
+    /// Switch, the same default HCS containers get, so a VM and a container in one AppHost reach
+    /// each other. Guests on different HNS networks are isolated; name another network here to
+    /// isolate the VM. The network's DHCP leases the guest an address, which AspireHcs discovers
+    /// host-side and uses to resolve the VM's endpoints. The guest image must configure its NIC
+    /// for DHCP (the default for stock Linux and Windows images). A network without a DHCP
+    /// server leaves the guest addressless; only ICS networks like the Default Switch are known
+    /// to serve a full VM.
     /// </summary>
     public static IResourceBuilder<HcsVirtualMachineResource> WithNetwork(
         this IResourceBuilder<HcsVirtualMachineResource> builder, string networkName = HcsNetwork.DefaultSwitchName)
@@ -140,10 +140,8 @@ public static class HcsVirtualMachineBuilderExtensions
     /// annotation is what makes the difference.
     /// </para>
     /// <para>
-    /// Opt-in, because it only holds where the guest image really runs the service: a stock
-    /// image that ships the daemon disabled (Kali's sshd, for instance) will refuse the
-    /// connection and stay unhealthy forever, which is the honest report but not always the
-    /// one you want while bringing an image up.
+    /// Opt-in. A guest image that ships the daemon disabled (Kali's sshd, for instance) refuses
+    /// the connection and the resource stays unhealthy.
     /// </para>
     /// </remarks>
     public static IResourceBuilder<HcsVirtualMachineResource> WithTcpHealthCheck(
@@ -158,8 +156,7 @@ public static class HcsVirtualMachineBuilderExtensions
             ?? throw new InvalidOperationException(
                 $"Resource '{builder.Resource.Name}' has no endpoints; call WithEndpoint(...) before WithTcpHealthCheck().");
 
-        // Checked here rather than at check time so a typo fails the build of the model, not a
-        // health report nobody reads.
+        // An unknown endpoint name fails at model-build time.
         RequireEndpoint(builder.Resource, name, nameof(WithTcpHealthCheck));
 
         string key = $"{builder.Resource.Name}_{name}_tcp_check";
@@ -182,13 +179,12 @@ public static class HcsVirtualMachineBuilderExtensions
     /// <param name="builder">The VM to add the command to.</param>
     /// <param name="endpointName">The endpoint carrying SSH; must already be declared with <see cref="WithEndpoint"/>.</param>
     /// <param name="userName">
-    /// Prefilled as <c>ssh -l</c>. Left unset, ssh falls back to the host user name, which is
-    /// rarely the right one for a guest — pass the account the image actually has.
+    /// Prefilled as <c>ssh -l</c>. Left unset, ssh falls back to the host user name. Pass the
+    /// account the guest image has.
     /// </param>
     /// <remarks>
-    /// Host-side by design: in run mode the AppHost and the browser showing the dashboard are on
-    /// the same machine, so "one click into the guest" is a process launch rather than anything
-    /// the guest has to cooperate with beyond serving SSH.
+    /// The SSH client is launched on the host: in run mode the AppHost and the browser showing
+    /// the dashboard are on the same machine. The guest only has to serve SSH.
     /// </remarks>
     public static IResourceBuilder<HcsVirtualMachineResource> WithSshCommand(
         this IResourceBuilder<HcsVirtualMachineResource> builder,
@@ -213,9 +209,8 @@ public static class HcsVirtualMachineBuilderExtensions
     /// <param name="endpointName">The endpoint carrying RDP; must already be declared with <see cref="WithEndpoint"/>.</param>
     /// <param name="userName">Prefilled in the generated <c>.rdp</c>; mstsc still prompts for the password.</param>
     /// <remarks>
-    /// The guest must actually serve RDP. Windows Server images do not by default — Remote
-    /// Desktop needs enabling and its firewall group opening — so this command connecting is a
-    /// statement about the image, not about the integration.
+    /// The guest must serve RDP. Windows Server images do not by default: Remote Desktop needs
+    /// enabling and its firewall group opening.
     /// </remarks>
     public static IResourceBuilder<HcsVirtualMachineResource> WithRdpCommand(
         this IResourceBuilder<HcsVirtualMachineResource> builder,
@@ -228,9 +223,8 @@ public static class HcsVirtualMachineBuilderExtensions
 
         RequireEndpoint(builder.Resource, endpointName, nameof(WithRdpCommand));
 
-        // Rejected now rather than at click time, by the same check that guards the write: a
-        // user name the .rdp format cannot represent is a mistake in the AppHost, and the
-        // dashboard is a poor place to discover it.
+        // A user name the .rdp format cannot represent fails at model-build time, by the same
+        // check that guards the write.
         if (!string.IsNullOrEmpty(userName))
         {
             RdpFile.ValidateValue("username", userName);
@@ -242,9 +236,8 @@ public static class HcsVirtualMachineBuilderExtensions
 
     /// <summary>
     /// <c>null</c> means "not specified" and is a supported choice. An empty or whitespace
-    /// string is a different thing: somebody meant to supply a user and supplied nothing, and
-    /// silently falling back to the host account (ssh) or the last cached one (mstsc) would
-    /// connect as somebody other than who was asked for.
+    /// string is rejected: ssh would fall back to the host account and mstsc to the last cached
+    /// one, and connect as somebody other than who was asked for.
     /// </summary>
     private static void RequireUsableUserName(string? userName)
     {

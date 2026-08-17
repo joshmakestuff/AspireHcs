@@ -21,7 +21,7 @@ public class HcsContainerBuilderTests
         Assert.Equal(2, resource.ProcessorCount);
         Assert.StartsWith($"aspirehcs-{Environment.ProcessId}-worker-", resource.ContainerId);
 
-        // A locally-run container has no deployment story and must never land in a manifest.
+        // A locally-run container has no deployment story and must not land in a manifest.
         Assert.Contains(resource.Annotations, a => a is ManifestPublishingCallbackAnnotation);
     }
 
@@ -45,7 +45,7 @@ public class HcsContainerBuilderTests
     }
 
     // Relative store paths are resolved against the AppHost's working directory, so the path
-    // hcsctl receives does not depend on where it happens to be launched from.
+    // hcsctl receives does not depend on where it is launched from.
     [Fact]
     public void WithStore_resolves_a_relative_path()
     {
@@ -70,8 +70,8 @@ public class HcsContainerBuilderTests
         Assert.Contains("http", container.Resource.ConnectionStringExpression.ValueExpression);
     }
 
-    // Referencing a container with no endpoints is a mistake in the AppHost, and it should say so
-    // rather than produce an expression that resolves to nothing at run time.
+    // Referencing a container with no endpoints is a mistake in the AppHost; it fails at model
+    // build, not as an expression that resolves to nothing at run time.
     [Fact]
     public void Referencing_a_container_with_no_endpoints_explains_itself()
     {
@@ -97,8 +97,8 @@ public class HcsContainerBuilderTests
         Assert.Throws<ArgumentOutOfRangeException>(() => container.WithProcessorCount(value));
     }
 
-    // There is no isolation switch by design: process isolation is permanently out of scope and
-    // hcsctl does not implement it, so there is nothing that could default wrongly (#46).
+    // There is no isolation switch: process isolation is out of scope and hcsctl does not
+    // implement it.
     [Fact]
     public void No_builder_method_offers_process_isolation()
     {

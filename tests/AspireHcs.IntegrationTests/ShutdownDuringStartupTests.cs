@@ -8,12 +8,11 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #15 acceptance: AppHost shutdown while a boot is in flight must not leak anything the
-// boot had acquired by that point — no HCN endpoint, no ACL grant on the base image, no
-// copy-on-write work directory. The delays land the shutdown in different boot phases (around
-// endpoint creation and grants, just after HCS start, and mid guest-ready wait); whichever
-// phase is hit, the invariants are the same. The interleaving is inherently timing-dependent —
-// what is deterministic is that no timing is allowed to leak.
+// AppHost shutdown while a boot is in flight must not leak anything the boot had acquired by
+// that point: no HCN endpoint, no ACL grant on the base image, no copy-on-write work directory.
+// The delays land the shutdown in different boot phases (around endpoint creation and grants,
+// just after HCS start, and mid guest-ready wait); the invariants are the same in each. The
+// interleaving is timing-dependent; no timing is allowed to leak.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ShutdownDuringStartupTests(ITestOutputHelper output)
 {
@@ -40,9 +39,8 @@ public sealed class ShutdownDuringStartupTests(ITestOutputHelper output)
         {
             await app.StartAsync(cts.Token);
 
-            // Watching the state stream is what proves the shutdown really landed mid-boot: if
-            // the resource ever reached Running before StopAsync, these cases would be quietly
-            // exercising an ordinary post-start shutdown instead of the race they claim to.
+            // The state stream proves the shutdown landed mid-boot: the resource must not reach
+            // Running before StopAsync.
             using CancellationTokenSource watchCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
             Task watcher = Task.Run(async () =>
             {
@@ -77,16 +75,15 @@ public sealed class ShutdownDuringStartupTests(ITestOutputHelper output)
         lock (statesSeen)
         {
             output.WriteLine($"states observed: {string.Join(" -> ", statesSeen)}");
-            // Starting must have been observed for DoesNotContain to mean anything — WatchAsync
-            // replays each resource's current snapshot on subscribe, so an empty or Starting-less
-            // list means the watcher never really ran, not that the states never happened.
+            // Starting must have been observed for DoesNotContain to mean anything. WatchAsync
+            // replays each resource's current snapshot on subscribe, so a Starting-less list
+            // means the watcher never ran.
             Assert.Contains(KnownResourceStates.Starting, statesSeen);
             Assert.DoesNotContain(KnownResourceStates.Running, statesSeen);
         }
 
         Assert.False(Directory.Exists(workDir), $"copy-on-write work directory leaked: {workDir}");
-        // Unfiltered: owners are run-scoped now, and a filtered query that names the wrong
-        // owner would make this assertion pass vacuously.
+        // Unfiltered: a filtered query that names the wrong owner passes vacuously.
         Assert.DoesNotContain(vm.VmId, HcsCtlProbes.VmIds(vm.StorePath));
         if (vm.EndpointId is { } endpointId)
         {

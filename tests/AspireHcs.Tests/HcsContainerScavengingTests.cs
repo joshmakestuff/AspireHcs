@@ -7,8 +7,8 @@ using Xunit;
 namespace AspireHcs.Tests;
 
 // Containers outlive their AppHost: the compute system is host-global and hcsctl's state.json is
-// on disk, so nothing reclaims a crashed run's container but this sweep. That makes deleting too
-// much as bad as deleting too little — a concurrent AppHost's container must survive.
+// on disk, so nothing reclaims a crashed run's container but this sweep. A concurrent AppHost's
+// container must survive it.
 //
 // Deletion requires proof of abandonment: an id this integration wrote, whose recorded pid is
 // dead. These pin every way that proof can fail to arrive.
@@ -32,7 +32,7 @@ public class HcsContainerScavengingTests
         Assert.Equal([Dead], HcsContainerOrchestrator.SelectScavengeable(Listing(Dead), "own", IsAlive));
     }
 
-    // The case that matters most: two developers, or two AppHosts, on one machine.
+    // Two developers, or two AppHosts, on one machine.
     [Fact]
     public void A_container_owned_by_a_live_process_is_left_alone()
     {
@@ -82,8 +82,8 @@ public class HcsContainerScavengingTests
             Listing(Live, Dead, "docker-something", "own"), "own", IsAlive));
     }
 
-    // The id must round-trip: scavenging reads back the pid the resource wrote. If the two ever
-    // disagree, every leftover becomes unattributable and nothing is ever reclaimed.
+    // The id must round-trip: scavenging reads back the pid the resource wrote. If the two
+    // disagree, every leftover is unattributable and nothing is reclaimed.
     [Fact]
     public void A_generated_id_carries_this_process_id_back()
     {

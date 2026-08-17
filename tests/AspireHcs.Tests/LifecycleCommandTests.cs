@@ -6,8 +6,8 @@ using Xunit;
 namespace AspireHcs.Tests;
 
 // Aspire wires Start/Stop/Restart only for resources DCP owns (ContainerCreator/ExecutableCreator
-// call AddLifeCycleCommands), so an HCS VM gets none unless the integration adds them. These cover
-// the part that is easy to get subtly wrong: which command is offered in which state.
+// call AddLifeCycleCommands), so an HCS VM gets none unless the integration adds them. These pin
+// which command is offered in which state.
 [SupportedOSPlatform("windows10.0.17763")]
 public class LifecycleCommandTests
 {
@@ -26,9 +26,8 @@ public class LifecycleCommandTests
     [Fact]
     public void State_names_used_below_still_match_Aspire()
     {
-        // KnownResourceStates members are static readonly, not const, so the cases below have to
-        // spell them as literals. This is what catches an upstream rename instead of the theory
-        // silently exercising states that no longer exist.
+        // KnownResourceStates members are static readonly, not const, so the cases below spell
+        // them as literals. This catches an upstream rename.
         Assert.Equal("NotStarted", KnownResourceStates.NotStarted);
         Assert.Equal("Starting", KnownResourceStates.Starting);
         Assert.Equal("Running", KnownResourceStates.Running);
@@ -60,8 +59,8 @@ public class LifecycleCommandTests
     [Fact]
     public void Start_is_offered_before_any_state_has_been_published()
     {
-        // A resource whose snapshot has no state text yet must still be startable; hiding the
-        // command here would leave a VM with no way to boot from the dashboard.
+        // A resource whose snapshot has no state text yet must still be startable from the
+        // dashboard.
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
 
         Assert.Equal(ResourceCommandState.Enabled, Evaluate(vm, KnownResourceCommands.StartCommand, state: null));

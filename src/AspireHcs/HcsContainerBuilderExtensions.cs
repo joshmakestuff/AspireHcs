@@ -18,9 +18,8 @@ public static class HcsContainerBuilderExtensions
     /// </summary>
     /// <remarks>
     /// There is no isolation option. Hyper-V isolation is the only mode AspireHcs supports and
-    /// the only one hcsctl implements — process isolation is refused rather than attempted,
-    /// because its gate runs at every container start and no grant satisfies it in a
-    /// UAC-filtered token. See the workspace's <c>docs/findings.md</c> (preserved detail: <c>docs/old/AspireHcs/docs/containers.md</c>).
+    /// the only one hcsctl implements. Process isolation needs a grant that a UAC-filtered token
+    /// cannot hold, so hcsctl refuses it at every container start.
     /// </remarks>
     public static IResourceBuilder<HcsContainerResource> AddHcsContainer(
         this IDistributedApplicationBuilder builder, [ResourceName] string name)
@@ -29,7 +28,7 @@ public static class HcsContainerBuilderExtensions
 
         if (builder.ExecutionContext.IsRunMode)
         {
-            // Fail fast at model-build time, not at container-start time, per the package contract.
+            // The package contract: an unsupported host fails at model-build time.
             HcsPlatform.ThrowIfUnsupported();
         }
 
@@ -115,10 +114,8 @@ public static class HcsContainerBuilderExtensions
     /// Docker path does.
     /// </summary>
     /// <remarks>
-    /// Carried over VSMB, not as a Docker bind mount, and hcsctl requires both paths to be
-    /// drive-letter absolute — so the resolution happens here rather than letting a developer
-    /// meet an error about a path they never typed. The host directory must exist when the
-    /// container is created.
+    /// Carried over VSMB. hcsctl requires both paths to be drive-letter absolute. The host
+    /// directory must exist when the container is created.
     /// </remarks>
     public static IResourceBuilder<HcsContainerResource> WithBindMount(
         this IResourceBuilder<HcsContainerResource> builder, string source, string target, bool isReadOnly = false)
@@ -137,9 +134,7 @@ public static class HcsContainerBuilderExtensions
                 nameof(target));
         }
 
-        // Rejected at model-build time rather than at container-start time. hcsctl rejects a
-        // duplicate container path with exit 64, and meeting that as a resource-start failure
-        // would be a slower, worse version of this message.
+        // hcsctl rejects a duplicate guest path with exit 64; reject it at model-build time.
         if (builder.Resource.Mounts.Any(m => string.Equals(
                 m.Target.TrimEnd('\\'), target.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)))
         {
@@ -153,13 +148,11 @@ public static class HcsContainerBuilderExtensions
     }
 
     /// <summary>
-    /// Sets the guest's C: size. Without this the guest gets hcsctl's default, which is
-    /// <b>20 GB</b> — measured, and easy to hit unnoticed by anything that unpacks, builds or
-    /// caches inside the container.
+    /// Sets the guest's C: size. Without this the guest gets hcsctl's default of <b>20 GB</b>,
+    /// which anything that unpacks, builds or caches inside the container can fill.
     /// </summary>
     /// <remarks>
-    /// The observed size comes back about 0.1 GB under the request, measured: a 40 GB request
-    /// gives a 39.9 GB guest C:.
+    /// The guest sees about 0.1 GB less than requested: a 40 GB request gives a 39.9 GB C:.
     /// </remarks>
     public static IResourceBuilder<HcsContainerResource> WithScratchSize(
         this IResourceBuilder<HcsContainerResource> builder, int gigabytes)
@@ -193,19 +186,16 @@ public static class HcsContainerBuilderExtensions
 
     /// <summary>
     /// Attaches a NIC on an existing host compute network, defaulting to the Hyper-V Default
-    /// Switch — the same default HCS VMs get, so a container and a VM in one AppHost reach each
-    /// other out of the box. Guests on different HNS networks are isolated (measured, #58), so
-    /// naming another network here — <c>nat</c>, say, the one a Windows container host normally
-    /// has — is the isolation opt-in.
+    /// Switch, the same default HCS VMs get, so a container and a VM in one AppHost reach each
+    /// other. Guests on different HNS networks are isolated; name another network here
+    /// (for example <c>nat</c>) to isolate the container.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Unlike the VM path, there is no DHCP dance. A static HNS endpoint programs a container's
-    /// network stack directly, so the address is known when the container is <em>created</em>
-    /// rather than discovered afterwards — measured 2026-08-07, along with the fact that the
-    /// address is reachable from the host, so no port publishing is involved. On the Default
-    /// Switch the endpoint takes its address from the same switch pool that leases the VMs
-    /// theirs, measured working in both directions (#60).
+    /// A static HNS endpoint programs the container's network stack directly, so the address is
+    /// known when the container is <em>created</em>. The address is reachable from the host; no
+    /// port publishing is involved. On the Default Switch the endpoint takes its address from
+    /// the same pool that leases the VMs theirs.
     /// </para>
     /// <para>
     /// The network must already exist: hcsctl cannot create one
@@ -261,8 +251,7 @@ public static class HcsContainerBuilderExtensions
             ?? throw new InvalidOperationException(
                 $"Resource '{builder.Resource.Name}' has no endpoints; call WithEndpoint(...) before WithTcpHealthCheck().");
 
-        // Checked here rather than at check time so a typo fails the build of the model, not a
-        // health report nobody reads.
+        // An unknown endpoint name fails at model-build time.
         if (!builder.Resource.Annotations.OfType<EndpointAnnotation>()
                 .Any(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
         {

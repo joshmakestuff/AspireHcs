@@ -6,15 +6,15 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// #63. On an ICS network — the Default Switch, the container default since #60 — the endpoint's
-// address is leased after the guest starts, not assigned at create, so the instance polls the
-// live HCN listing instead of throwing on the create document's empty list. These pin the wait:
-// what satisfies it, what it filters, and what its failure says. The fake reads stand in for
-// `network endpoints --json`, whose live shape the binding tests at the bottom capture verbatim.
+// On an ICS network (the Default Switch, the container default) the endpoint's address is
+// leased after the guest starts, not assigned at create, so the instance polls the live HCN
+// listing. These pin the wait: what satisfies it, what it filters, and what its failure says.
+// The fake reads stand in for `network endpoints --json`, whose live shape the binding tests
+// at the bottom capture verbatim.
 [SupportedOSPlatform("windows10.0.17763")]
 public class ContainerAddressLeaseTests
 {
-    // The endpoint id from the run that found the regression, verbatim.
+    // A real endpoint id, verbatim.
     private const string EndpointId = "0626e1a4-c040-4af4-be2c-ba695dc7943b";
 
     private static HcsCtlNetworkEndpointsDocument Listing(params HcsCtlNetworkEndpointRow[] rows) =>
@@ -49,8 +49,8 @@ public class ContainerAddressLeaseTests
         Assert.Equal(3, reads);
     }
 
-    // GUID case differs between HCN read paths — stats report endpoint ids uppercase, the
-    // endpoint listing lowercase — so the match must not be exact.
+    // GUID case differs between HCN read paths: stats report endpoint ids uppercase, the
+    // endpoint listing lowercase.
     [Fact]
     public async Task The_endpoint_id_matches_case_insensitively()
     {
@@ -60,8 +60,8 @@ public class ContainerAddressLeaseTests
         Assert.Equal("172.18.184.17", address);
     }
 
-    // The Default Switch is shared — VMs and other containers lease on it too. Another
-    // endpoint's address must never satisfy this container's wait.
+    // The Default Switch is shared: VMs and other containers lease on it too. Another
+    // endpoint's address must not satisfy this container's wait.
     [Fact]
     public async Task Another_endpoints_address_does_not_satisfy_the_wait()
     {
@@ -75,8 +75,8 @@ public class ContainerAddressLeaseTests
         Assert.Contains(EndpointId, thrown.Message);
     }
 
-    // The honest failure the issue asks for: the network, the endpoint and how long it waited —
-    // and never "Add WithNetwork()", because a resource that reaches this wait has a network.
+    // The failure names the network, the endpoint and how long it waited, and never says "Add
+    // WithNetwork()": a resource that reaches this wait has a network.
     [Fact]
     public async Task Expiry_names_the_network_the_endpoint_and_the_wait()
     {
@@ -90,8 +90,8 @@ public class ContainerAddressLeaseTests
         Assert.DoesNotContain("WithNetwork", thrown.Message);
     }
 
-    // An endpoint missing from the listing entirely is a different diagnosis than one present
-    // but addressless — deleted out from under the container versus a lease that has not landed.
+    // An endpoint missing from the listing is a different diagnosis than one present but
+    // addressless: deleted out from under the container versus a lease that has not landed.
     [Fact]
     public async Task An_endpoint_never_listed_is_reported_as_never_listed()
     {
@@ -113,10 +113,9 @@ public class ContainerAddressLeaseTests
                 TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(1), cts.Token));
     }
 
-    // Captured verbatim from `hcsctl network endpoints --json` (v0.2.0, 2026-08-09): a container
-    // endpoint on the Default Switch with its leased address, and WSL's own endpoint beside it.
-    // The wire names are hcsctl's — lowercase — unlike the stats documents, whose names are
-    // hcsshim's.
+    // Captured verbatim from `hcsctl network endpoints --json` (v0.2.0): a container endpoint on
+    // the Default Switch with its leased address, and WSL's own endpoint beside it. The wire
+    // names are hcsctl's (lowercase), unlike the stats documents, whose names are hcsshim's.
     private const string LiveEndpoints = """
         {
           "command": "network endpoints",
@@ -164,7 +163,7 @@ public class ContainerAddressLeaseTests
     }
 
     // Go marshals a nil slice as JSON null, so `"addresses": null` and `"endpoints": null` are
-    // routine output for "none" — the same trap every other document here guards against.
+    // routine output for "none".
     [Fact]
     public void Null_collections_bind_to_empty_rather_than_null()
     {

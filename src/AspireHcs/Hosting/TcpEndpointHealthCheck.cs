@@ -9,29 +9,23 @@ namespace AspireHcs.Hosting;
 /// something inside the guest is actually listening there.
 /// </summary>
 /// <remarks>
-/// The guest's kernel comes up well before its services do: on the reference image the
-/// integration drivers answer at ~9 s and DHCP at ~14 s, which is all
-/// <see cref="Hcs.HcsComputeSystem.WaitForGuestReadyAsync"/> can attest to. This is the
-/// signal that closes that gap, so <c>WaitFor(vm)</c> releases dependents against a
-/// workload rather than a login prompt.
+/// The guest kernel comes up before its services do.
+/// <see cref="Hcs.HcsComputeSystem.WaitForGuestReadyAsync"/> attests only that the integration
+/// drivers and DHCP answered. This check closes that gap: <c>WaitFor(vm)</c> releases dependents
+/// when a workload listens.
 /// <para>
-/// A refused connection is unhealthy, not healthy. A refusal proves the guest's network
-/// stack is up — which is why the round-trip test accepts it as evidence of reachability —
-/// but it is precisely the case where nothing is serving yet, so treating it as ready
-/// would reintroduce the gap this closes.
+/// A refused connection is unhealthy: the guest's network stack is up, but nothing serves yet.
 /// </para>
 /// <para>
-/// The endpoint is looked up per check rather than captured, because
-/// <see cref="EndpointReference.IsAllocated"/> memoizes its first answer including
-/// <see langword="false"/>; a reference built at model-build time would latch unallocated
-/// forever.
+/// The endpoint is looked up per check, not captured:
+/// <see cref="EndpointReference.IsAllocated"/> memoizes its first answer, including
+/// <see langword="false"/>.
 /// </para>
 /// </remarks>
 /// <para>
-/// Serves containers as well as VMs (#41), and the difference in what it <em>means</em> matters.
-/// For a VM, guest-kernel readiness gates Running and this gates ready. A container has no
-/// separate kernel-readiness signal — start already implies the guest is up — so this is the only
-/// readiness gate there is.
+/// Serves containers as well as VMs. For a VM, guest-kernel readiness gates Running and this
+/// check gates ready. For a container, start already implies the guest is up, so this is the
+/// only readiness gate.
 /// </para>
 internal sealed class TcpEndpointHealthCheck(
     IResource resource,

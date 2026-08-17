@@ -8,21 +8,20 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #5 acceptance: a TCP health check moves readiness from "the guest kernel is up" to
-// "the guest is serving", so WaitFor(vm) releases dependents against a workload.
+// A TCP health check moves readiness from "the guest kernel is up" to "the guest is serving",
+// so WaitFor(vm) releases dependents against a workload.
 //
 // The negative fixture is a port nothing serves, declared on the resource for this test only.
-// It cannot be the guest's own SSH port: the reference image serves it, so the check would pass
-// and the test would wait forever for an unhealthy report. The guest boots, leases an address
-// and answers this port with an RST, so the check reaches it and still correctly refuses to call
-// the resource ready. That is precisely the window that used to be reported as ready.
+// The guest's own SSH port cannot serve as the fixture: the reference image serves it. The guest
+// boots, leases an address and answers the dead port with an RST, so the check reaches it and
+// still refuses to call the resource ready.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class HealthCheckGatesReadinessTests(ITestOutputHelper output)
 {
     /// <summary>
-    /// A port in the IANA dynamic range that the guest image does not serve. Any closed port
-    /// works; what matters is that the guest is reachable and answers with an RST, so a failure
-    /// here means "nothing is listening" rather than "the address is wrong".
+    /// A port in the IANA dynamic range that the guest image does not serve. The guest is
+    /// reachable and answers with an RST, so a failure here means "nothing is listening", not
+    /// "the address is wrong".
     /// </summary>
     private const int DeadPort = 59999;
 
@@ -35,8 +34,7 @@ public sealed class HealthCheckGatesReadinessTests(ITestOutputHelper output)
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
-        // The sample AppHost deliberately does not opt in, so the round-trip test still measures
-        // the default behaviour; the check is attached to its resource here instead.
+        // The sample AppHost does not opt in; the check is attached to its resource here.
         IDistributedApplicationTestingBuilder appHost =
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
 
@@ -60,9 +58,8 @@ public sealed class HealthCheckGatesReadinessTests(ITestOutputHelper output)
 
         await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
 
-        // The check only runs once the resource reports Running, and it only reaches the guest
-        // once the endpoint is allocated — so an unhealthy report here also proves the
-        // orchestrator ordered those two things correctly.
+        // The check only runs once the resource reports Running, and only reaches the guest
+        // once the endpoint is allocated; an unhealthy report also proves that ordering.
         ResourceEvent unhealthy = await app.ResourceNotifications.WaitForResourceAsync(
             "appliance",
             e => e.Snapshot.HealthReports.Any(h => h.Name == "appliance_dead_tcp_check" && h.Status == HealthStatus.Unhealthy),
@@ -72,8 +69,7 @@ public sealed class HealthCheckGatesReadinessTests(ITestOutputHelper output)
         output.WriteLine($"health report: {report.Status} — {report.Description}");
         Assert.Contains("not accepting connections", report.Description);
 
-        // The gap this closes: without the annotation Aspire declares a resource ready the moment
-        // it reports Running, regardless of whether anything inside it is serving.
+        // Without the annotation Aspire declares a resource ready the moment it reports Running.
         Assert.False(ready.Task.IsCompleted, "ResourceReadyEvent fired even though the guest is serving nothing.");
 
         await app.StopAsync(cts.Token);

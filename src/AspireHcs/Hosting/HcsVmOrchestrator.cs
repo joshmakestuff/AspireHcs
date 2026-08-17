@@ -20,8 +20,8 @@ internal static class HcsVmOrchestrator
 {
     /// <summary>
     /// The label key hcsctl stores on every VM this integration creates, holding the AppHost's
-    /// process id. hcsctl never interprets a label — that is the point of one — so this is the
-    /// only thing that says which run a leftover VM belongs to.
+    /// process id. hcsctl never interprets a label; this is the only record of which run a
+    /// leftover VM belongs to.
     /// </summary>
     internal const string OwnerPidLabel = "aspirehcs-apphost-pid";
 
@@ -115,8 +115,8 @@ internal static class HcsVmOrchestrator
         static bool IsInFlight(string? state) =>
             state == KnownResourceStates.Starting || state == KnownResourceStates.Stopping;
 
-        // "Unknown" is treated as stopped for the same reason Aspire does it: it is the state a
-        // resource can be left in with nothing running.
+        // "Unknown" is treated as stopped, as Aspire does: it is the state a resource can be
+        // left in with nothing running.
         static bool IsStopped(string? state) =>
             KnownResourceStates.TerminalStates.Contains(state)
             || state == KnownResourceStates.NotStarted
@@ -125,9 +125,8 @@ internal static class HcsVmOrchestrator
     }
 
     /// <summary>
-    /// Runs a command against the instance, turning failures into a reported result rather than
-    /// an unhandled exception. The instance drives resource state itself, so there is nothing to
-    /// publish here beyond the command's own outcome.
+    /// Runs a command against the instance and turns failures into a reported result. The
+    /// instance drives resource state itself; only the command's own outcome is published here.
     /// </summary>
     private static async Task<ExecuteCommandResult> ExecuteAsync(
         InstanceHolder holder, Func<HcsVmInstance, Task> action, string pastTense)
@@ -152,13 +151,10 @@ internal static class HcsVmOrchestrator
     /// Removes VMs left behind by AppHost processes that are gone.
     /// </summary>
     /// <remarks>
-    /// hcsctl reports facts and holds no opinion about what a dead run is, deliberately: it is a
-    /// CLI that exits, so it has no long-lived process to test a pid against (hcsctl#44). The
-    /// policy lives here, because this process is the one that outlives its VMs.
+    /// hcsctl reports facts and holds no opinion about what a dead run is: it is a CLI that
+    /// exits, so it has no long-lived process to test a pid against. The policy lives here.
     ///
-    /// Removing the VM removes its HCN endpoint with it, which is why endpoint-level scavenging is
-    /// gone entirely: there is no longer a window where an endpoint exists with no VM to attribute
-    /// it to, which is the race that made the old sweep delicate.
+    /// Removing the VM removes its HCN endpoint with it, so there is no endpoint-level scavenging.
     ///
     /// Static so tests can drive it without booting anything.
     /// </remarks>
@@ -170,12 +166,10 @@ internal static class HcsVmOrchestrator
 
         try
         {
-            // ORDER MATTERS, and it is the same argument the endpoint sweep used to make: VMs are
-            // listed BEFORE the pid snapshot. A VM in this list was created by a process that
-            // existed before the snapshot, so if that process is alive now it is in the snapshot.
-            // A recycled pid can therefore only make a dead run look alive, deferring a removal —
-            // never make a live run look dead. Snapshotting pids first would open exactly that
-            // hole: a run started after the snapshot could be listed and then judged dead.
+            // ORDER MATTERS: VMs are listed BEFORE the pid snapshot. A VM in this list was created
+            // by a process that existed before the snapshot; if that process is alive now it is in
+            // the snapshot. A recycled pid can only make a dead run look alive (deferring a
+            // removal), never a live run look dead.
             HcsCtlVmListDocument listing = await hcsctl.ListVmsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
             if (listing.VirtualMachines.Count == 0)
             {
@@ -206,8 +200,7 @@ internal static class HcsVmOrchestrator
     }
 
     /// <summary>
-    /// Picks the VMs that belong to this integration and whose creating AppHost is gone. Pure, so
-    /// the judgement is testable without a store, a host, or a process to kill.
+    /// Picks the VMs that belong to this integration and whose creating AppHost is gone. Pure.
     /// </summary>
     internal static IEnumerable<string> StaleVmIds(
         HcsCtlVmListDocument listing, string ownVmId, Func<int, bool> isProcessAlive)
@@ -228,8 +221,7 @@ internal static class HcsVmOrchestrator
                 continue;
             }
 
-            // An unparseable pid proves nothing, so it is left alone. The alternative turns a
-            // corrupt label into permission to destroy a running VM.
+            // An unparseable pid proves nothing; the VM is left alone.
             if (int.TryParse(recorded, NumberStyles.None, CultureInfo.InvariantCulture, out int pid)
                 && !isProcessAlive(pid))
             {
@@ -260,8 +252,8 @@ internal sealed class HcsVmInstance(
 {
     // Serializes boot and teardown so a Restart, a dashboard Stop, the exit-notification
     // cleanup and the AppHost shutdown hook cannot interleave over the same compute system
-    // and HCN endpoint. The shutdown hook is the one caller that may proceed without it —
-    // bounded wait first, and the ledger's seal semantics keep the unguarded drain safe.
+    // and HCN endpoint. The shutdown hook is the one caller that may proceed without it after
+    // a bounded wait; the ledger's seal semantics keep the unguarded drain safe.
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     // The live boot, if any. Assigned only by BootAsync (under the gate); cleared only by
@@ -276,16 +268,13 @@ internal sealed class HcsVmInstance(
     private CancellationToken _appStopping;
 
     /// <summary>
-    /// How often the exit watch asks hcsctl whether the VM is still there. Two seconds is the
-    /// same cadence hcsctl polls the DHCP lease at, and an exit is not a thing anyone reacts to
-    /// in under a second.
+    /// How often the exit watch asks hcsctl whether the VM is still there.
     /// </summary>
     private static readonly TimeSpan ExitPollInterval = TimeSpan.FromSeconds(2);
 
     /// <summary>
-    /// How long to wait for the guest to take a DHCP lease. Measured cold boots land near 16 s;
-    /// this is generous enough for a slow guest and short enough that a guest with no DHCP client
-    /// fails the resource rather than hanging the AppHost.
+    /// How long to wait for the guest to take a DHCP lease. Cold boots take about 16 s. A guest
+    /// with no DHCP client fails the resource; it does not hang the AppHost.
     /// </summary>
     private static readonly TimeSpan AddressTimeout = TimeSpan.FromSeconds(90);
 
@@ -294,15 +283,13 @@ internal sealed class HcsVmInstance(
         IHostApplicationLifetime lifetime = services.GetRequiredService<IHostApplicationLifetime>();
         _appStopping = lifetime.ApplicationStopping;
 
-        // Registered once for the resource's whole life rather than per boot, so repeated
-        // Start/Stop cycles do not stack up shutdown callbacks. This hook OWNS teardown at
-        // shutdown: a boot cancelled by the stopping token unwinds without draining, precisely
-        // so the drain runs here, synchronously, keeping host shutdown blocked until cleanup
-        // finishes in every path where the gate is acquired within the bound. The wait is
-        // bounded because a boot stuck in a non-cancellable native HCS call must not stall
-        // shutdown indefinitely; past the bound the drain proceeds without the gate — Drain
-        // seals the ledger, and anything the straggling boot acquires afterwards releases
-        // itself (see BootLedger.Add), possibly after shutdown has already returned.
+        // Registered once for the resource's whole life, not per boot. This hook OWNS teardown at
+        // shutdown: a boot cancelled by the stopping token unwinds without draining, and the
+        // drain runs here, synchronously, which keeps host shutdown blocked until cleanup
+        // finishes. The wait for the gate is bounded so a boot stuck in a non-cancellable native
+        // HCS call cannot stall shutdown; past the bound the drain proceeds without the gate.
+        // Drain seals the ledger, and anything the straggling boot acquires afterwards releases
+        // itself (see BootLedger.Add), possibly after shutdown has returned.
         lifetime.ApplicationStopping.Register(() =>
         {
             bool acquired = _gate.Wait(TimeSpan.FromSeconds(15));
@@ -323,9 +310,9 @@ internal sealed class HcsVmInstance(
     }
 
     /// <summary>
-    /// Boots the VM if it is not already running. Deliberately runs against the AppHost's
-    /// lifetime rather than an invoking command's cancellation token: a boot takes tens of
-    /// seconds and must not be abandoned half-built because a dashboard request completed.
+    /// Boots the VM if it is not already running. Runs against the AppHost's lifetime, not an
+    /// invoking command's cancellation token: a boot takes tens of seconds, and a completed
+    /// dashboard request must not abandon it.
     /// </summary>
     public async Task StartAsync()
     {
@@ -338,8 +325,8 @@ internal sealed class HcsVmInstance(
             }
 
             // Either nothing is running, or the guest exited on its own and its background
-            // cleanup has not reached the gate yet — collect the remains first so the boot
-            // below starts from nothing.
+            // cleanup has not reached the gate yet. Collect the remains first so the boot below
+            // starts from nothing.
             await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
             await BootAsync().ConfigureAwait(false);
         }
@@ -363,8 +350,7 @@ internal sealed class HcsVmInstance(
     }
 
     /// <summary>
-    /// Stop then start, under one lock so nothing can slip in between and observe (or act on)
-    /// the resource while it is momentarily down.
+    /// Stop then start, under one lock so nothing observes the resource while it is down.
     /// </summary>
     public async Task RestartAsync()
     {
@@ -421,9 +407,9 @@ internal sealed class HcsVmInstance(
             await HcsVmOrchestrator.ScavengeAbandonedVmsAsync(hcsctl, resource.VmId, logger, stopping).ConfigureAwait(false);
 
             // Entered ahead of the compute system so the reverse-order drain stops the pump only
-            // after the VM is gone -- the guest's own shutdown output still reaches the logs. The
-            // pump is boot-scoped on purpose: the pipe name is stable across boots, and a pump left
-            // over from a previous boot would attach to the next VM's pipe alongside the new one.
+            // after the VM is gone; the guest's shutdown output still reaches the logs. The pump
+            // is boot-scoped: the pipe name is stable across boots, and a pump left over from a
+            // previous boot would attach to the next VM's pipe alongside the new one.
             CancellationTokenSource pumpCts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
             boot.Ledger.Add("serial console pump", () =>
             {
@@ -436,7 +422,7 @@ internal sealed class HcsVmInstance(
 
             // One call makes the differencing disk, grants the VM access to it and the base, builds
             // the compute system, and attaches a DHCP endpoint. It does not start it. Everything it
-            // made is released by `vm rm`, including from a later process -- so the ledger entry is
+            // made is released by `vm rm`, including from a later process. The ledger entry is
             // registered immediately, before anything else can fail.
             boot.Ledger.Add($"virtual machine {resource.VmId}", () => RemoveVm(boot, hcsctl));
 
@@ -462,12 +448,8 @@ internal sealed class HcsVmInstance(
             await hcsctl.StartVmAsync(resource.VmId, cancellationToken: stopping).ConfigureAwait(false);
             _ = Task.Run(() => SerialConsolePump.RunAsync(resource.SerialPipeName, logger, pumpCts.Token), CancellationToken.None);
 
-            // The DHCP lease IS the readiness gate, and it is the only one there is.
-            //
-            // There used to be a balloon-resize probe here claiming to detect guest-ready. It was
-            // measured to be a no-op: the lease wait was doing the work all along. Nothing was lost
-            // by deleting it, and a VM with no network genuinely has no readiness signal short of
-            // asking the guest agent — which is `hcsctl guest info`, and a separate concern.
+            // The DHCP lease is the readiness gate, and the only one. A VM with no network has no
+            // readiness signal short of asking the guest agent (`hcsctl guest info`).
             if (resource.NetworkName is not null)
             {
                 logger.LogInformation("VM started; waiting for the guest to take a DHCP lease...");
@@ -475,19 +457,18 @@ internal sealed class HcsVmInstance(
                 ThrowIfExitedMidBoot(boot);
             }
 
-            // Started, but nothing has watched the VM since. hcsctl has no verb that blocks until
-            // a compute system exits, so the exit watch is a poll rather than a native callback.
+            // hcsctl has no verb that blocks until a compute system exits, so the exit watch is a
+            // poll.
             StartExitWatch(boot, hcsctl, pumpCts.Token);
 
             ThrowIfExitedMidBoot(boot);
 
             // Running is published last, once the guest is up and its endpoints resolve. Aspire's
-            // health monitor starts the moment a resource reports Running, and a resource with no
-            // health check annotations is declared ready right there — so publishing Running at
-            // HCS-start time would fire ResourceReadyEvent (and release WaitFor dependents) against
-            // a VM still sitting in its bootloader. Aspire raises ResourceReadyEvent itself; raising
-            // our own would be a duplicate that WaitFor cannot observe anyway, since only the
-            // health monitor records it in the resource snapshot.
+            // health monitor starts when a resource reports Running, and a resource with no health
+            // check annotations is declared ready at that moment; publishing Running at HCS-start
+            // time would fire ResourceReadyEvent (and release WaitFor dependents) against a VM
+            // still in its bootloader. Aspire raises ResourceReadyEvent itself; only the health
+            // monitor records it in the resource snapshot.
             await notifications.PublishUpdateAsync(resource, s => s with
             {
                 State = KnownResourceStates.Running,
@@ -496,27 +477,24 @@ internal sealed class HcsVmInstance(
         catch (Exception) when (stopping.IsCancellationRequested)
         {
             // AppHost is shutting down mid-boot: either an await observed the cancellation, or
-            // the shutdown hook's drain yanked the VM out from under an in-flight HCS call and
-            // that call failed — both are shutdown noise, not boot failures. Deliberately no
-            // drain here: unwinding quickly is what releases the gate to the shutdown hook,
-            // which always runs on ApplicationStopping and does the full drain itself — that
-            // keeps host shutdown blocked until cleanup has actually finished, instead of
-            // letting it race a drain running on a thread-pool thread.
+            // the shutdown hook's drain removed the VM under an in-flight HCS call and that call
+            // failed. Neither is a boot failure. No drain here: unwinding releases the gate to
+            // the shutdown hook, which runs on ApplicationStopping and does the full drain itself,
+            // so host shutdown stays blocked until cleanup has finished.
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to start HCS virtual machine '{Name}'.", resource.Name);
 
-            // Release whatever the failed boot did claim — however far it got — so Start can be
-            // retried from the dashboard without leaking a compute system, an HCN endpoint, an
-            // ACL grant, or the copy-on-write work directory.
+            // Release whatever the failed boot claimed so Start can be retried from the dashboard
+            // without leaking a compute system, an HCN endpoint, an ACL grant, or the
+            // copy-on-write work directory.
             await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
 
             await notifications.PublishUpdateAsync(resource, s => s with
             {
                 State = KnownResourceStates.FailedToStart,
-                // The boot may have activated endpoint URLs before failing; a FailedToStart
-                // resource with live-looking links would invite clicks into nothing.
+                // The boot may have activated endpoint URLs before failing.
                 Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
             }).ConfigureAwait(false);
 
@@ -566,7 +544,7 @@ internal sealed class HcsVmInstance(
         {
             State = KnownResourceStates.Exited,
             StopTimeStamp = DateTime.Now,
-            // The guest's address is gone; leaving its URLs lit would invite clicks into nothing.
+            // The guest's address is gone.
             Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
         }).ConfigureAwait(false);
     }
@@ -584,9 +562,9 @@ internal sealed class HcsVmInstance(
     /// </summary>
     /// <remarks>
     /// A graceful stop is attempted first so the guest can flush and its shutdown output reaches
-    /// the console pump, then <c>vm rm --force</c> takes the rest whatever happened. Unlike the
-    /// interop this replaced, nothing here depends on a handle: if this process dies without
-    /// running it, the VM survives and the next run's scavenger removes it by label.
+    /// the console pump; then <c>vm rm --force</c> takes the rest. Nothing here depends on a
+    /// handle: if this process dies without running it, the VM survives and the next run's
+    /// scavenger removes it by label.
     /// </remarks>
     private void RemoveVm(BootRecord boot, HcsCtl hcsctl)
     {
@@ -619,8 +597,8 @@ internal sealed class HcsVmInstance(
             }
             catch (Exception ex)
             {
-                // Reported, not swallowed: this is the one path that deletes the HCN endpoint, and
-                // an endpoint that outlives its run is a leak that outlives the process too.
+                // Reported: this is the one path that deletes the HCN endpoint, and an endpoint
+                // that outlives its run is a leak that outlives the process too.
                 logger.LogWarning(ex, "Removing virtual machine {VmId} failed; the next run will scavenge it.", resource.VmId);
             }
         }
@@ -630,11 +608,10 @@ internal sealed class HcsVmInstance(
     /// Watches for the guest exiting on its own, by polling.
     /// </summary>
     /// <remarks>
-    /// The interop this replaced got an <c>HcsEventSystemExited</c> callback the instant a VM
-    /// died. hcsctl has no verb that blocks until a compute system exits, so this polls
-    /// <c>vm ls</c> instead, and an exit is noticed within <see cref="ExitPollInterval"/> rather
-    /// than immediately. That latency shows in the dashboard and nowhere else: cleanup is still
-    /// driven by the same ledger, and a stop the user asked for does not wait on this.
+    /// hcsctl has no verb that blocks until a compute system exits, so this polls <c>vm ls</c>;
+    /// an exit is noticed within <see cref="ExitPollInterval"/>. That latency shows in the
+    /// dashboard only: cleanup is driven by the ledger, and a stop the user asked for does not
+    /// wait on this.
     /// </remarks>
     private void StartExitWatch(BootRecord boot, HcsCtl hcsctl, CancellationToken cancellationToken)
         => _ = Task.Run(async () =>
@@ -653,7 +630,7 @@ internal sealed class HcsVmInstance(
                     // Absent from the store means someone else removed it; stopped means the guest
                     // powered itself off. Both are the VM being gone. A blank or unknown state is
                     // NOT: hcsctl says "created" before a first start and "unknown" when it could
-                    // not tell, and treating either as an exit would kill a live VM's boot.
+                    // not tell.
                     if (state is null || state == HcsCtlVmState.Stopped)
                     {
                         OnVmExited(boot, state is null ? "removed" : "stopped");
@@ -667,16 +644,16 @@ internal sealed class HcsVmInstance(
             }
             catch (Exception ex)
             {
-                // A watch that dies must not take the VM with it, but a silent one would leave the
-                // dashboard showing Running forever.
+                // A watch that dies must not take the VM with it. Logged: the dashboard may now
+                // show Running for a VM that has exited.
                 logger.LogWarning(ex, "The exit watch for '{Name}' stopped; its state may go stale.", resource.Name);
             }
         }, CancellationToken.None);
 
     private void OnVmExited(BootRecord boot, string how)
     {
-        // A VM we already replaced or are already tearing down has no business reporting the
-        // resource's state -- RemoveVm retires the epoch before it stops anything.
+        // A VM already replaced or in teardown must not report the resource's state. RemoveVm
+        // retires the epoch before it stops anything.
         if (Volatile.Read(ref _epoch) != boot.Epoch)
         {
             return;
@@ -720,12 +697,12 @@ internal sealed class HcsVmInstance(
             {
                 await Task.Run(DrainCurrentBoot).ConfigureAwait(false);
 
-                // Republished after the drain because the exit notification can lose a race
-                // with an almost-complete boot: the notification's Exited lands first, then
-                // BootAsync — past its last liveness check — publishes Running for a VM that is
-                // already dead. Settling the state here, under the gate, corrects that Running.
-                // (This branch is not reached when the exit aborted the boot instead — the boot's
-                // own catch drained _current and published FailedToStart, also terminal.)
+                // Republished after the drain: the exit notification can lose a race with an
+                // almost-complete boot. The notification's Exited lands first, then BootAsync,
+                // past its last liveness check, publishes Running for a VM that is already dead.
+                // Settling the state here, under the gate, corrects that Running. This branch is
+                // not reached when the exit aborted the boot; the boot's own catch drained
+                // _current and published FailedToStart.
                 await notifications.PublishUpdateAsync(resource, s => s with
                 {
                     State = KnownResourceStates.Exited,
@@ -746,8 +723,8 @@ internal sealed class HcsVmInstance(
     /// <remarks>
     /// The address is not knowable before the guest boots. An HCN endpoint carries none when it is
     /// created, none when it is attached to a NIC, and none while the VM runs without a guest, so
-    /// this is a wait and not a read (hcsctl#43). Measured against a Rocky 10 guest: about 16 s on
-    /// a cold boot and 10 s on a restart.
+    /// this is a wait and not a read. A Rocky 10 guest takes about 16 s on a cold boot and 10 s on
+    /// a restart.
     /// </remarks>
     private async Task AllocateEndpointsAsync(
         HcsCtl hcsctl, List<EndpointAnnotation> endpoints, CancellationToken cancellationToken)
@@ -779,8 +756,8 @@ internal sealed class HcsVmInstance(
         // both hang off this event, and nothing raises it for a non-DCP resource.
         await eventing.PublishAsync(new ResourceEndpointsAllocatedEvent(resource, services), cancellationToken).ConfigureAwait(false);
 
-        // The orchestrator publishes endpoint-derived URLs as inactive (hidden), on the assumption
-        // that whoever allocated them activates them once they are really listening. That is us.
+        // The orchestrator publishes endpoint-derived URLs as inactive (hidden); whoever allocated
+        // them activates them.
         await notifications.PublishUpdateAsync(resource, s => s with
         {
             Urls = [.. s.Urls.Select(u => u with { IsInactive = false })],
@@ -788,9 +765,8 @@ internal sealed class HcsVmInstance(
     }
 
     /// <summary>
-    /// The boot disk, checked here so a missing one is a clear message rather than an hcsctl exit
-    /// 64 about <c>--vhdx</c>. hcsctl makes the differencing child itself and removes it with the
-    /// VM, so nothing on this side manages a work directory any more.
+    /// The boot disk. Checked here so a missing one is a clear message; hcsctl would exit 64
+    /// about <c>--vhdx</c>. hcsctl makes the differencing child itself and removes it with the VM.
     /// </summary>
     private string RequireBootDisk()
     {

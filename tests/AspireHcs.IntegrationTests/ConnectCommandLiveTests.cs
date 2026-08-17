@@ -11,14 +11,11 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #26. The unit tests pin what the connect command WOULD spawn; nothing there proves the
-// resulting command line reaches a guest. This does: it boots the real Windows image and runs
-// the argument list the product built, unmodified apart from prefixed batch-mode options, and
-// requires sshd to answer.
+// The unit tests pin what the connect command spawns; this proves the resulting command line
+// reaches a guest. It boots the real Windows image and runs the argument list the product
+// built, unmodified apart from prefixed batch-mode options, and requires sshd to answer.
 //
-// What it deliberately does NOT cover: ShellExecute putting a client window on the desktop.
-// That needs a human to see a window appear, so it is a manual step recorded in
-// the workspace's docs/old/AspireHcs/docs/connect-ux.md rather than a claim asserted here.
+// Not covered: ShellExecute putting a client window on the desktop. That is a manual check.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
 {
@@ -29,10 +26,9 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
         Skip.If(string.IsNullOrEmpty(windowsVhdx),
             "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image to run the connect-UX tests.");
 
-        // The image says for itself whether it serves RDP: New-WindowsGuestImage.ps1 refuses to
-        // seal unless TermService was observed listening on 3389 during burn-in, and records
-        // that in the provenance sidecar. Skipping on an older image is right — failing would
-        // report a defect in the command when the truth is the fixture predates the feature.
+        // The image build refuses to seal unless TermService was observed listening on 3389
+        // during burn-in, and records that in the provenance sidecar. An image without that
+        // record skips the test.
         string provenancePath = Path.ChangeExtension(windowsVhdx, ".provenance.json");
         Skip.If(!File.Exists(provenancePath), $"No provenance beside {windowsVhdx}; cannot tell whether it serves RDP.");
         using JsonDocument provenance = JsonDocument.Parse(await File.ReadAllTextAsync(provenancePath));
@@ -85,13 +81,11 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
                     ServiceProvider = app.Services,
                 }));
 
-            // The host-side half, and the credential-free analogue of SSH's "Permission denied":
-            // 3389 accepting a connection from the host proves the guest is serving Remote
-            // Desktop and that the NAT path reaches it. Completing an RDP handshake would need
-            // the image's password, which the suite deliberately does not hold.
-            // Retried rather than attempted once: the DHCP lease surfaces well before a guest
-            // has finished starting its services, and on Desktop Experience that gap is wide.
-            // A single attempt would conflate "not up yet" with "not reachable".
+            // 3389 accepting a connection from the host proves the guest serves Remote Desktop
+            // and that the NAT path reaches it. Completing an RDP handshake needs the image's
+            // password, which the suite does not hold.
+            // Retried: the DHCP lease surfaces well before a guest has finished starting its
+            // services, and on Desktop Experience that gap is wide.
             Stopwatch reachable = Stopwatch.StartNew();
             TimeSpan rdpTimeout = TimeSpan.FromMinutes(2);
             Exception? lastFailure = null;
@@ -121,7 +115,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
                 $"Last failure: {lastFailure?.GetType().Name}: {lastFailure?.Message}");
             output.WriteLine($"TCP {allocated.Address}:{allocated.Port} -> connected after {reachable.Elapsed.TotalSeconds:0.0}s");
 
-            // And the file mstsc would actually be handed, written by the product.
+            // The .rdp file the product hands to mstsc.
             ProcessStartInfo startInfo = ConnectCommands.BuildRdpStartInfo(
                 vm, "rdp", allocated.Address, allocated.Port, "Administrator");
             string rdpPath = Assert.Single(startInfo.ArgumentList);
@@ -145,7 +139,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
     {
         string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_TEST_WINDOWS_VHDX");
         Skip.If(string.IsNullOrEmpty(windowsVhdx),
-            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (built by hcsimgtool) to run the connect-UX test.");
+            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (built by hcs-images) to run the connect-UX test.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
@@ -158,10 +152,8 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
 
             HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
 
-            // The sample AppHost already calls WithSshCommand, so registering it again here
-            // would produce two connect-ssh annotations and break the Single() lookup below.
-            // Asserted rather than assumed: if the sample stops registering it, this test must
-            // fail loudly instead of silently testing a command nobody ships.
+            // The sample AppHost already calls WithSshCommand; a second registration here would
+            // produce two connect-ssh annotations and break the Single() lookup below.
             Assert.Single(
                 vm.Annotations.OfType<ResourceCommandAnnotation>(),
                 a => a.Name == ConnectCommands.SshCommandName);
@@ -169,14 +161,12 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
             await using DistributedApplication app = await appHost.BuildAsync(cts.Token);
             await app.StartAsync(cts.Token);
 
-            // The predicate overload, because the snapshot itself is needed below — the
-            // target-state overload returns nothing.
+            // The predicate overload returns the snapshot, which is needed below.
             ResourceEvent running = await app.ResourceNotifications.WaitForResourceAsync(
                 "appliance", e => e.Snapshot.State?.Text == KnownResourceStates.Running, cts.Token);
 
-            // Running arrives before the DHCP lease surfaces, which is exactly the window the
-            // command's availability gate exists for — so wait for the allocation the same way
-            // the gate reads it, rather than assuming Running implies an address.
+            // Running arrives before the DHCP lease surfaces. Wait for the allocation the same
+            // way the command's availability gate reads it.
             EndpointAnnotation endpoint = vm.Annotations.OfType<EndpointAnnotation>().Single(e => e.Name == "ssh");
             DateTime deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
             while (endpoint.AllocatedEndpoint is null && DateTime.UtcNow < deadline)
@@ -188,17 +178,14 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
                 ?? throw new TimeoutException("The guest never leased an address, so there was nothing to connect to.");
             output.WriteLine($"guest leased {allocated.Address}:{allocated.Port}");
 
-            // The state guard's lookup is the part with a real chance of being wrong: it asks
-            // ResourceNotificationService for a resource by NAME, and the id it indexes by is
-            // not guaranteed to equal the name. If that lookup always missed, the guard would
-            // silently never fire and every unit test would still pass, because they inject the
-            // state directly. So exercise the production path here, against the live host.
+            // The state guard asks ResourceNotificationService for a resource by name, and the
+            // id it indexes by is not guaranteed to equal the name. The unit tests inject the
+            // state directly; this exercises the production lookup against the live host.
             string? observed = ConnectCommands.CurrentState(app.Services, "appliance");
             output.WriteLine($"CurrentState(\"appliance\") -> {observed ?? "<null>"}");
             Assert.Equal(KnownResourceStates.Running, observed);
 
-            // The button must actually be live at this moment. Evaluated against the real
-            // snapshot, not a synthesized one.
+            // The button must be enabled at this moment, evaluated against the real snapshot.
             ResourceCommandAnnotation command = vm.Annotations.OfType<ResourceCommandAnnotation>()
                 .Single(a => a.Name == ConnectCommands.SshCommandName);
             ResourceCommandState state = command.UpdateState(
@@ -212,8 +199,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
             string knownHosts = Path.Combine(Path.GetTempPath(), $"aspirehcs-knownhosts-{Guid.NewGuid():N}");
             ProcessStartInfo probe = new(built.FileName)
             {
-                // Redirected rather than shell-executed: this asserts where the command line
-                // GOES, and a console window would carry the answer out of the test's reach.
+                // Redirected: a console window would carry the answer out of the test's reach.
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -223,8 +209,8 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
                 probe.ArgumentList.Add(argument);
             }
 
-            // Prefixed, never appended: ssh stops parsing options at the first non-option, so an
-            // option after the host would be sent as a remote command instead.
+            // Prefixed: ssh stops parsing options at the first non-option, so an option after
+            // the host is sent as a remote command.
             probe.ArgumentList.Insert(0, "-o");
             probe.ArgumentList.Insert(1, "BatchMode=yes");
             probe.ArgumentList.Insert(2, "-o");
@@ -242,10 +228,9 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
                 await ssh.WaitForExitAsync(cts.Token);
                 output.WriteLine($"ssh exit {ssh.ExitCode}; stderr: {stderr.Trim()}");
 
-                // "Permission denied" is the SUCCESS condition: reaching authentication means the
+                // "Permission denied" is the success condition: reaching authentication means the
                 // TCP connect, the version exchange and the key exchange all completed against a
-                // real sshd. We hold no credential, so authenticating is not on offer — and a
-                // test that needed one would be asserting the image's password, not reachability.
+                // real sshd. The test holds no credential.
                 Assert.True(
                     stderr.Contains("Permission denied", StringComparison.Ordinal)
                         || stderr.Contains("Authenticated", StringComparison.Ordinal),

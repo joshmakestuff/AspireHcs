@@ -1,5 +1,4 @@
-# Verifies that the packed AspireHcs.nupkg actually contains what its metadata
-# advertises (project policy: never ship on the strength of labels alone).
+# Verifies that the packed AspireHcs.nupkg contains what its metadata advertises.
 param(
     [Parameter(Mandatory)][string]$PackageDirectory
 )

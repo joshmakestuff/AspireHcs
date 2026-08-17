@@ -4,13 +4,9 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// Resolution order is the whole of the distribution story until hcsctl is packaged, so it is
-// pinned here rather than left to be discovered by a developer whose ASPIREHCS_HCSCTL is subtly
-// wrong. Every miss must also produce a message that names what was searched — a bare
-// "file not found" for a three-mechanism search is unactionable.
+// Pins the resolution order. Every miss must produce a message that names what was searched.
 // ASPIREHCS_HCSCTL is process-wide state, so every test that reads or writes it shares one
-// collection. xunit runs collections in parallel by default, and a resolution test racing an
-// invocation test over the same variable would fail intermittently for no real reason.
+// collection; xunit runs collections in parallel by default.
 [Collection(HcsCtlEnvironmentCollection.Name)]
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlBinaryTests : IDisposable
@@ -27,7 +23,7 @@ public class HcsCtlBinaryTests : IDisposable
         }
         catch (IOException)
         {
-            // A leftover temp directory is not worth failing a test over.
+            // A leftover temp directory does not fail the test.
         }
 
         GC.SuppressFinalize(this);
@@ -79,8 +75,8 @@ public class HcsCtlBinaryTests : IDisposable
         Assert.Equal(expected, path);
     }
 
-    // A wrong ASPIREHCS_HCSCTL must fail loudly. Silently falling through to PATH would run a
-    // *different* binary than the one the developer named, which is worse than not running.
+    // A wrong ASPIREHCS_HCSCTL must fail. Falling through to PATH would run a different binary
+    // than the one the developer named.
     [Fact]
     public void A_wrong_environment_variable_fails_rather_than_falling_through_to_path()
     {

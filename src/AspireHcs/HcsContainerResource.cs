@@ -1,13 +1,11 @@
 using System.Globalization;
 
-// Resource types live in Aspire.Hosting.ApplicationModel for discoverability,
-// matching the convention used by first-party hosting integrations.
+// Resource types live in Aspire.Hosting.ApplicationModel, the convention of first-party hosting integrations.
 namespace Aspire.Hosting.ApplicationModel;
 
 /// <summary>
-/// One host directory mapped into the guest. Carried over VSMB rather than as a Docker bind
-/// mount — hcsctl is explicit that these are not Docker semantics — and both paths must be
-/// drive-letter absolute.
+/// One host directory mapped into the guest. Carried over VSMB, not Docker bind-mount semantics.
+/// Both paths must be drive-letter absolute.
 /// </summary>
 /// <param name="Source">Host directory. Must exist when the container is created.</param>
 /// <param name="Target">Where it appears in the guest.</param>
@@ -24,18 +22,16 @@ internal readonly record struct HcsContainerMount(string Source, string Target, 
 /// and torn down when it exits, with leftovers from a crashed run scavenged on the next one.
 /// </summary>
 /// <remarks>
-/// Hyper-V isolation is the only mode, and that is permanent rather than pending. Process
-/// isolation needs an enabled <c>BUILTIN\Administrators</c> SID at <c>PrepareLayer</c>, which runs
-/// at <em>every</em> container start — a group check no user-rights assignment satisfies in a
-/// UAC-filtered token. See the workspace's <c>docs/findings.md</c> (preserved detail: <c>docs/old/AspireHcs/docs/containers.md</c>).
+/// Hyper-V isolation is the only mode. Process isolation needs an enabled
+/// <c>BUILTIN\Administrators</c> SID at <c>PrepareLayer</c>, which runs at <em>every</em>
+/// container start; no user-rights assignment satisfies that check in a UAC-filtered token.
 /// </remarks>
 public sealed class HcsContainerResource([ResourceName] string name)
     : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString, IResourceWithEnvironment
 {
     /// <summary>
-    /// Identifies containers this integration owns. The pid makes ownership provable: crash
-    /// scavenging deletes only containers whose owning process is gone, never one whose id merely
-    /// looks familiar.
+    /// Identifies containers this integration owns. Crash scavenging deletes only containers
+    /// whose owning process (encoded in the id) is gone.
     /// </summary>
     internal const string IdPrefix = "aspirehcs";
 
@@ -71,9 +67,8 @@ public sealed class HcsContainerResource([ResourceName] string name)
     internal string? HcsCtlPath { get; set; }
 
     /// <summary>
-    /// The hcsctl store holding the imported image. Null uses hcsctl's per-user default. Images
-    /// are acquired out of band — <c>image import</c> is elevated — so this usually names a store
-    /// someone else prepared.
+    /// The hcsctl store holding the imported image. Null uses hcsctl's per-user default.
+    /// <c>image import</c> is elevated, so this usually names a store prepared out of band.
     /// </summary>
     internal string? StorePath { get; set; }
 
@@ -85,9 +80,8 @@ public sealed class HcsContainerResource([ResourceName] string name)
     internal int ProcessorCount { get; set; } = 2;
 
     /// <summary>
-    /// Guest C: size. Null leaves hcsctl's default, which is <b>20 GB</b> — measured, and low
-    /// enough that anything unpacking or caching inside the container hits it with no error
-    /// naming the real cause.
+    /// Guest C: size. Null leaves hcsctl's default of <b>20 GB</b>. A full disk gives no error
+    /// that names the real cause.
     /// </summary>
     internal int? ScratchSizeGigabytes { get; set; }
 
@@ -98,25 +92,24 @@ public sealed class HcsContainerResource([ResourceName] string name)
     /// The host compute network to attach an endpoint on, by name or id. Null means no NIC.
     /// </summary>
     /// <remarks>
-    /// The network must already exist — hcsctl cannot create one
-    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>), so this
-    /// names one rather than making it. <c>WithNetwork()</c> defaults it to the Default Switch,
-    /// the same network VMs default to, so the two resource kinds co-locate (#58, #60).
+    /// The network must already exist; hcsctl cannot create one
+    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>).
+    /// <c>WithNetwork()</c> defaults it to the Default Switch, the same network VMs default to,
+    /// so the two resource kinds can reach each other.
     /// </remarks>
     internal string? NetworkName { get; set; }
 
     /// <summary>
     /// The hcsctl container id. Carries this process's id so a crashed AppHost's leftovers are
-    /// attributable, and a random suffix so a dying container from a previous run — teardown is
-    /// asynchronous — cannot collide with this one.
+    /// attributable, and a random suffix so a container from a previous run that is still being
+    /// torn down cannot collide with this one.
     /// </summary>
     internal string ContainerId { get; } =
         $"{IdPrefix}-{Environment.ProcessId}-{Sanitize(name)}-{Guid.NewGuid():N}";
 
     /// <summary>
     /// Extracts the owning process id from a container id, or null if it was not written by this
-    /// integration. Ownership is read back rather than assumed: an id that does not parse belongs
-    /// to somebody else and is never a scavenging candidate.
+    /// integration. An id that does not parse is never a scavenging candidate.
     /// </summary>
     internal static int? OwnerProcessId(string? containerId)
     {

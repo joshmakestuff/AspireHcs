@@ -7,16 +7,15 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Acceptance for #49 (environment), #50 (mounts) and #51 (scratch size). Every assertion here is
-// made from INSIDE the guest, because that is the only place the claims are true or false: an
+// Environment, mounts and scratch size. Every assertion here is made from inside the guest: an
 // AppHost can believe it set a variable that HCS dropped, and a mount that appears in a config
 // document is not a mount the guest can read.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ContainerConfigurationTests(ITestOutputHelper output)
 {
-    // #49: "A sample AppHost sets a variable via WithEnvironment; cmd /c set inside the guest
-    // shows it." The value is awkward on purpose — spaces and non-ASCII cross a process argv
-    // boundary AND the HCS process spec, and each is a chance to mangle it.
+    // A sample AppHost sets a variable via WithEnvironment; cmd /c set inside the guest shows it.
+    // The value has spaces and non-ASCII: both cross a process argv boundary and the HCS process
+    // spec, and each is a chance to mangle it.
     [SkippableFact]
     public async Task An_environment_variable_reaches_the_guest_intact()
     {
@@ -33,9 +32,8 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
         Assert.Contains($"ASPIREHCS_PROBE={value}", logs);
     }
 
-    // The failure mode #49 exists to prevent: a silent drop. HCS treats an empty value as a
-    // deletion, so this must fail the resource rather than start a container whose environment
-    // quietly differs from the model.
+    // HCS treats an empty value as a deletion, so this must fail the resource, not start a
+    // container whose environment differs from the model.
     [SkippableFact]
     public async Task An_empty_environment_value_fails_the_resource_rather_than_dropping_silently()
     {
@@ -57,13 +55,13 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
             await app.StopAsync(cts.Token);
         }
 
-        // It failed BEFORE acquiring anything: no new container was created for this run.
+        // It failed before acquiring anything: no new container was created for this run.
         string[] after = await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token);
         Assert.Equal(before.Order(), after.Order());
     }
 
-    // #50: "A file created on the host appears in the guest without a restart; a file written in
-    // the guest appears on the host."
+    // A file created on the host appears in the guest without a restart; a file written in the
+    // guest appears on the host.
     [SkippableFact]
     public async Task A_bind_mount_carries_files_both_ways()
     {
@@ -89,8 +87,8 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
         Directory.Delete(shared, recursive: true);
     }
 
-    // #50: "A read-only mount rejects guest writes." Asserted by the write failing AND by the
-    // file not appearing on the host — a message alone could be produced by the wrong error.
+    // A read-only mount rejects guest writes. Asserted by the write failing and by the file not
+    // appearing on the host; a message alone could be produced by the wrong error.
     [SkippableFact]
     public async Task A_read_only_mount_rejects_guest_writes()
     {
@@ -107,7 +105,7 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
 
         output.WriteLine(logs);
 
-        // The mount is genuinely there — otherwise "cannot write" would prove nothing.
+        // The mount is present; otherwise "cannot write" proves nothing.
         Assert.Contains("readable", logs);
         Assert.DoesNotContain("WROTE-ANYWAY", logs);
         Assert.False(File.Exists(Path.Combine(shared, "denied.txt")),
@@ -116,18 +114,16 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
         Directory.Delete(shared, recursive: true);
     }
 
-    // #51: "fsutil volume diskfree c: inside the guest reports the requested size (± the measured
-    // overhead)." The default is 20 GB, so a 40 GB request that silently did nothing would show
-    // ~19.9 and fail here.
+    // fsutil volume diskfree c: inside the guest reports the requested size (± the measured
+    // overhead). The default is 20 GB, so a 40 GB request that did nothing shows ~19.9 and fails.
     //
-    // MEASURED 2026-08-07: --scratch-size needs elevation, and nothing else on the container path
-    // does. Unelevated, hcsctl fails with
+    // --scratch-size needs elevation, and nothing else on the container path does. Unelevated,
+    // hcsctl fails with
     //
     //     ExpandScratchSize: hcsshim::ExpandScratchSize failed in Win32: Access is denied. (0x5)
     //
-    // 0x5 is E_ACCESSDENIED — the group-check class, not a privilege — so no user-rights grant
-    // substitutes for it. Filed as hcsctl#36. This test therefore states its prerequisite instead
-    // of failing on every ordinary dev box; on an elevated host it runs and asserts for real.
+    // 0x5 is E_ACCESSDENIED (a group check, not a privilege), so no user-rights grant substitutes
+    // for it. See https://github.com/joshmakestuff/hcsctl/issues/36. Skipped when not elevated.
     [SkippableFact]
     public async Task The_requested_scratch_size_is_what_the_guest_sees()
     {
@@ -150,15 +146,14 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
         double totalGb = totalBytes / (double)(1L << 30);
         output.WriteLine($"guest C: total = {totalGb:F1} GB for a {requestedGb} GB request");
 
-        // The measured overhead is ~0.1 GB; half a gigabyte of slack keeps this from being a
-        // brittle assertion about formatting while still failing if the option did nothing.
+        // The measured overhead is ~0.1 GB; half a gigabyte of slack still fails if the option
+        // did nothing.
         Assert.InRange(totalGb, requestedGb - 0.5, requestedGb + 0.5);
     }
 
     /// <summary>
     /// Pulls the "total bytes" figure out of <c>fsutil volume diskfree</c>. Its output carries
-    /// three byte counts with localized labels, so the largest is taken rather than a label
-    /// matched — total is by definition the largest of free, total and avail.
+    /// three byte counts with localized labels; total is the largest of free, total and avail.
     /// </summary>
     private static long ParseTotalBytes(string logs)
     {

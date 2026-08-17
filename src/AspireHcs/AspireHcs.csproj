@@ -20,8 +20,7 @@
   <ItemGroup>
     <!--
       No CsWin32, and no P/Invoke of any kind. Everything that touches HCS, HNS or VirtDisk goes
-      through the hcsctl child process now (hcsctl#30). If a native call looks necessary here, the
-      surface it needs belongs in hcsctl instead.
+      through the hcsctl child process. A native call that looks necessary here belongs in hcsctl.
     -->
     <PackageReference Include="Aspire.Hosting" />
   </ItemGroup>

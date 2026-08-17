@@ -2,8 +2,7 @@ namespace AspireHcs.Cli;
 
 /// <summary>
 /// Raised when an <c>hcsctl</c> invocation does not succeed. Carries the argv, the exit code, and
-/// hcsctl's own failure document fields, so a caller reports what the tool said rather than
-/// "the process exited with 1".
+/// hcsctl's own failure document fields.
 /// </summary>
 internal abstract class HcsCtlException : Exception
 {
@@ -31,24 +30,23 @@ internal abstract class HcsCtlException : Exception
 
 /// <summary>
 /// Exit 64: the command line was wrong and <b>nothing was attempted</b>. This is always a defect
-/// in the argv this assembly built — never a host condition — so it must not be retried, and it
-/// must not be reported to a developer as an infrastructure failure.
+/// in the argv this assembly built, never a host condition. Do not retry it, and do not report it
+/// as an infrastructure failure.
 /// </summary>
 internal sealed class HcsCtlUsageException(string message, string commandLine, string? stage, string? diagnostics)
     : HcsCtlException(message, commandLine, HcsCtlExitCode.Usage, stage, diagnostics);
 
 /// <summary>
 /// Exit 1: hcsctl ran and failed. The host, the store, or the compute system said no. Also covers
-/// any exit code that is neither 0, 1 nor 64 — an unrecognized code is a failure, and treating it
-/// as success because it was not on the list is how a broken run gets reported as a good one.
+/// any exit code that is neither 0, 1 nor 64; an unrecognized code is a failure.
 /// </summary>
 internal sealed class HcsCtlCommandException(string message, string commandLine, int exitCode, string? stage, string? diagnostics)
     : HcsCtlException(message, commandLine, exitCode, stage, diagnostics);
 
 /// <summary>
 /// hcsctl exited but did not honour its output contract: stdout was empty, held something that is
-/// not JSON, or held more than one document. Separate from <see cref="HcsCtlCommandException"/>
-/// because the fix is in hcsctl (or in the version handshake), not in the request.
+/// not JSON, or held more than one document. Unlike <see cref="HcsCtlCommandException"/>, the
+/// defect is in hcsctl, not in the request.
 /// </summary>
 internal sealed class HcsCtlContractException(string message, string commandLine, int exitCode, string? diagnostics)
     : HcsCtlException(message, commandLine, exitCode, stage: null, diagnostics);

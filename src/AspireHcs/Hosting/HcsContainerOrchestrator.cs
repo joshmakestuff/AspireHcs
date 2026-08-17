@@ -21,10 +21,8 @@ internal static class HcsContainerOrchestrator
     /// The state text for a paused container.
     /// </summary>
     /// <remarks>
-    /// Aspire has no <c>Paused</c> in <see cref="KnownResourceStates"/> — checked, not assumed —
-    /// so this is our own string. It is deliberately not in <c>TerminalStates</c>: a paused
-    /// container is still there, and treating it as stopped would offer Start on something that
-    /// never stopped, while hiding the Stop that would actually clean it up.
+    /// Aspire has no <c>Paused</c> in <see cref="KnownResourceStates"/>. This state is not in
+    /// <c>TerminalStates</c>: a paused container still exists, so Stop applies and Start does not.
     /// </remarks>
     public const string PausedState = "Paused";
 
@@ -107,9 +105,7 @@ internal static class HcsContainerOrchestrator
                     : ResourceCommandState.Disabled,
             });
 
-        // Pause and Resume are each offered only in the one state they apply to, and hidden
-        // otherwise rather than shown-but-disabled: an unavailable command should not look like a
-        // broken one (#52).
+        // Pause and Resume are each visible only in the one state they apply to; otherwise hidden.
         builder.WithCommand(
             "container-pause",
             "Pause",
@@ -166,8 +162,7 @@ internal static class HcsContainerOrchestrator
     }
 
     /// <summary>
-    /// Runs a command whose own return value is the message worth showing — a process count, say —
-    /// rather than a fixed past-tense confirmation.
+    /// Runs a command whose return value is the message to show (for example a process count).
     /// </summary>
     private static async Task<ExecuteCommandResult> ReportAsync(
         InstanceHolder holder, Func<HcsContainerInstance, Task<string>> action)
@@ -213,8 +208,7 @@ internal static class HcsContainerOrchestrator
     /// </summary>
     /// <remarks>
     /// Deletion requires <em>proof of abandonment</em>: an id this integration wrote, whose
-    /// recorded pid is not running. The same discipline as the VM path's endpoint scavenging
-    /// (#21), including its ordering invariant — see <see cref="SelectScavengeable"/>.
+    /// recorded pid is not running. See <see cref="SelectScavengeable"/>.
     /// </remarks>
     internal static async Task ScavengeAbandonedContainersAsync(
         HcsCtl hcsctl, string ownContainerId, ILogger logger, CancellationToken cancellationToken = default)
@@ -222,10 +216,9 @@ internal static class HcsContainerOrchestrator
         try
         {
             // ORDER MATTERS: containers are enumerated BEFORE the pid snapshot. A container in
-            // this list was created by a process that existed before the snapshot, so if that
-            // process is alive now it is in the snapshot — a recycled pid can therefore only make
-            // a dead run look alive (deferring deletion), never a live run look dead. Snapshotting
-            // pids first would open exactly that hole.
+            // this list was created by a process that existed before the snapshot; if that
+            // process is alive now it is in the snapshot. A recycled pid can only make a dead run
+            // look alive (deferring deletion), never a live run look dead.
             HcsCtlContainerListDocument listing = await hcsctl.ListAsync(cancellationToken).ConfigureAwait(false);
             if (listing.Containers.Count == 0)
             {
@@ -256,9 +249,8 @@ internal static class HcsContainerOrchestrator
     }
 
     /// <summary>
-    /// Decides which listed containers are abandoned leftovers. Pure, so every rule is testable
-    /// without a host: anything not written by this integration, owned by a live process, or
-    /// belonging to this run is left alone.
+    /// Decides which listed containers are abandoned leftovers. Pure. Anything not written by
+    /// this integration, owned by a live process, or belonging to this run is left alone.
     /// </summary>
     internal static IEnumerable<string> SelectScavengeable(
         HcsCtlContainerListDocument listing, string ownContainerId, Func<int, bool> isProcessAlive)
@@ -272,8 +264,8 @@ internal static class HcsContainerOrchestrator
                 continue;
             }
 
-            // An id this integration did not write belongs to somebody else — another tool, or a
-            // person at a shell. The prefix is not a licence to delete; the pid is.
+            // An id this integration did not write belongs to another tool or a person at a shell.
+            // The prefix is not a licence to delete; the pid is.
             if (HcsContainerResource.OwnerProcessId(id) is not { } pid)
             {
                 continue;

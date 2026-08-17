@@ -1,5 +1,4 @@
-// Resource types live in Aspire.Hosting.ApplicationModel for discoverability,
-// matching the convention used by first-party hosting integrations.
+// Resource types live in Aspire.Hosting.ApplicationModel, the convention of first-party hosting integrations.
 namespace Aspire.Hosting.ApplicationModel;
 
 /// <summary>
@@ -7,10 +6,9 @@ namespace Aspire.Hosting.ApplicationModel;
 /// when the AppHost starts and torn down when it exits.
 /// </summary>
 /// <remarks>
-/// Crash safety is not terminate-on-last-handle-closed any more. hcsctl is a child process that
-/// exits as soon as each command completes, so no handle is held and a crashed AppHost leaves the
-/// VM running. What reclaims it instead is the label this run stamps on the VM: the next run lists
-/// what exists, finds a VM owned by a pid that is gone, and removes it (hcsctl#44).
+/// hcsctl is a child process that exits as soon as each command completes, so no handle is held
+/// and a crashed AppHost leaves the VM running. This run stamps the VM with an owner label; the
+/// next run lists what exists, finds a VM owned by a pid that is gone, and removes it.
 /// </remarks>
 public sealed class HcsVirtualMachineResource([ResourceName] string name)
     : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString
@@ -36,8 +34,8 @@ public sealed class HcsVirtualMachineResource([ResourceName] string name)
 
     /// <summary>
     /// The host compute network the VM's NIC attaches to, by name or id. Null means no NIC.
-    /// Defaults to the Default Switch via <c>WithNetwork()</c> so VMs and HCS containers
-    /// co-locate — guests on different HNS networks cannot reach each other (#58).
+    /// <c>WithNetwork()</c> defaults it to the Default Switch, the same network HCS containers
+    /// default to; guests on different HNS networks cannot reach each other.
     /// </summary>
     internal string? NetworkName { get; set; }
 
@@ -58,23 +56,22 @@ public sealed class HcsVirtualMachineResource([ResourceName] string name)
     internal string? StorePath { get; set; }
 
     /// <summary>
-    /// The VM's id, and a GUID because hcsctl requires one: the id is also the VM's Hyper-V socket
-    /// address, so <c>hcsctl guest info --vmid</c> takes it unchanged. Fresh per resource, so a
-    /// crashed AppHost's leftover can never collide with the next run's.
+    /// The VM's id. hcsctl requires a GUID: the id is also the VM's Hyper-V socket address, so
+    /// <c>hcsctl guest info --vmid</c> takes it unchanged. Fresh per resource, so a crashed
+    /// AppHost's leftover cannot collide with the next run's.
     /// </summary>
     internal string VmId { get; } = Guid.NewGuid().ToString();
 
     /// <summary>
     /// Named pipe carrying the guest's COM1 serial console. Passed to hcsctl at create time; this
-    /// side only reads it, which is why the console survived the move to the CLI unchanged.
+    /// side only reads it.
     /// </summary>
     internal string SerialPipeName => $"aspirehcs-{Name}-{VmId}-com1";
 
     /// <summary>
     /// The MAC and HCN endpoint hcsctl generated for this VM, learned from the create result. Both
-    /// are null until the VM has been created — nothing on this side chooses them, because the MAC
-    /// has to survive a stop/start for the DHCP lease to hold and hcsctl's store is what remembers
-    /// it.
+    /// are null until the VM has been created. hcsctl's store owns the MAC; it must survive a
+    /// stop/start for the DHCP lease to hold.
     /// </summary>
     internal string? EndpointId { get; set; }
 

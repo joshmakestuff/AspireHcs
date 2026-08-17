@@ -2,10 +2,7 @@ namespace AspireHcs.Cli;
 
 /// <summary>
 /// Turns <c>hcsctl info</c> into a go/no-go decision with an actionable reason. Pure policy over a
-/// document — no process, no HCS — so every rule here is testable without a host.
-///
-/// The point is that a developer never meets a bare HRESULT or a bare exit code for a condition
-/// that was knowable before anything was attempted.
+/// document: no process, no HCS.
 /// </summary>
 internal static class HcsCtlPreflight
 {
@@ -25,8 +22,8 @@ internal static class HcsCtlPreflight
     {
         ArgumentNullException.ThrowIfNull(info);
 
-        // The document shape is unknowable without a contractVersion, so this gate runs before
-        // anything else reads a field — a shape change would make every later rule a guess.
+        // The document shape is unknown without a contractVersion, so this gate runs before
+        // anything else reads a field.
         if (string.IsNullOrWhiteSpace(info.ContractVersion))
         {
             return "hcsctl did not report a contractVersion, so its document shape is unknown. " +
@@ -70,11 +67,10 @@ internal static class HcsCtlPreflight
     /// when it is materialized in the store.
     /// </summary>
     /// <remarks>
-    /// Image acquisition is a separate, partly elevated concern, and it is deliberately not
-    /// automated here. <c>image import</c> needs <c>SeBackup</c>/<c>SeRestore</c> and an enabled
-    /// <c>BUILTIN\Administrators</c> SID — a group check no user-rights grant satisfies in a
-    /// UAC-filtered token — so an AppHost cannot acquire an image on the developer's behalf. It
-    /// can only say precisely what to run.
+    /// Image acquisition is not automated here. <c>image import</c> needs <c>SeBackup</c>/<c>SeRestore</c>
+    /// and an enabled <c>BUILTIN\Administrators</c> SID, which a UAC-filtered token does not
+    /// have, so an AppHost cannot acquire an image on the developer's behalf. It can only say
+    /// what to run.
     /// </remarks>
     public static string? DescribeMissingImage(HcsCtlInfoDocument info, string imageReference)
     {

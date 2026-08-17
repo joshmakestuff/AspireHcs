@@ -8,14 +8,12 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #66, general half: `aspire stop` must tear down every resource kind, and one resource's
-// teardown failure must not strand its siblings. The relay-specific repro (externally killed
-// Docker containers) follows the relay to withreference-relay; this pins the half that stays on
-// main — both kinds reach Running, one stop removes both, and neither survives in any state.
+// `aspire stop` must tear down every resource kind, and one resource's teardown failure must
+// not strand its siblings: both kinds reach Running, one stop removes both, and neither
+// survives in any state.
 //
-// The assertion runs through HcsCtlProbes, an independent process path that parses hcsctl's JSON
-// directly rather than the product's own typed binding — so a leak in the binding cannot hide a
-// leak in the host.
+// The assertion runs through HcsCtlProbes, an independent process path that parses hcsctl's
+// JSON directly, so a leak in the product's typed binding cannot hide a leak in the host.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class AspireStopTeardownTests(ITestOutputHelper output)
 {
@@ -47,9 +45,8 @@ public sealed class AspireStopTeardownTests(ITestOutputHelper output)
             output.WriteLine("AppHost stopped");
         }
 
-        // ABSENCE, never a return code. Neither resource may survive the stop, in any state —
-        // a VM keeps its store record as "stopped", and a container's scratch is "absent" only
-        // when actually removed.
+        // Asserts absence, not a return code. A stopped VM keeps its store record, and a
+        // container's scratch is absent only when actually removed.
         Assert.DoesNotContain(vm.VmId, HcsCtlProbes.VmIds(vm.StorePath));
         Assert.DoesNotContain(container.ContainerId, HcsCtlProbes.ContainerIds(container.StorePath));
     }

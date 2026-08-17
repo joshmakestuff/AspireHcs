@@ -22,7 +22,7 @@ public class HcsVirtualMachineBuilderTests
         // The id is a GUID because hcsctl requires one: it is also the VM's hvsocket address.
         Assert.True(Guid.TryParse(resource.VmId, out _), $"VmId '{resource.VmId}' is not a GUID.");
 
-        // A local VM must never land in a publish manifest.
+        // A local VM must not land in a publish manifest.
         Assert.Contains(resource.Annotations, a => a is ManifestPublishingCallbackAnnotation);
         _ = vm;
     }
@@ -52,14 +52,14 @@ public class HcsVirtualMachineBuilderTests
             .WithEndpoint("ssh", targetPort: 22)
             .WithEndpoint("api", targetPort: 8080);
 
-        // The literal string on purpose: it is the wire value hcsctl resolves by name, and the
-        // same one containers default to — co-location is the point (#58, #60).
+        // The literal string is the wire value hcsctl resolves by name, and the same one
+        // containers default to so that both kinds are co-located.
         Assert.Equal("Default Switch", vm.Resource.NetworkName);
         Assert.Equal("ssh", vm.Resource.PrimaryEndpointName);
 
         // The MAC and the endpoint id are hcsctl's to choose, and are unknown until the VM has
-        // been created. The MAC in particular has to survive a stop/start for the DHCP lease to
-        // hold, so hcsctl's store is what remembers it rather than this process.
+        // been created. The MAC must survive a stop/start for the DHCP lease to hold, so hcsctl's
+        // store remembers it, not this process.
         Assert.Null(vm.Resource.MacAddress);
         Assert.Null(vm.Resource.EndpointId);
 

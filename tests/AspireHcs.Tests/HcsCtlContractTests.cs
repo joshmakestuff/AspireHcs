@@ -8,8 +8,8 @@ namespace AspireHcs.Tests;
 // what they say, stdout carries exactly one document on every path, and exit 64 attempted
 // nothing. They are the AspireHcs-side mirror of hcsctl's own contract_test.go.
 //
-// Nothing here reaches HCS, a registry, or elevation — every case is an argument rejection or a
-// store-file failure. A green run means "the seam honours the contract", never "containers work".
+// Nothing here reaches HCS, a registry, or elevation: every case is an argument rejection or a
+// store-file failure. A green run means "the seam honours the contract", not "containers work".
 [Collection(HcsCtlEnvironmentCollection.Name)]
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlContractTests
@@ -31,8 +31,7 @@ public class HcsCtlContractTests
         HcsCtlInfoDocument info = await hcsctl.GetInfoAsync();
 
         Assert.True(info.Ok);
-        // Binding, not merely parsing: a renamed wire field would leave these at their defaults
-        // and this would fail, which is the point of pinning the names explicitly.
+        // Binding, not only parsing: a renamed wire field leaves these at their defaults.
         Assert.False(string.IsNullOrWhiteSpace(info.HostOsVersion));
         Assert.True(info.HostBuild > 0);
         Assert.NotEmpty(info.Services);
@@ -54,8 +53,7 @@ public class HcsCtlContractTests
     }
 
     // Exit 64 is a defect in the argv this assembly built, and it promises nothing was attempted.
-    // Reporting it as an infrastructure failure would send a developer looking at their Hyper-V
-    // configuration for a missing option.
+    // It is not an infrastructure failure.
     [SkippableFact]
     public async Task A_rejected_command_line_raises_a_usage_exception()
     {
@@ -82,15 +80,14 @@ public class HcsCtlContractTests
         Assert.False(Directory.Exists(store));
     }
 
-    // Exit 1 and exit 64 must stay distinguishable. This is the CLI-layer equivalent of the
-    // S_FALSE trap recorded in #48: a value that looks like failure but is not, or vice versa.
+    // Exit 1 and exit 64 must stay distinguishable.
     [SkippableFact]
     public async Task A_command_that_ran_and_failed_raises_a_command_exception_not_a_usage_one()
     {
         HcsCtl hcsctl = Require();
 
-        // A record file holding invalid JSON makes `image rm` fail *after* argument validation
-        // passed — the same fixture hcsctl uses to exercise exit 1 without HCS.
+        // A record file holding invalid JSON makes `image rm` fail after argument validation
+        // passed; the same fixture hcsctl uses to exercise exit 1 without HCS.
         string store = EmptyStorePath();
         Directory.CreateDirectory(Path.Combine(store, "images"));
         await File.WriteAllTextAsync(Path.Combine(store, "images", "x.json"), "not json");
@@ -104,8 +101,7 @@ public class HcsCtlContractTests
     }
 
     // The streams are decoded as UTF-8 explicitly. Without that they are decoded with the
-    // console code page, and a non-ASCII value comes back mangled — which is how an environment
-    // variable or a path would silently corrupt on its way to the guest.
+    // console code page, and a non-ASCII value comes back mangled.
     [SkippableFact]
     public async Task Non_ascii_survives_the_process_boundary()
     {
@@ -120,8 +116,8 @@ public class HcsCtlContractTests
     }
 
     // hcsctl prints ~100 lines of usage to stderr on a rejection. Diagnostics are a bounded tail
-    // for a bug report, never a result — an unbounded capture would also mean buffering a
-    // long-running container's entire guest output for no reason.
+    // for a bug report, not a result; an unbounded capture would buffer a long-running
+    // container's entire guest output.
     [SkippableFact]
     public async Task Stderr_is_captured_as_bounded_diagnostics_and_reported_as_progress()
     {
@@ -141,8 +137,7 @@ public class HcsCtlContractTests
         Assert.NotNull(thrown.Diagnostics);
         Assert.InRange(thrown.Diagnostics.Split(Environment.NewLine).Length, 1, 50);
 
-        // Progress is delivered asynchronously by Progress<T>, so the count is not asserted here;
-        // that it carries hcsctl's usage output at all is what matters.
+        // Progress is delivered asynchronously by Progress<T>, so the count is not asserted.
         Assert.True(thrown.Diagnostics.Length > 0);
     }
 
@@ -155,8 +150,7 @@ public class HcsCtlContractTests
             () => hcsctl.InvokeAsync(["image", "pull"], HcsCtlJsonContext.Default.HcsCtlFailureDocument));
 
         Assert.Contains("image pull", thrown.CommandLine);
-        // --json is added by the seam, not by callers. If that ever stops being true, every
-        // invocation starts parsing human-mode output.
+        // --json is added by the seam, not by callers.
         Assert.Contains("--json", thrown.CommandLine);
     }
 }

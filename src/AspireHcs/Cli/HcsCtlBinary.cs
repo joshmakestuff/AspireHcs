@@ -3,10 +3,8 @@ using System.Diagnostics.CodeAnalysis;
 namespace AspireHcs.Cli;
 
 /// <summary>
-/// Finds <c>hcsctl.exe</c>. Distribution is unsettled — the tool is not packaged with AspireHcs
-/// and there is no version handshake yet (hcsctl#29) — so resolution is explicit and its failure
-/// message names every place that was searched, rather than leaving a developer to guess which
-/// of three mechanisms was supposed to apply.
+/// Finds <c>hcsctl.exe</c>. The tool is not packaged with AspireHcs; resolution is explicit and
+/// a failure message names every place that was searched.
 /// </summary>
 internal static class HcsCtlBinary
 {
@@ -31,9 +29,8 @@ internal static class HcsCtlBinary
     }
 
     /// <summary>
-    /// Resolves the binary without throwing. <paramref name="failure"/> is a complete message on
-    /// a miss — it names the three mechanisms in order, so the reader can tell "I set the wrong
-    /// variable" apart from "it is not installed".
+    /// Resolves the binary without throwing. On a miss, <paramref name="failure"/> is a complete
+    /// message that names the three mechanisms in order.
     /// </summary>
     public static bool TryLocate(string? explicitPath, [NotNullWhen(true)] out string? path, [NotNullWhen(false)] out string? failure)
     {
@@ -120,8 +117,7 @@ internal static class HcsCtlBinary
             }
             catch (ArgumentException)
             {
-                // A PATH entry with invalid characters is one bad entry, not a reason to stop
-                // searching the rest.
+                // A PATH entry with invalid characters is skipped.
                 continue;
             }
 

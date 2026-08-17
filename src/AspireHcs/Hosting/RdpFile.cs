@@ -8,13 +8,11 @@ namespace AspireHcs.Hosting;
 /// <summary>
 /// Builds the <c>.rdp</c> connection file mstsc consumes. The format is line-based
 /// (<c>name:type:value</c>), which makes it a syntax boundary: a value carrying a newline
-/// would not be escaped, it would become another setting. Every value therefore goes through
-/// <see cref="Field"/> rather than being concatenated at the call site.
+/// would not be escaped, it would become another setting. Every value goes through
+/// <see cref="Field"/>.
 /// </summary>
 /// <remarks>
-/// mstsc has no command-line switch for the user name, which is the only reason this file
-/// exists — <c>/v:host:port</c> covers everything else. Because the file is the sole route,
-/// there is one code path here rather than a switch between "with user" and "without".
+/// mstsc has no command-line switch for the user name; the file is the only route for it.
 /// </remarks>
 internal static class RdpFile
 {
@@ -40,9 +38,8 @@ internal static class RdpFile
     }
 
     /// <summary>
-    /// Renders one <c>name:type:value</c> line, rejecting values that would break out of it.
-    /// Throws rather than sanitizing: a user name that cannot be represented is a mistake in
-    /// the AppHost, and silently connecting as somebody else is worse than not connecting.
+    /// Renders one <c>name:type:value</c> line. Throws when the value cannot be represented in
+    /// it; values are not sanitized.
     /// </summary>
     internal static string Field(string name, char type, string value)
     {
@@ -51,9 +48,7 @@ internal static class RdpFile
     }
 
     /// <summary>
-    /// The representability rule, separated from rendering so the AppHost can be rejected at
-    /// model-build time by the same check that guards the write — one rule, not two that have
-    /// to be kept in agreement.
+    /// The representability rule. Also applied at model-build time.
     /// </summary>
     internal static void ValidateValue(string name, string value)
     {

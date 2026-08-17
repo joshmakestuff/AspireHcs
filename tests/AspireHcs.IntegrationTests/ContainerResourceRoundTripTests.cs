@@ -10,12 +10,11 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #39 acceptance: a Hyper-V-isolated Windows container runs as an Aspire resource,
-// UNELEVATED, from an hcsctl store, and teardown leaves nothing behind.
+// A Hyper-V-isolated Windows container runs as an Aspire resource, unelevated, from an hcsctl
+// store, and teardown leaves nothing behind.
 //
-// Teardown is asserted by ABSENCE, never by a return code (#48): DestroyLayer can report success
-// and leave the tree, so "rm returned 0" is not evidence. These shell out to hcsctl to check,
-// deliberately using a different path than the product code does.
+// Teardown is asserted by absence, not by a return code: DestroyLayer can report success and
+// leave the tree. These shell out to hcsctl to check, on a path independent of the product code.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
 {
@@ -26,8 +25,8 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
-        // Long-running on purpose: the resource must stay Running rather than reaching Finished
-        // the instant a one-shot command exits.
+        // Long-running: the resource must stay Running, not reach Finished when a one-shot
+        // command exits.
         IDistributedApplicationTestingBuilder appHost = await ContainerFixture.SampleAppHostAsync("cmd /c ping -t 127.0.0.1", cts.Token);
 
         string containerId;
@@ -39,25 +38,24 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
             await app.StartAsync(cts.Token);
             await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
 
-            // It really is running, according to something other than our own state machine.
+            // Running according to hcsctl, not only the product's state machine.
             Assert.Contains(containerId, await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token));
 
             await app.StopAsync(cts.Token);
         }
 
-        // ABSENCE, not a return code. A container still listed here — in any state, including
-        // "created" — means its scratch layer probably survived too.
+        // Absence, not a return code. A container still listed here in any state, including
+        // "created", means its scratch layer probably survived too.
         string[] remaining = await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token);
         output.WriteLine($"after teardown: {(remaining.Length == 0 ? "(none)" : string.Join(", ", remaining))}");
         Assert.DoesNotContain(containerId, remaining);
     }
 
-    // #39 by name: "cmd /c ver from inside reports the image's own build". Asserted from the
-    // resource's own logs, so it also proves the guest's output reaches the dashboard at all.
+    // cmd /c ver from inside reports the image's own build. Asserted from the resource's own
+    // logs, so it also proves the guest's output reaches the dashboard.
     //
-    // The build asserted here is the IMAGE's, and this host is build 26200 — a guest reporting
-    // 26100 could not be the host answering. That mismatch is what makes the isolation real
-    // rather than nominal.
+    // The build asserted is the image's, which differs from the host's; a guest reporting the
+    // host build would mean the command ran outside the image.
     [SkippableFact]
     public async Task The_guest_reports_the_images_own_build_in_the_resource_logs()
     {
@@ -79,7 +77,7 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
             Task<string> version = FirstLogMatchingAsync(app, "worker", "Microsoft Windows [Version", cts.Token);
 
             // A one-shot workload: the resource reaches a terminal state on its own, driven by
-            // the guest process's exit — not by anything the test does.
+            // the guest process's exit.
             await app.ResourceNotifications.WaitForResourceAsync(
                 "worker", [KnownResourceStates.Finished, KnownResourceStates.Exited], cts.Token);
 
@@ -90,8 +88,7 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
         output.WriteLine($"guest reported: {versionLine.Trim()}");
         Assert.Contains("Microsoft Windows [Version", versionLine);
 
-        // Whatever the guest reported, it must not be this host's own build — that would mean
-        // the command ran somewhere other than inside the image.
+        // The guest must not report this host's own build.
         Assert.DoesNotContain(Environment.OSVersion.Version.Build.ToString(), versionLine);
 
         Assert.DoesNotContain(containerId, await ContainerFixture.ListContainerIdsAsync(hcsctl, store, cts.Token));
@@ -99,8 +96,7 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
 
     /// <summary>
     /// Reads the resource's dashboard log stream until a line contains <paramref name="needle"/>.
-    /// This is the same stream a developer sees, so asserting on it checks the plumbing, not just
-    /// the guest.
+    /// This is the same stream a developer sees.
     /// </summary>
     private static async Task<string> FirstLogMatchingAsync(
         DistributedApplication app, string resourceName, string needle, CancellationToken cancellationToken)
@@ -122,7 +118,7 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
     }
 
     // A crashed AppHost leaves its container behind; the next run must reclaim it. Simulated with
-    // an id carrying a pid that is not running, which is exactly what the scavenger keys on.
+    // an id carrying a pid that is not running, which is what the scavenger keys on.
     [SkippableFact]
     public async Task A_container_left_by_a_dead_run_is_scavenged_by_the_next_one()
     {
@@ -153,8 +149,8 @@ public sealed class ContainerResourceRoundTripTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// A pid that is not running. Chosen by probing rather than hard-coded: any constant could be
-    /// a live process on some host, and that would make the test pass by not scavenging.
+    /// A pid that is not running. Found by probing: any constant could be a live process on
+    /// some host.
     /// </summary>
     private static int DeadProcessId()
     {

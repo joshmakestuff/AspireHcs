@@ -7,9 +7,8 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #3 acceptance: the sample AppHost boots a real VM as an Aspire resource, the
-// resource reaches Running, and ResourceReadyEvent fires once the guest OS is up
-// (which is what makes WaitFor(vm) release dependents).
+// The sample AppHost boots a real VM as an Aspire resource, the resource reaches Running,
+// and ResourceReadyEvent fires once the guest OS is up (this releases WaitFor(vm) dependents).
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class AspireResourceRoundTripTests(ITestOutputHelper output)
 {
@@ -42,18 +41,16 @@ public sealed class AspireResourceRoundTripTests(ITestOutputHelper output)
 
         await ready.Task.WaitAsync(cts.Token);
 
-        // Issue #4 acceptance: the endpoint and connection string resolve to the guest's
-        // DHCP-leased address, and the guest is reachable there from the host. A refused
-        // TCP SYN proves reachability (the guest's stack answered); only timeouts fail.
+        // The endpoint and connection string resolve to the guest's DHCP-leased address, and
+        // the guest is reachable there from the host. A refused TCP SYN proves reachability
+        // (the guest's stack answered); only timeouts fail.
         Uri endpoint = app.GetEndpoint("appliance", "ssh");
         string? connectionString = await app.GetConnectionStringAsync("appliance", cancellationToken: cts.Token);
         Assert.Equal($"{endpoint.Host}:{endpoint.Port}", connectionString);
         Assert.Equal(22, endpoint.Port);
 
-        // Which of the two acceptable outcomes occurred is reported, not just swallowed: a
-        // connection means the image runs a listener, a refusal means it does not. The probe
-        // experiment sees neither at this address, so the distinction is what tells the two
-        // code paths apart.
+        // Reports which outcome occurred: connected means the image runs a listener,
+        // refused means it does not.
         using System.Net.Sockets.TcpClient client = new();
         try
         {

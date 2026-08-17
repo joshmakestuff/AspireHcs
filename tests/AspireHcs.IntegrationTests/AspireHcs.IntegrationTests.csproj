@@ -19,10 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!--
-      Shared with the unit test project rather than duplicated: both need to resolve the same
-      hcsctl, and two copies of that rule would drift into testing two different binaries.
-    -->
+    <!-- Shared with the unit test project: both must resolve the same hcsctl. -->
     <Compile Include="..\AspireHcs.Tests\RepositoryTools.cs" Link="RepositoryTools.cs" />
   </ItemGroup>
 

@@ -8,9 +8,8 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// #52 acceptance. The bar that matters here is the pause one: "a paused container's workload
-// demonstrably stops making progress". A pause that merely reported success while the workload
-// carried on would satisfy a weaker test and be worthless.
+// Dashboard commands and statistics. The pause test requires that a paused container's
+// workload stops making progress, not only that the command reports success.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ContainerDashboardTests(ITestOutputHelper output)
 {
@@ -59,15 +58,15 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
         Assert.Contains(properties, p => p.Name == "hcs.memory.commit");
         Assert.Contains(properties, p => p.Name == "hcs.cpu.total");
 
-        // Formatted, not raw. A dashboard row reading "1088274432" is data, not information.
+        // Formatted with a unit, not a raw byte count.
         string commit = (string)properties.Single(p => p.Name == "hcs.memory.commit").Value!;
         Assert.Matches(@"^[\d.]+ (B|KB|MB|GB|TB)$", commit);
 
         await app.StopAsync(cts.Token);
     }
 
-    // The acceptance criterion with teeth: pause must actually stop the workload, not just report
-    // that it did. Measured by watching CPU time, which a running `ping -t` accrues continuously.
+    // Pause must stop the workload. Measured by watching CPU time, which a running `ping -t`
+    // accrues continuously.
     [SkippableFact]
     public async Task A_paused_container_stops_making_progress_and_resumes()
     {
@@ -100,7 +99,7 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
             Assert.True(resumed.Success, resumed.Message);
             await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
 
-            // And it is genuinely running again, by the same measure that proved it was not.
+            // Running again, by the same measure.
             await Task.Delay(TimeSpan.FromSeconds(4), cts.Token);
             long afterResume = await CpuTicksAsync(hcsctl, store, app, cts.Token);
             output.WriteLine($"cpu ticks after resume: {afterResume}");
@@ -129,8 +128,8 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
         output.WriteLine(result.Message);
         Assert.True(result.Success, result.Message);
 
-        // A real guest runs a good few processes; "0 process(es)" would mean the call succeeded
-        // and reported nothing, which is the failure this asserts against.
+        // A real guest runs several processes; "0 process(es)" means the call succeeded and
+        // reported nothing.
         Assert.Matches(@"^\d+ process\(es\) written", result.Message!);
         Assert.DoesNotContain("0 process(es)", result.Message);
 
@@ -138,8 +137,8 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// Total guest CPU time, read through hcsctl directly rather than through the snapshot — the
-    /// poller only refreshes every few seconds, and this needs a reading on demand.
+    /// Total guest CPU time, read through hcsctl directly. The snapshot poller only refreshes
+    /// every few seconds; this needs a reading on demand.
     /// </summary>
     private static async Task<long> CpuTicksAsync(
         string hcsctl, string store, DistributedApplication app, CancellationToken cancellationToken)

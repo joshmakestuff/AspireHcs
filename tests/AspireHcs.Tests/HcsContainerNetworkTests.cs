@@ -5,11 +5,10 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// #41's measurement (2026-08-07, on `nat`): a static HNS endpoint programs a container's stack
-// directly, so the address is known when the container is CREATED — and it is reachable from the
-// host without port publishing. That inversion holds on NAT networks only. An ICS network — the
-// Default Switch, the default since #60 — leases the address after the guest starts, so the
-// instance waits for it there; ContainerAddressLeaseTests pins that wait (#63).
+// On a NAT network a static HNS endpoint programs a container's stack directly, so the address
+// is known when the container is created and is reachable from the host without port
+// publishing. An ICS network (the Default Switch, the default) leases the address after the
+// guest starts, so the instance waits for it there; ContainerAddressLeaseTests pins that wait.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsContainerNetworkTests
 {
@@ -21,8 +20,8 @@ public class HcsContainerNetworkTests
         Assert.Null(builder.AddHcsContainer("worker").Resource.NetworkName);
     }
 
-    // The literal string is asserted on purpose: it is the wire value hcsctl resolves by name,
-    // and it must be the SAME one the VM side defaults to — co-location is the point (#58, #60).
+    // The literal string is the wire value hcsctl resolves by name, and it must be the same one
+    // the VM side defaults to so that both kinds are co-located.
     [Fact]
     public void WithNetwork_defaults_to_the_Default_Switch_shared_with_VMs()
     {
@@ -32,9 +31,9 @@ public class HcsContainerNetworkTests
         Assert.Equal(HcsNetwork.DefaultSwitchName, builder.AddHcsVm("vm").WithNetwork().Resource.NetworkName);
     }
 
-    // hcsctl cannot create a network (hcsctl#15), so this names an existing one — which means a
-    // non-default network has to be nameable. `nat` in particular stays expressible: a container
-    // placed there deliberately cannot see the Default Switch residents (#58).
+    // hcsctl cannot create a network (https://github.com/joshmakestuff/hcsctl/issues/15), so
+    // this names an existing one. `nat` stays expressible: a container placed there cannot see
+    // the Default Switch residents.
     [Fact]
     public void A_named_network_is_honoured()
     {
@@ -55,10 +54,9 @@ public class HcsContainerNetworkTests
         Assert.Equal("http", container.Resource.PrimaryEndpointName);
     }
 
-    // The health check resolves the endpoint per check rather than capturing it, because
-    // EndpointReference.IsAllocated memoizes its first answer including false — a reference built
-    // at model-build time would latch unallocated forever. This pins that it is registered
-    // against a name that exists.
+    // The health check resolves the endpoint per check: EndpointReference.IsAllocated memoizes
+    // its first answer including false, so a reference built at model-build time would latch
+    // unallocated forever. This pins that it is registered against a name that exists.
     [Fact]
     public void WithTcpHealthCheck_defaults_to_the_first_endpoint()
     {
@@ -82,8 +80,8 @@ public class HcsContainerNetworkTests
         Assert.Contains("WithEndpoint", thrown.Message);
     }
 
-    // A typo in an endpoint name must fail the model build, not produce a health report nobody
-    // reads that is unhealthy forever for the wrong reason.
+    // A typo in an endpoint name must fail the model build, not produce a health report that is
+    // unhealthy forever for the wrong reason.
     [Fact]
     public void WithTcpHealthCheck_rejects_an_endpoint_name_that_does_not_exist()
     {

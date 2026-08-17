@@ -10,12 +10,10 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #11: the Windows Server 2025 image built by hcsimgtool is the suite's
-// POSITIVE fixture — a guest that actually serves something. Until it existed, "healthy" was
-// only ever proven against an in-process TcpListener; the Kali image can only prove the
-// negative half (refusal withholds readiness). These tests are the other half, live:
-// the health check goes Healthy against a real guest listener, readiness fires because of it,
-// and the EMS serial console streams through the product pump.
+// The Windows Server 2025 image is the suite's positive fixture: a guest that serves something.
+// The Linux image can only prove the negative half (refusal withholds readiness). These tests
+// prove the other half live: the health check goes Healthy against a real guest listener,
+// readiness fires because of it, and the EMS serial console streams through the product pump.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
 {
@@ -24,13 +22,13 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
     {
         string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_TEST_WINDOWS_VHDX");
         Skip.If(string.IsNullOrEmpty(windowsVhdx),
-            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (built by hcsimgtool) to run the positive-fixture tests.");
+            "Set HCS_TEST_WINDOWS_VHDX to the sealed Windows guest image (built by hcs-images) to run the positive-fixture tests.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
         // The sample AppHost reads HCS_TEST_VHDX; point it at the Windows image for this test
         // only. The suite is serialized (AssemblyInfo), so the override cannot interleave with
-        // another test's read; restored in finally either way.
+        // another test's read. Restored in finally.
         string? originalVhdx = Environment.GetEnvironmentVariable("HCS_TEST_VHDX");
         Environment.SetEnvironmentVariable("HCS_TEST_VHDX", windowsVhdx);
         try
@@ -54,7 +52,7 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
             await using DistributedApplication app = await appHost.BuildAsync(cts.Token);
 
             // Collect resource logs from the start so the serial-console assertion below sees
-            // the whole boot, not just what happens to arrive after Running.
+            // the whole boot.
             List<string> logLines = [];
             ResourceLoggerService loggerService = app.Services.GetRequiredService<ResourceLoggerService>();
             Task logWatch = Task.Run(async () =>
@@ -72,15 +70,11 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
 
             await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
 
-            // What this pins: the check goes Healthy against a real guest listener AND ready
-            // fires. It does NOT observe the release-BY-health ordering directly: the snapshot
-            // and eventing streams are separate async channels, and reading the snapshot at the
-            // instant ready fired was tried and observed racing (report entry present, status
-            // not yet recorded). The regression that matters — ready firing at Running before
-            // any health evaluation, the pre-#5 bug — is caught deterministically by
-            // HealthCheckGatesReadinessTests (such a fire completes before its first Unhealthy
-            // observation). A hypothetical delayed release while unhealthy is covered nowhere,
-            // deliberately: no such code path exists to regress.
+            // Pins that the check goes Healthy against a real guest listener and that ready
+            // fires. It does not observe the release-by-health ordering directly: the snapshot
+            // and eventing streams are separate async channels, and the snapshot at the instant
+            // ready fires can hold the report entry with no status yet. Ready firing at Running
+            // before any health evaluation is caught by HealthCheckGatesReadinessTests.
             ResourceEvent healthy = await app.ResourceNotifications.WaitForResourceAsync(
                 "appliance",
                 e => e.Snapshot.HealthReports.Any(h => h.Name == "appliance_ssh_tcp_check" && h.Status == HealthStatus.Healthy),
@@ -90,15 +84,14 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
 
             await ready.Task.WaitAsync(cts.Token);
 
-            // Hard accept — the refused branch the round-trip test tolerates is a FAILURE here.
+            // Hard accept: the refused branch the round-trip test tolerates is a failure here.
             Uri endpoint = app.GetEndpoint("appliance", "ssh");
             using TcpClient client = new();
             await client.ConnectAsync(endpoint.Host, endpoint.Port).WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
             output.WriteLine($"TCP {endpoint.Host}:{endpoint.Port} -> connected");
 
-            // EMS claim, witnessed through the product pump: the SAC banner lands in the
-            // resource logs ("Computer is booting, SAC started and initialized." on the spike's
-            // raw capture of this image).
+            // EMS through the product pump: the SAC banner ("Computer is booting, SAC started
+            // and initialized.") lands in the resource logs.
             bool sawSerial;
             lock (logLines)
             {

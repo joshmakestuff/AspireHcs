@@ -9,16 +9,13 @@ namespace AspireHcs.Hosting;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>An empty value never reaches the guest.</b> HCS and Win32 treat <c>FOO=</c> as a deletion,
-/// so the variable is silently <em>absent</em> inside the container rather than present-and-empty
-/// — measured in hcsctl, which rejects it outright. This class rejects it too, before anything is
-/// attempted, because the failure mode is the worst kind: an app inside the guest reading an unset
-/// variable that the AppHost model swears it set.
+/// <b>An empty value never reaches the guest.</b> HCS and Win32 treat <c>FOO=</c> as a deletion:
+/// the variable is <em>absent</em> inside the container, not present-and-empty. hcsctl rejects an
+/// empty value; this class rejects it before hcsctl is invoked.
 /// </para>
 /// <para>
-/// Aspire's own conventions make empty values likely rather than exotic — an unresolved parameter
-/// or a not-yet-allocated endpoint reference can produce one — which is exactly why this fails
-/// loudly instead of dropping.
+/// Empty values are common in Aspire: an unresolved parameter or a not-yet-allocated endpoint
+/// reference can produce one.
 /// </para>
 /// </remarks>
 internal static class ContainerEnvironment
@@ -70,8 +67,7 @@ internal static class ContainerEnvironment
     /// <summary>
     /// Aspire's callbacks put strings, parameters, endpoint references and expressions into the
     /// same dictionary. Everything that can resolve itself is asked to; anything else is
-    /// formatted, and a value that formats to nothing is caught by the empty check above rather
-    /// than passed through as the string "".
+    /// formatted. The caller rejects an empty result.
     /// </summary>
     private static async Task<string?> ResolveValueAsync(object? value, CancellationToken cancellationToken)
         => value switch

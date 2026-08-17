@@ -9,11 +9,10 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// #41 acceptance. The claim this issue was opened to confirm-or-refute — that a static HNS
-// endpoint programs a container's stack, with no DHCP-lease discovery — is CONFIRMED, and these
-// pin it end to end through the Aspire resource rather than through hcsctl alone.
+// A static HNS endpoint programs a container's stack, with no DHCP-lease discovery. These pin
+// that end to end through the Aspire resource.
 //
-// Needs an image with PowerShell, so servercore rather than nanoserver.
+// Needs an image with PowerShell, so servercore, not nanoserver.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class ContainerNetworkingTests(ITestOutputHelper output)
 {
@@ -36,15 +35,13 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
 
     /// <summary>
     /// Writes a PowerShell TCP listener to a host directory, to be bind-mounted into the guest.
-    /// A script on a mount rather than an inline <c>--cmd</c> because the quoting would otherwise
-    /// cross PowerShell, argv and cmd.exe — three chances to mangle it, none of them the subject
-    /// of this test.
+    /// A script on a mount keeps the quoting out of PowerShell, argv and cmd.exe.
     /// </summary>
     private static string WriteListenerScript()
     {
         string directory = Directory.CreateTempSubdirectory("aspirehcs-net").FullName;
-        // $$ so that a single brace is literal and {{...}} interpolates — the script is full of
-        // PowerShell blocks, and $"""...""" would read the first { as an interpolation hole.
+        // $$: a single brace is literal and {{...}} interpolates; the script is full of
+        // PowerShell blocks.
         File.WriteAllText(Path.Combine(directory, "listener.ps1"), $$"""
             $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, {{GuestPort}})
             $l.Start()
@@ -64,8 +61,7 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
         return directory;
     }
 
-    // The whole of #41's first task, through the Aspire surface: the endpoint resolves to an
-    // address, and something on the host can actually talk to it.
+    // Through the Aspire surface: the endpoint resolves to an address, and the host can talk to it.
     [SkippableFact]
     public async Task An_endpoint_resolves_to_an_address_the_host_can_reach()
     {
@@ -90,14 +86,14 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
             await app.StartAsync(cts.Token);
             await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
 
-            // The endpoint resolved — through Aspire's own model, not by reading hcsctl's output.
+            // The endpoint resolved through Aspire's own model.
             Uri endpoint = app.GetEndpoint("worker", "probe");
             output.WriteLine($"endpoint: {endpoint.Host}:{endpoint.Port}");
             Assert.Equal(GuestPort, endpoint.Port);
             Assert.False(string.IsNullOrWhiteSpace(endpoint.Host));
 
-            // No CIDR prefix survived into the host string — "172.17.163.120/20" parses as a Uri
-            // host and then fails to connect, which is a maddening way to find this bug.
+            // No CIDR prefix survived into the host string: "172.17.163.120/20" parses as a Uri
+            // host and then fails to connect.
             Assert.DoesNotContain('/', endpoint.Host);
 
             // And the connection string agrees with it.
@@ -115,9 +111,7 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
         Directory.Delete(scripts, recursive: true);
     }
 
-    // Readiness. For a container this is the only gate there is — start already implies the guest
-    // is up — so WaitFor releasing against a container that is not serving would be invisible
-    // without this.
+    // Readiness. For a container this is the only gate: start already implies the guest is up.
     [SkippableFact]
     public async Task WaitFor_releases_only_once_the_container_is_serving()
     {
@@ -142,8 +136,7 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
         {
             await app.StartAsync(cts.Token);
 
-            // Healthy is what WaitFor waits on, and it is only reached once the TCP check
-            // connects — i.e. once the guest is genuinely serving, not merely running.
+            // WaitFor waits on Healthy, which is reached only once the TCP check connects.
             await app.ResourceNotifications.WaitForResourceHealthyAsync("worker", cts.Token);
 
             Uri endpoint = app.GetEndpoint("worker", "probe");
@@ -156,8 +149,8 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
         Directory.Delete(scripts, recursive: true);
     }
 
-    // Endpoints without a network can never resolve. Caught before anything is created, so the
-    // failure does not leave a compute system behind to clean up.
+    // Endpoints without a network can never resolve. Caught before anything is created, so no
+    // compute system is left behind.
     [SkippableFact]
     public async Task An_endpoint_without_a_network_fails_before_anything_is_created()
     {
@@ -184,7 +177,7 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
     private static async Task<string> ReadBannerAsync(string host, int port, CancellationToken cancellationToken)
     {
         // The listener polls every 200 ms, and a container that just reported Running may be a
-        // beat ahead of its own guest process. Retry briefly rather than racing it.
+        // beat ahead of its own guest process. Retry briefly.
         SocketException? last = null;
         for (int attempt = 0; attempt < 25; attempt++)
         {

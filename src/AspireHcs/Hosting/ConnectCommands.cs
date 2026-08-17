@@ -7,11 +7,9 @@ using Microsoft.Extensions.DependencyInjection;
 namespace AspireHcs.Hosting;
 
 /// <summary>
-/// Dashboard commands that open a session into the guest. These launch the client
-/// <em>host-side</em>, which works because in local development the AppHost runs on the same
-/// machine as the browser showing the dashboard — the same assumption the rest of Aspire's
-/// run mode makes. There is deliberately nothing guest-side here: the guest only has to serve
-/// SSH or RDP, which is the image's business, not the integration's.
+/// Dashboard commands that open a session into the guest. The client launches
+/// <em>host-side</em>: in local development the AppHost and the browser that shows the
+/// dashboard run on the same machine. The guest must serve SSH or RDP; the image provides that.
 /// </summary>
 internal static class ConnectCommands
 {
@@ -66,9 +64,7 @@ internal static class ConnectCommands
     }
 
     /// <summary>
-    /// The one path both commands take, so the preconditions cannot be remembered in one place
-    /// and forgotten in the other. Every failure is reported to the dashboard: a connect button
-    /// that appears to do nothing is the worst outcome available here.
+    /// Shared path for both commands. Every failure is reported to the dashboard.
     /// </summary>
     internal static ExecuteCommandResult Execute(
         HcsVirtualMachineResource resource,
@@ -79,16 +75,11 @@ internal static class ConnectCommands
         Func<AllocatedEndpoint, ProcessStartInfo> build,
         Action<ProcessStartInfo> launch)
     {
-        // UpdateState only governs what the dashboard *offers*; the command itself is reachable
-        // through Aspire's command APIs regardless, and an allocation outlives the VM that
-        // earned it (HcsVmOrchestrator assigns AllocatedEndpoint and never clears it). Without
-        // this, invoking the command on a stopped VM would launch a client at last run's
-        // address.
-        //
-        // The predicate is "Running", not "not terminal", so it agrees with Availability.
-        // Rejecting only terminal states left Starting and Stopping through, and Starting is
-        // exactly when a restart still carries the previous run's allocation — the stale-address
-        // case this guard exists for.
+        // UpdateState only governs what the dashboard offers; the command is reachable through
+        // Aspire's command APIs regardless, and an allocation outlives the VM that earned it
+        // (HcsVmOrchestrator assigns AllocatedEndpoint and never clears it). The predicate is
+        // "Running", not "not terminal", so it agrees with Availability: a VM in Starting still
+        // carries the previous run's allocation.
         if (!StateAllowsConnect(currentState))
         {
             return Failure(
@@ -96,10 +87,8 @@ internal static class ConnectCommands
                 "Wait for it to be running.");
         }
 
-        // Session 0 has no desktop to put the client on. Process.Start would still "succeed"
-        // there, leaving an invisible process and a dashboard reporting success — so this is
-        // checked rather than discovered. Passed in rather than read here so the branch is
-        // reachable from a test: a guard that can only ever see `true` is not a guard.
+        // Session 0 has no desktop to put the client on. Process.Start still succeeds there and
+        // leaves an invisible process. The flag is a parameter so a test can reach this branch.
         if (!userInteractive)
         {
             return Failure(
@@ -131,8 +120,8 @@ internal static class ConnectCommands
         }
         catch (Exception ex)
         {
-            // Overwhelmingly the client is simply not installed, which the raw Win32 message
-            // ("The system cannot find the file specified") does not make obvious.
+            // Usually the client is not installed; the raw Win32 message ("The system cannot
+            // find the file specified") does not make that obvious.
             return Failure(
                 $"Could not start '{startInfo.FileName}': {ex.Message} " +
                 "Check that the client is installed and on PATH.");
@@ -151,21 +140,18 @@ internal static class ConnectCommands
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <c>-l USER</c> rather than <c>USER@ADDRESS</c>: the user name then never meets a
-    /// delimiter it could itself contain, so there is no escaping decision to get wrong.
+    /// <c>-l USER</c> keeps the user name out of a delimited token; no escaping is needed.
     /// </para>
     /// <para>
-    /// Arguments go through <see cref="ProcessStartInfo.ArgumentList"/>, whose quoting was
-    /// verified to survive the ShellExecuteEx path intact — spaces, quotes, trailing
-    /// backslashes and <c>DOMAIN\User Name</c> all arrive at the child unchanged. Hand-rolling
-    /// an argv escaper here would be reimplementing something the framework already does.
+    /// Arguments go through <see cref="ProcessStartInfo.ArgumentList"/>. Its quoting survives
+    /// the ShellExecuteEx path: spaces, quotes, trailing backslashes and <c>DOMAIN\User Name</c>
+    /// arrive at the child unchanged.
     /// </para>
     /// </remarks>
     internal static ProcessStartInfo BuildSshStartInfo(string address, int port, string? userName)
     {
-        // UseShellExecute gives the client its own console rather than making it share the
-        // AppHost's, where it would compete for stdin and scribble over the log stream. On
-        // Windows 11 that console is whatever the user set as their default terminal.
+        // UseShellExecute gives the client its own console; it must not share the AppHost's
+        // (stdin, log stream). On Windows 11 that console is the user's default terminal.
         ProcessStartInfo startInfo = new("ssh.exe") { UseShellExecute = true };
 
         startInfo.ArgumentList.Add("-p");
@@ -182,9 +168,8 @@ internal static class ConnectCommands
     }
 
     /// <summary>
-    /// Writes the connection file and returns <c>mstsc.exe FILE</c>. mstsc is named explicitly
-    /// rather than shell-opening the <c>.rdp</c>, so the command does what it says regardless
-    /// of which application currently owns that file association.
+    /// Writes the connection file and returns <c>mstsc.exe FILE</c>. mstsc is named explicitly;
+    /// the <c>.rdp</c> file association is not used.
     /// </summary>
     internal static ProcessStartInfo BuildRdpStartInfo(
         HcsVirtualMachineResource resource, string endpointName, string address, int port, string? userName)
@@ -199,19 +184,17 @@ internal static class ConnectCommands
     }
 
     /// <summary>
-    /// Rewritten on every click, since the guest's address changes across restarts. It is left
-    /// behind afterwards: mstsc reads it asynchronously after launch, so deleting it here would
-    /// be a race, and it holds nothing secret — an address and a user name.
+    /// Rewritten on every click; the guest's address changes across restarts. The file is not
+    /// deleted afterwards: mstsc reads it asynchronously after launch. It holds only an address
+    /// and a user name.
     /// </summary>
     internal static string RdpFilePath(HcsVirtualMachineResource resource, string endpointName)
     {
         string directory = Path.Combine(Path.GetTempPath(), "AspireHcs", "connect");
         string path = Path.GetFullPath(Path.Combine(directory, $"{resource.VmId}-{endpointName}.rdp"));
 
-        // The endpoint name is interpolated into a file name, so it crosses into path syntax.
-        // Rather than reimplementing Aspire's own name rules (which it owns, and enforces
-        // through the [EndpointName] analyzer), this asserts the property that actually
-        // matters to this method: the file lands inside the directory it was meant to.
+        // The endpoint name becomes part of a file name. This asserts that the file lands
+        // inside the intended directory.
         string root = Path.GetFullPath(directory) + Path.DirectorySeparatorChar;
         if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
         {
@@ -223,11 +206,9 @@ internal static class ConnectCommands
     }
 
     /// <summary>
-    /// Whether the state permits connecting. <c>null</c> — state unknown — is permitted rather
-    /// than refused: the resource id <see cref="CurrentState"/> looks up by is not guaranteed to
-    /// equal the resource name, and a lookup miss must not turn into a feature that silently
-    /// stops working. <c>Availability</c> has a real snapshot in hand and so requires Running
-    /// outright; this is the only place the two differ, deliberately.
+    /// Whether the state permits connecting. <c>null</c> (state unknown) is permitted: the
+    /// resource id <see cref="CurrentState"/> looks up by is not guaranteed to equal the resource
+    /// name. <c>Availability</c> has a real snapshot and requires Running.
     /// </summary>
     private static bool StateAllowsConnect(string? currentState)
         => currentState is null || currentState == KnownResourceStates.Running;
@@ -235,14 +216,6 @@ internal static class ConnectCommands
     /// <summary>
     /// Best-effort current state for the guard above. Returns null when it cannot be determined.
     /// </summary>
-    /// <remarks>
-    /// Internal and taking the service provider directly, rather than reading it off
-    /// <see cref="ExecuteCommandContext"/> inside a lambda, so the live test can exercise the
-    /// part that has a real chance of being wrong: whether the notification service resolves
-    /// this resource by the name the command passes it. Injecting the state into
-    /// <c>Execute</c> alone would leave that lookup covered by nothing, and a lookup that always
-    /// missed would disable the guard without failing a single test.
-    /// </remarks>
     internal static string? CurrentState(IServiceProvider services, string resourceName)
     {
         try
@@ -255,8 +228,8 @@ internal static class ConnectCommands
         }
         catch (InvalidOperationException)
         {
-            // The service is not registered in this host (a bare model in a test, say). Not
-            // knowing the state is not a reason to refuse to connect.
+            // The service is not registered in this host (for example a bare model in a test).
+            // Unknown state permits connecting.
             return null;
         }
     }
@@ -268,9 +241,8 @@ internal static class ConnectCommands
     }
 
     /// <summary>
-    /// Offered only when there is something to connect to. Running alone is not enough — the
-    /// guest reaches Running before its DHCP lease surfaces, and a connect button that is live
-    /// during that window produces a failed connection rather than a wait.
+    /// Enabled only when the VM is Running and the endpoint has an address. The guest reaches
+    /// Running before its DHCP lease surfaces.
     /// </summary>
     private static ResourceCommandState Availability(
         HcsVirtualMachineResource resource, string endpointName, UpdateCommandStateContext context)

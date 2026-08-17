@@ -3,9 +3,7 @@ using System.Globalization;
 namespace AspireHcs.Cli;
 
 /// <summary>
-/// The container verbs, as methods. Keeping argv construction here rather than at each call site
-/// means option spellings are wrong in one place or none — and an option spelled wrong is exit
-/// 64, which is indistinguishable from a genuine argument bug in a resource's configuration.
+/// The container verbs, as methods. All argv construction for the group is here.
 /// </summary>
 internal static class HcsCtlContainers
 {
@@ -13,9 +11,8 @@ internal static class HcsCtlContainers
     /// Creates the compute system and its scratch. Does not start it.
     /// </summary>
     /// <remarks>
-    /// Mounts and scratch size belong here rather than on exec: they are properties of the
-    /// compute system's document, fixed when it is created. Environment is the other way round —
-    /// hcsctl's <c>create</c> takes no <c>--env</c> at all. See <see cref="ExecAsync"/>.
+    /// Mounts and scratch size are properties of the compute system's document, fixed when it is
+    /// created. hcsctl's <c>create</c> takes no <c>--env</c>; see <see cref="ExecAsync"/>.
     /// </remarks>
     public static Task<HcsCtlContainerCreateDocument> CreateAsync(
         this HcsCtl hcsctl,
@@ -42,18 +39,16 @@ internal static class HcsCtlContainers
 
         if (!string.IsNullOrEmpty(network))
         {
-            // The endpoint is created here, at create time. Whether the result document carries
-            // an address depends on the network: NAT assigns one at create, while an ICS network
-            // leases it only after the guest starts, so the document's list is empty there and
-            // the current address comes from `network endpoints` (#63, hcsctl#43).
+            // The endpoint is created here, at create time. NAT assigns an address at create;
+            // an ICS network leases one only after the guest starts, so the document's address
+            // list is empty there and the current address comes from `network endpoints`.
             arguments.Add("--network");
             arguments.Add(network);
         }
 
         if (scratchSizeGigabytes is { } gigabytes)
         {
-            // hcsctl requires a unit and rejects a bare number: a size is where guessing wrong
-            // costs tens of gigabytes.
+            // hcsctl requires a unit and rejects a bare number.
             arguments.Add("--scratch-size");
             arguments.Add($"{gigabytes.ToString(CultureInfo.InvariantCulture)}GB");
         }
@@ -81,10 +76,8 @@ internal static class HcsCtlContainers
     /// followed. Cancel the token to tear it down.
     /// </summary>
     /// <remarks>
-    /// Environment is set here, per guest process, because hcsctl's <c>container create</c> takes
-    /// no <c>--env</c>. Every exec against a container therefore needs the same environment
-    /// passed again — nothing on the compute system remembers it — which is why the caller keeps
-    /// the resolved set rather than resolving it per call.
+    /// Environment is set here, per guest process; hcsctl's <c>container create</c> takes no
+    /// <c>--env</c>. Every exec against a container needs the same environment passed again.
     /// </remarks>
     public static Task<HcsCtlExecDocument> ExecAsync(
         this HcsCtl hcsctl,
@@ -119,8 +112,8 @@ internal static class HcsCtlContainers
     }
 
     /// <summary>
-    /// Removes the compute system, its scratch and any endpoint. Releasable from a fresh process,
-    /// which is what makes crash scavenging possible at all.
+    /// Removes the compute system, its scratch and any endpoint. Works from a fresh process, which
+    /// crash scavenging depends on.
     /// </summary>
     public static Task<HcsCtlResultDocument> RemoveAsync(
         this HcsCtl hcsctl, string id, bool force = true, CancellationToken cancellationToken = default)

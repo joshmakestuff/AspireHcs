@@ -5,10 +5,8 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// #50 and #51. hcsctl rejects a relative path, a missing host directory, a repeated guest path
-// and a size without a unit — all with exit 64. Meeting those as resource-start failures would
-// be a slower, worse version of failing at model-build time, so the ones we can catch here are
-// caught here.
+// hcsctl rejects a relative path, a missing host directory, a repeated guest path and a size
+// without a unit, all with exit 64. The ones the model can catch are caught at model-build time.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsContainerMountTests
 {
@@ -32,9 +30,8 @@ public class HcsContainerMountTests
             m => Assert.Equal((@"C:\config", @"C:\etc", true), (m.Source, m.Target, m.IsReadOnly)));
     }
 
-    // hcsctl requires both paths drive-letter absolute and would reject a relative source with
-    // exit 64 — naming a path the developer never typed. Resolving here is what makes the
-    // AppHost-relative convention work, matching Aspire's Docker path.
+    // hcsctl requires both paths drive-letter absolute and rejects a relative source with exit
+    // 64. Resolving here gives the AppHost-relative convention, matching Aspire's Docker path.
     [Fact]
     public void A_relative_source_is_resolved_against_the_apphost_directory()
     {
@@ -47,8 +44,7 @@ public class HcsContainerMountTests
         Assert.Equal(Path.GetFullPath("data", builder.AppHostDirectory), mount.Source);
     }
 
-    // A relative guest path has nothing to resolve against, so it is a mistake rather than a
-    // convenience to support.
+    // A relative guest path has nothing to resolve against.
     [Fact]
     public void A_relative_target_is_rejected()
     {
@@ -72,8 +68,8 @@ public class HcsContainerMountTests
         Assert.Contains(@"C:\app", thrown.Message);
     }
 
-    // hcsctl compares guest paths case-insensitively with a trailing separator trimmed, so the
-    // duplicate check has to agree or it lets through what hcsctl then rejects.
+    // hcsctl compares guest paths case-insensitively with a trailing separator trimmed; the
+    // duplicate check must agree.
     [Theory]
     [InlineData(@"c:\app")]
     [InlineData(@"C:\APP")]

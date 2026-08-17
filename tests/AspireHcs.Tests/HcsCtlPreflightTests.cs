@@ -4,10 +4,8 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// The preflight's only job is to replace an unactionable failure with an actionable one, so what
-// is asserted here is that each blocker names the fix. A test that only checked "returns
-// non-null" would pass for a message that says "preflight failed", which is the thing this is
-// supposed to prevent.
+// The preflight replaces an unactionable failure with an actionable one; each blocker must name
+// the fix.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlPreflightTests
 {
@@ -37,12 +35,12 @@ public class HcsCtlPreflightTests
     [Fact]
     public void A_healthy_unelevated_host_has_no_blocker()
     {
-        // The whole posture in one assertion: elevation is not a prerequisite for running.
+        // Elevation is not a prerequisite for running.
         Assert.Null(HcsCtlPreflight.DescribeBlocker(Healthy()));
     }
 
     // The contract gate runs before every other rule: without a recognized contractVersion the
-    // document shape is unknowable, so no service or group check is safe to interpret. "1" is the
+    // document shape is unknown, so no service or group check is safe to interpret. "1" is the
     // only supported value and is covered by A_healthy_unelevated_host_has_no_blocker above.
     [Theory]
     [InlineData(null)]
@@ -72,8 +70,7 @@ public class HcsCtlPreflightTests
     [Fact]
     public void A_missing_service_report_is_a_blocker_rather_than_an_assumed_pass()
     {
-        // An absent key must not read as "running". Treating unknown as healthy is how a
-        // preflight becomes decorative.
+        // An absent key must not read as "running".
         string? blocker = HcsCtlPreflight.DescribeBlocker(Healthy(services: new Dictionary<string, string>
         {
             ["vmcompute"] = "running",
@@ -90,8 +87,7 @@ public class HcsCtlPreflightTests
 
         Assert.NotNull(blocker);
         Assert.Contains("Hyper-V Administrators", blocker);
-        // The membership only reaches the token at next logon; without this the developer adds
-        // the group, retries, and sees the same failure.
+        // The membership only reaches the token at next logon.
         Assert.Contains("sign out", blocker);
     }
 
@@ -116,8 +112,7 @@ public class HcsCtlPreflightTests
         Assert.Contains("hcsctl image pull", blocker);
         Assert.Contains("hcsctl image import", blocker);
         Assert.Contains("elevated", blocker);
-        // The distinction that matters: elevating once per image buys unprivileged runs
-        // afterwards. A message that just said "needs elevation" would imply otherwise.
+        // Elevating once per image buys unprivileged runs afterwards; the message must say so.
         Assert.Contains("running the container afterwards does not", blocker);
     }
 

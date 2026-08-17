@@ -8,17 +8,16 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// The connect commands launch a client on the host, so the part worth pinning is what would be
-// spawned and when the button is live. Process.Start itself is NOT covered here or anywhere:
-// seeing a client window appear needs a human, and the workspace's docs/old/AspireHcs/docs/connect-ux.md records it as unverified
-// rather than claiming otherwise.
+// The connect commands launch a client on the host; these pin what is spawned and when the
+// button is live. Process.Start itself is not covered: seeing a client window appear needs a
+// human.
 [SupportedOSPlatform("windows10.0.17763")]
 public class ConnectCommandTests
 {
     [Fact]
     public void Connect_commands_are_absent_unless_asked_for()
     {
-        // They launch processes on the developer's desktop; that is opt-in, not a default.
+        // They launch processes on the developer's desktop; opt-in only.
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22);
 
         string[] names = [.. vm.Resource.Annotations.OfType<ResourceCommandAnnotation>().Select(a => a.Name)];
@@ -73,15 +72,14 @@ public class ConnectCommandTests
     // Not up yet: nothing to connect to.
     [InlineData("NotStarted", false, ResourceCommandState.Disabled)]
     [InlineData("Starting", false, ResourceCommandState.Disabled)]
-    // No state published yet at all — the case LifecycleCommandTests covers for Start.
+    // No state published yet; the case LifecycleCommandTests covers for Start.
     [InlineData(null, false, ResourceCommandState.Disabled)]
     [InlineData(null, true, ResourceCommandState.Disabled)]
     // On the way down, the allocation is still present but the guest is going away.
     [InlineData("Stopping", true, ResourceCommandState.Disabled)]
-    // Running, but the DHCP lease has not surfaced yet — the window in which a connect attempt
-    // would fail rather than wait.
+    // Running, but the DHCP lease has not surfaced yet; a connect attempt fails in this window.
     [InlineData("Running", false, ResourceCommandState.Disabled)]
-    // Running with an address is the only state that can actually connect.
+    // Running with an address is the only state that can connect.
     [InlineData("Running", true, ResourceCommandState.Enabled)]
     // A stale allocation from the previous run must not re-enable the button after a stop.
     [InlineData("Exited", true, ResourceCommandState.Disabled)]
@@ -112,7 +110,7 @@ public class ConnectCommandTests
 
         Assert.Equal("ssh.exe", startInfo.FileName);
         Assert.True(startInfo.UseShellExecute);
-        // -l, never Administrator@192.168.1.20: the user name never meets a delimiter it could
+        // -l, not Administrator@192.168.1.20: the user name never meets a delimiter it could
         // itself contain.
         Assert.Equal(["-p", "2222", "-l", "Administrator", "192.168.1.20"], startInfo.ArgumentList);
     }
@@ -137,7 +135,7 @@ public class ConnectCommandTests
     [Fact]
     public void Rdp_file_omits_the_user_line_when_unset()
     {
-        // Absent, not empty: `username:s:` prefills a blank user rather than the last one used.
+        // Absent, not empty: `username:s:` prefills a blank user instead of the last one used.
         string content = RdpFile.Build("192.168.1.20", 3389, userName: null);
 
         Assert.DoesNotContain("username", content, StringComparison.Ordinal);
@@ -274,16 +272,15 @@ public class ConnectCommandTests
     [InlineData("Exited")]
     [InlineData("FailedToStart")]
     [InlineData("Finished")]
-    // Not terminal, but not connectable either — and Starting is precisely when a restart still
-    // carries the previous run's allocation, which is the stale-address case the guard exists
-    // for. A "reject only terminal states" predicate let both of these through.
+    // Not terminal, but not connectable either. During Starting a restart still carries the
+    // previous run's allocation: the stale-address case.
     [InlineData("Starting")]
     [InlineData("Stopping")]
     public void A_click_on_a_vm_that_is_not_running_is_refused_even_though_the_allocation_survives(string state)
     {
         // UpdateState only governs what the dashboard offers; the command is still reachable
-        // through Aspire's command APIs, and HcsVmOrchestrator never clears AllocatedEndpoint —
-        // so without this guard the client would be launched at the previous run's address.
+        // through Aspire's command APIs, and HcsVmOrchestrator never clears AllocatedEndpoint.
+        // Without this guard the client launches at the previous run's address.
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithSshCommand();
         Allocate(vm, "ssh", "192.168.1.20", 22);
         List<ProcessStartInfo> launched = [];
@@ -302,7 +299,7 @@ public class ConnectCommandTests
     public void An_unknown_state_is_allowed_through_rather_than_refused()
     {
         // The resource id the state is looked up by is not guaranteed to equal the resource
-        // name. A lookup miss must not turn into a feature that silently stops working.
+        // name. A lookup miss must not disable the command.
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithSshCommand();
         Allocate(vm, "ssh", "192.168.1.20", 22);
         List<ProcessStartInfo> launched = [];
@@ -321,9 +318,8 @@ public class ConnectCommandTests
     [InlineData("   ")]
     public void An_explicitly_empty_user_name_is_rejected_rather_than_treated_as_unset(string userName)
     {
-        // null means "unspecified" and is supported; empty means somebody meant to name an
-        // account and named none, and falling back to the host account would connect as
-        // somebody other than who was asked for.
+        // null means "unspecified"; empty means an account was meant and none named, and a
+        // fallback to the host account would connect as the wrong user.
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithEndpoint("rdp", 3389);
 
         Assert.Throws<ArgumentException>(() => vm.WithSshCommand(userName: userName));
@@ -337,9 +333,9 @@ public class ConnectCommandTests
     public void An_endpoint_name_that_would_escape_the_connect_directory_is_refused(string endpointName)
     {
         // The endpoint name is interpolated into a file name, so it crosses into path syntax.
-        // Three levels, not two: the name is SUFFIXED onto the VmId, so `aspirehcs-vm-x-..`
-        // is one ordinary segment (Windows strips the trailing dots) that the following `..`
-        // then pops — measured, and covered as the boundary case below.
+        // Three levels, not two: the name is suffixed onto the VmId, so `aspirehcs-vm-x-..` is
+        // one ordinary segment (Windows strips the trailing dots) that the following `..` pops.
+        // The boundary case is below.
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
 
         InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
@@ -351,10 +347,8 @@ public class ConnectCommandTests
     [Fact]
     public void Two_traversal_levels_are_absorbed_by_the_vm_id_prefix_and_stay_inside()
     {
-        // Recorded because it is surprising: `..\..\evil` lands on connect\evil.rdp, still
-        // inside. The guard asserts containment rather than banning `..`, so this passes — and
-        // pinning it here means a future change to the file-name shape cannot quietly move the
-        // boundary without a test noticing.
+        // `..\..\evil` lands on connect\evil.rdp, still inside. The guard asserts containment,
+        // not the absence of `..`, so this passes. Pins the file-name shape.
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
 
         string path = ConnectCommands.RdpFilePath(vm.Resource, @"..\..\evil");
@@ -367,8 +361,7 @@ public class ConnectCommandTests
     [Fact]
     public void A_normal_endpoint_name_stays_inside_the_connect_directory()
     {
-        // The negative above is only meaningful if the positive passes — otherwise the guard
-        // could be rejecting everything.
+        // The negative above is only meaningful if the positive passes.
         IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
 
         string path = ConnectCommands.RdpFilePath(vm.Resource, "rdp");

@@ -10,15 +10,13 @@ namespace AspireHcs.IntegrationTests;
 /// Asks hcsctl what the host actually holds, for residue assertions.
 /// </summary>
 /// <remarks>
-/// Deliberately its own process invocation rather than the product's <see cref="HcsCtl"/> seam.
-/// A leak assertion that runs through the same typed path the product uses can only find bugs
-/// that path does not have; going straight to the JSON keeps the check independent of the
-/// binding it is verifying.
+/// Its own process invocation, independent of the product's <see cref="HcsCtl"/> seam and the
+/// binding it verifies.
 /// </remarks>
 [SupportedOSPlatform("windows10.0.17763")]
 internal static class HcsCtlProbes
 {
-    /// <summary>Every HCN endpoint on the host, by id. Unfiltered, so nothing passes vacuously.</summary>
+    /// <summary>Every HCN endpoint on the host, by id. Unfiltered.</summary>
     public static IReadOnlyList<string> EndpointIds()
         => [.. Query(["network", "endpoints"])["endpoints"]?.AsArray()
             .Select(e => e?["id"]?.GetValue<string>())
@@ -40,9 +38,8 @@ internal static class HcsCtlProbes
             .Select(id => id!) ?? []];
 
     /// <summary>
-    /// Runs hcsctl out of band, the way a second tool or an operator would. Used to arrange
-    /// conditions the AppHost cannot arrange for itself: a colliding VM id, or a guest killed
-    /// from outside.
+    /// Runs hcsctl out of band, as a second tool or an operator would. Arranges conditions the
+    /// AppHost cannot arrange for itself: a colliding VM id, or a guest killed from outside.
     /// </summary>
     /// <returns>Whether it succeeded; failure detail goes to <paramref name="detail"/>.</returns>
     public static bool TryRun(string[] arguments, out string detail, string? storePath = null)
@@ -92,8 +89,8 @@ internal static class HcsCtlProbes
         string stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
 
-        // A failed probe fails the test rather than returning an empty result: "no endpoints"
-        // and "the probe broke" must never look the same to a leak assertion.
+        // A failed probe throws: "no endpoints" and "the probe broke" must not look the same
+        // to a leak assertion.
         if (process.ExitCode != 0)
         {
             throw new InvalidOperationException(

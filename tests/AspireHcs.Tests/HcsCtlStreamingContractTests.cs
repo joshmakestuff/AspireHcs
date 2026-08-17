@@ -9,7 +9,7 @@ namespace AspireHcs.Tests;
 // output. These pin the parsing seam with a stand-in binary, since hcsctl cannot be made to
 // violate its own contract on demand.
 //
-// Like HcsCtlOutputContractTests, these need no hcsctl and no HCS, so they never skip.
+// These need no hcsctl and no HCS, so they never skip.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlStreamingContractTests : IDisposable
 {
@@ -23,7 +23,7 @@ public class HcsCtlStreamingContractTests : IDisposable
         }
         catch (IOException)
         {
-            // A leftover temp directory is not worth failing a test over.
+            // A leftover temp directory does not fail the test.
         }
 
         GC.SuppressFinalize(this);
@@ -59,8 +59,7 @@ public class HcsCtlStreamingContractTests : IDisposable
             ["container", "exec"], HcsCtlJsonContext.Default.HcsCtlExecDocument, collector);
 
         // The count assertion doubles as the non-empty guard: if the fake's stderr redirection
-        // silently failed, this would report zero and the routing checks below would pass
-        // vacuously — the trap hcsctl's own TestStreamJSONTypesStderr guards against.
+        // failed, this reports zero and the routing checks below pass vacuously.
         Assert.Equal(3, collector.Records.Count);
 
         Assert.Equal("stdout", collector.Records[0].Stream);
@@ -85,7 +84,7 @@ public class HcsCtlStreamingContractTests : IDisposable
                 ["container", "exec"], HcsCtlJsonContext.Default.HcsCtlExecDocument));
 
         Assert.Contains("not NDJSON", thrown.Message);
-        // The offending line is quoted, so the failure is diagnosable without a re-run.
+        // The offending line is quoted.
         Assert.Contains("this is not ndjson", thrown.Message);
     }
 
@@ -94,8 +93,8 @@ public class HcsCtlStreamingContractTests : IDisposable
     {
         // The raw UTF-8 byte path over the process boundary is pinned by HcsCtlContractTests'
         // Non_ascii_survives_the_process_boundary (real binary). Here the fake emits the JSON
-        // \u escape — ASCII on the wire, so cmd.exe's code page cannot mangle it — and the
-        // assertion checks the record round-trips to the actual non-ASCII string.
+        // \u escape (ASCII on the wire, so cmd.exe's code page cannot mangle it) and the
+        // assertion checks the record round-trips to the non-ASCII string.
         HcsCtl fake = FakeCtl(
             "echo {\"ok\":true}" + Environment.NewLine +
             "echo {\"stream\":\"stdout\",\"data\":\"caf\\u00e9\"} 1>&2");

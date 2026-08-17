@@ -7,10 +7,9 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #5 acceptance: the dashboard's Start/Stop/Restart actually drive a real VM. Aspire wires
-// those commands only for resources DCP owns, so nothing here is exercised by the framework's own
-// machinery — the orchestrator has to stop and re-boot the compute system itself, releasing and
-// recreating the HCN endpoint each time.
+// The dashboard's Start/Stop/Restart drive a real VM. Aspire wires those commands only for
+// resources DCP owns, so the orchestrator stops and re-boots the compute system itself,
+// releasing and recreating the HCN endpoint each time.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class LifecycleCommandRoundTripTests(ITestOutputHelper output)
 {
@@ -23,8 +22,7 @@ public sealed class LifecycleCommandRoundTripTests(ITestOutputHelper output)
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(10));
 
-        // Three boots run below; each grants VM access to the base image, and before #16 every
-        // one of them left its ACE behind permanently.
+        // Three boots run below; each grants VM access to the base image and must revoke it.
         string aclBefore = TeardownProbes.ReadAcl(vhdx!);
 
         IDistributedApplicationTestingBuilder appHost =
@@ -42,19 +40,19 @@ public sealed class LifecycleCommandRoundTripTests(ITestOutputHelper output)
             await ExecuteAsync(app, KnownResourceCommands.StopCommand, cts.Token);
             await WaitForStateAsync(app, KnownResourceStates.Exited, cts.Token);
 
-            // A dashboard Stop is a complete teardown, not just a dead VM: the grants and the
-            // copy-on-write directory must already be gone while the AppHost keeps running.
+            // A dashboard Stop is a complete teardown: the grants and the copy-on-write directory
+            // must already be gone while the AppHost keeps running.
             Assert.False(Directory.Exists(workDir), $"Stop left the work directory behind: {workDir}");
             Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
 
-            // That this succeeds is itself the proof that Stop really tore the compute system down
-            // rather than just publishing a state: the VM id is stable for the resource's lifetime, so
-            // HcsCreateComputeSystem would be rejected outright if the previous one still existed.
+            // Success proves Stop tore the compute system down: the VM id is stable for the
+            // resource's lifetime, so HcsCreateComputeSystem is rejected if the previous one
+            // still exists.
             await ExecuteAsync(app, KnownResourceCommands.StartCommand, cts.Token);
             await WaitForStateAsync(app, KnownResourceStates.Running, cts.Token);
 
-            // A second boot has to have re-created the HCN endpoint and re-resolved the endpoint from
-            // a fresh lease; the stale allocation from the first boot would not survive teardown.
+            // A second boot re-creates the HCN endpoint and re-resolves the endpoint from a fresh
+            // lease; the allocation from the first boot does not survive teardown.
             Uri restarted = app.GetEndpoint("appliance", "ssh");
             output.WriteLine($"restarted at {restarted}");
             Assert.Equal(22, restarted.Port);

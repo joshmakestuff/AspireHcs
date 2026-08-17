@@ -3,14 +3,10 @@ using Aspire.Hosting.ApplicationModel;
 namespace AspireHcs.Hosting;
 
 /// <summary>
-/// Resolving "the address this endpoint got, if any" — the one question the health check and
-/// the connect commands both ask. It lives here rather than in each of them so the matching
-/// rule (which is case-insensitive, matching how endpoints are named elsewhere in Aspire)
-/// cannot drift between the thing that decides a VM is healthy and the thing that decides you
-/// can connect to it.
+/// Resolves the address an endpoint got, if any. Shared by the health check and the connect
+/// commands. The endpoint-name match is case-insensitive, as elsewhere in Aspire.
 /// <para>
-/// Typed on <see cref="IResource"/> rather than the VM resource because containers allocate
-/// endpoints too (#41). Nothing here was VM-specific except the parameter type.
+/// Typed on <see cref="IResource"/>: containers allocate endpoints too.
 /// </para>
 /// </summary>
 internal static class EndpointAllocations

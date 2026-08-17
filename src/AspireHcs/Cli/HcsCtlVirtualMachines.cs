@@ -3,14 +3,13 @@ using System.Globalization;
 namespace AspireHcs.Cli;
 
 /// <summary>
-/// The <c>vm</c> verbs, as methods. Same reason as <see cref="HcsCtlContainers"/>: an option
-/// spelled wrong is exit 64, which reads exactly like a bad value in a resource's configuration.
+/// The <c>vm</c> verbs, as methods. All argv construction for the group is here.
 ///
-/// A full VM is not a container, and three differences drive everything here:
+/// A full VM is not a container. Three differences apply:
 /// <list type="bullet">
 ///   <item><c>vm start</c> returning means the firmware is running, not that the guest is up.</item>
-///   <item>The address comes from the guest's own DHCP client and is not knowable before it
-///     boots, so it is waited for rather than read (hcsctl#43).</item>
+///   <item>The address comes from the guest's own DHCP client and is not known before it
+///     boots, so it is waited for.</item>
 ///   <item>A VM that is not running still exists — disk and store record — so it is
 ///     <c>stopped</c> rather than gone, and <c>vm rm</c> is what removes it.</item>
 /// </list>
@@ -20,13 +19,13 @@ internal static class HcsCtlVirtualMachines
     /// <summary>
     /// Creates the compute system and its differencing disk, attaches a DHCP endpoint, and does
     /// not start it. A null <paramref name="network"/> means no NIC at all. Networks are named
-    /// literally — the shared default lives in <see cref="HcsNetwork"/>, which also records why
-    /// hcsctl's <c>--network default</c> sentinel is not used here.
+    /// literally; hcsctl's <c>--network default</c> sentinel is not used. The shared default is
+    /// <see cref="HcsNetwork"/>.
     /// </summary>
     /// <param name="labels">
-    /// Opaque key/value pairs recorded in hcsctl's store and never interpreted by it. This is how
-    /// a run stamps its identity onto a VM so a later run can prove the owner is dead before
-    /// reclaiming anything (hcsctl#44).
+    /// Opaque key/value pairs recorded in hcsctl's store and never interpreted by it. A run stamps
+    /// its identity onto a VM with these, so a later run can prove the owner is dead before it
+    /// reclaims anything.
     /// </param>
     public static Task<HcsCtlVmCreateDocument> CreateVmAsync(
         this HcsCtl hcsctl,
@@ -88,12 +87,10 @@ internal static class HcsCtlVirtualMachines
     /// Waits for the address the guest's DHCP client leases, and returns it.
     /// </summary>
     /// <remarks>
-    /// This blocks for as long as it takes, which is the point. Measured against a Rocky 10 guest
-    /// on the Default Switch: about 16 s from start on a cold boot and 10 s on a restart. hcsctl
-    /// polls the endpoint; nothing on the host can produce the address sooner.
+    /// Blocks until the lease lands. Measured against a Rocky 10 guest on the Default Switch:
+    /// about 16 s from start on a cold boot and 10 s on a restart. hcsctl polls the endpoint.
     ///
-    /// A timeout here fails the resource rather than returning empty, because a VM with no address
-    /// cannot serve an endpoint and reporting it as started would be a lie.
+    /// A timeout fails the call; it does not return an empty address.
     /// </remarks>
     public static Task<HcsCtlVmAddressDocument> WaitForAddressAsync(
         this HcsCtl hcsctl,
@@ -125,9 +122,9 @@ internal static class HcsCtlVirtualMachines
     /// the HCN endpoint. A VM created with <c>--no-copy-on-write</c> keeps its base image.
     /// </summary>
     /// <remarks>
-    /// Works from a process that did not create the VM, which is what makes reclaiming a crashed
-    /// run's leftovers possible at all. The endpoint is host-global and outlives every process, so
-    /// this is the only thing that ever deletes one.
+    /// Works from a process that did not create the VM; reclaiming a crashed run's leftovers
+    /// depends on this. The endpoint is host-global and outlives every process; this is the only
+    /// call that deletes one.
     /// </remarks>
     public static Task<HcsCtlResultDocument> RemoveVmAsync(
         this HcsCtl hcsctl, string id, bool force = true, CancellationToken cancellationToken = default)
@@ -154,9 +151,8 @@ internal static class HcsCtlVirtualMachines
     }
 
     /// <summary>
-    /// Formats a duration the way Go's <c>time.ParseDuration</c> reads it. Seconds only, because
-    /// .NET's own round-trip formats are not durations hcsctl accepts and a rejected one is exit
-    /// 64 — an argument bug dressed up as a configuration error.
+    /// Formats a duration the way Go's <c>time.ParseDuration</c> reads it. Seconds only; .NET's
+    /// own round-trip formats are not durations hcsctl accepts.
     /// </summary>
     private static string FormatDuration(TimeSpan timeout)
         => $"{Math.Max(1, (long)Math.Ceiling(timeout.TotalSeconds)).ToString(CultureInfo.InvariantCulture)}s";

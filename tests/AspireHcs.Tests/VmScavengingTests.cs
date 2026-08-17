@@ -6,13 +6,12 @@ using Xunit;
 namespace AspireHcs.Tests;
 
 // Deletion requires proof of abandonment: a VM labelled with this integration's owner pid, and
-// that pid gone. These pin the decision table, because the window it protects — a VM created by
-// a live AppHost that has not started it yet — cannot be reproduced deterministically against a
-// real host.
+// that pid gone. These pin the decision table; the window it protects (a VM created by a live
+// AppHost that has not started it yet) cannot be reproduced deterministically against a real
+// host.
 //
-// The classifier used to work on HCN endpoints and their HNS Owner field. It works on VMs and
-// hcsctl labels now: removing a VM removes its endpoint with it, so there is no longer a window
-// where an endpoint exists with no VM to attribute it to (hcsctl#44).
+// The classifier works on VMs and hcsctl labels: removing a VM removes its endpoint with it, so
+// no endpoint exists with no VM to attribute it to.
 [SupportedOSPlatform("windows10.0.17763")]
 public class VmScavengingTests
 {
@@ -55,8 +54,8 @@ public class VmScavengingTests
     [Fact]
     public void Vm_without_our_label_is_left_alone()
     {
-        // Someone else's VM in a shared store. No label of ours, so no claim over it — not even
-        // when it carries a label that merely looks similar.
+        // Someone else's VM in a shared store. No label of ours, so no claim over it, also when
+        // it carries a label that looks similar.
         string[] stale = Stale(Listing(Vm(OtherVmId), Vm("33333333-3333-3333-3333-333333333333", ("owner", "1234"))), pidAlive: false);
         Assert.Empty(stale);
     }
@@ -64,8 +63,7 @@ public class VmScavengingTests
     [Fact]
     public void Unparseable_pid_is_left_alone()
     {
-        // A corrupt label is not proof of anything. Treating it as one turns a bad write into
-        // permission to destroy a running VM.
+        // A corrupt label is not proof of anything.
         foreach (string bad in new[] { "", "not-a-pid", "-1", "9999999999999999999" })
         {
             string[] stale = Stale(Listing(Vm(OtherVmId, (HcsVmOrchestrator.OwnerPidLabel, bad))), pidAlive: false);
@@ -84,8 +82,8 @@ public class VmScavengingTests
     [Fact]
     public void This_process_is_alive_by_its_own_reckoning()
     {
-        // The value the orchestrator stamps has to be a pid the same check can find, or every
-        // concurrent AppHost would reclaim every other one's VMs on sight.
+        // The value the orchestrator stamps must be a pid the same check can find, or every
+        // concurrent AppHost reclaims every other one's VMs.
         string[] stale = Stale(
             Listing(Vm(OtherVmId, (HcsVmOrchestrator.OwnerPidLabel, HcsVmOrchestrator.OwnerPidValue))),
             pidAlive: true);

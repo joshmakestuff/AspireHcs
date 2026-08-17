@@ -4,15 +4,15 @@ namespace AspireHcs.IntegrationTests;
 
 /// <summary>
 /// Probes for the host-side residue a leaky teardown leaves behind: ACL entries on the base
-/// image (#16) and copy-on-write work directories in TEMP (#17). Tests snapshot before a run
-/// and assert nothing new survives it.
+/// image and copy-on-write work directories in TEMP. Tests snapshot before a run and assert
+/// nothing new survives it.
 /// </summary>
 internal static class TeardownProbes
 {
     /// <summary>
-    /// The file's ACL as icacls prints it, one trimmed line per ACE, sorted so equality is
-    /// insensitive to ACE order but still counts duplicates — every leaked VM-identity grant
-    /// is its own line.
+    /// The file's ACL as icacls prints it, one trimmed line per ACE, sorted. Equality is
+    /// insensitive to ACE order but counts duplicates: every leaked VM-identity grant is its
+    /// own line.
     /// </summary>
     public static string ReadAcl(string path)
     {
@@ -25,8 +25,8 @@ internal static class TeardownProbes
         string text = process.StandardOutput.ReadToEnd();
         process.WaitForExit();
 
-        // A failed probe must fail the test, not return a value: two identical error outputs
-        // would otherwise compare equal and pass the residue assertion vacuously.
+        // A failed probe throws: two identical error outputs would compare equal and pass the
+        // residue assertion vacuously.
         if (process.ExitCode != 0)
         {
             throw new InvalidOperationException($"icacls '{path}' failed with exit code {process.ExitCode}: {text}");

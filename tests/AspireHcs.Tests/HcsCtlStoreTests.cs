@@ -4,13 +4,12 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// Images are acquired out of band — `image import` is elevated and runs once per image — so an
+// Images are acquired out of band (`image import` is elevated and runs once per image), so an
 // AppHost normally points at a store someone else prepared, not at hcsctl's per-user default.
-// A --store that silently fails to reach hcsctl is the dangerous case: the command *succeeds*,
-// against the wrong images.
+// A --store that fails to reach hcsctl makes the command succeed against the wrong images.
 //
-// The exclusion list in HcsCtl is a measured fact about another repo's CLI, so it is pinned here
-// from both sides rather than trusted.
+// The exclusion list in HcsCtl is a fact about hcsctl's CLI, so it is pinned here from both
+// sides.
 [Collection(HcsCtlEnvironmentCollection.Name)]
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlStoreTests
@@ -32,8 +31,8 @@ public class HcsCtlStoreTests
         return store;
     }
 
-    // Proves the flag actually lands: this store is the only one holding a corrupt record, so the
-    // failure could not have come from hcsctl's default store.
+    // Proves the flag lands: this store is the only one holding a corrupt record, so the failure
+    // cannot come from hcsctl's default store.
     [SkippableFact]
     public async Task The_configured_store_reaches_hcsctl()
     {
@@ -69,8 +68,8 @@ public class HcsCtlStoreTests
         Assert.True(result.Ok);
     }
 
-    // The other side of the same pin: the exclusion exists because hcsctl really does reject it.
-    // If hcsctl ever starts accepting --store on network, this fails and the exclusion can go.
+    // The other side of the same pin: hcsctl rejects it. If hcsctl starts accepting --store on
+    // network, this fails and the exclusion can go.
     [SkippableFact]
     public async Task The_network_group_still_rejects_an_explicit_store()
     {
@@ -81,8 +80,7 @@ public class HcsCtlStoreTests
                 HcsCtlJsonContext.Default.HcsCtlResultDocument));
     }
 
-    // The images staged for #39. Reading them needs no elevation — only the import did, and that
-    // already happened out of band.
+    // Reading a prepared store needs no elevation; only the import did, out of band.
     [SkippableFact]
     public async Task A_prepared_store_is_readable_unelevated_and_its_images_pass_preflight()
     {
@@ -99,8 +97,8 @@ public class HcsCtlStoreTests
         Assert.True(info.Store.Exists);
         Assert.NotEmpty(info.Images);
 
-        // The preflight must pass on a host that can actually run these, and must not report a
-        // staged image as missing.
+        // The preflight must pass on a host that can run these, and must not report a staged
+        // image as missing.
         Assert.Null(HcsCtlPreflight.DescribeBlocker(info));
         foreach (HcsCtlImageInfo image in info.Images)
         {

@@ -5,11 +5,10 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// The ledger is what makes teardown correctness independent of how far a boot got (#15/#16/#17):
-// every acquisition records its release, drains run in reverse order with per-entry isolation,
-// and an acquisition that loses the race against AppHost shutdown releases itself. These pin
-// each of those properties directly, since no integration test can exercise the interleavings
-// deterministically.
+// The ledger makes teardown correctness independent of how far a boot got: every acquisition
+// records its release, drains run in reverse order with per-entry isolation, and an acquisition
+// that loses the race against AppHost shutdown releases itself. These pin each property
+// directly; no integration test can exercise the interleavings deterministically.
 [SupportedOSPlatform("windows10.0.17763")]
 public class BootLedgerTests
 {
@@ -74,7 +73,7 @@ public class BootLedgerTests
         ledger.Drain();
 
         // The boot must unwind even when the immediate release itself fails; the failure is
-        // logged like any other release failure rather than replacing the cancellation.
+        // logged like any other release failure and does not replace the cancellation.
         Assert.Throws<OperationCanceledException>(
             () => ledger.Add("late straggler", () => throw new InvalidOperationException("release failed")));
     }
@@ -84,7 +83,7 @@ public class BootLedgerTests
     {
         // The AppHost shutdown hook can drain concurrently with a cancelled boot's own cleanup.
         // Whatever the interleaving, an entry must never be released twice (a double
-        // HcnDeleteEndpoint or Dispose is exactly the class of bug the ledger exists to prevent).
+        // HcnDeleteEndpoint or Dispose).
         for (int round = 0; round < 100; round++)
         {
             BootLedger ledger = new(NullLogger.Instance);

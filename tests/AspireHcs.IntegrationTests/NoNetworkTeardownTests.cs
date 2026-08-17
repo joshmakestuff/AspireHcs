@@ -8,12 +8,10 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// The teardown ledger's adjacent mode: every other orchestration test boots the sample's
-// networked configuration, so without this the no-network path — no scavenge, no HCN endpoint,
-// no endpoint allocation, straight from guest-ready to Running — would have no coverage at
-// all, and neither would its shorter teardown. The other off-diagonal, copyOnWrite:false,
-// stays deliberately untested until #11 produces disposable images: a non-CoW boot writes
-// into the base VHDX, and the only base image on the runner is shared by every other test.
+// The no-network path: no scavenge, no HCN endpoint, no endpoint allocation, straight from
+// guest-ready to Running, and its shorter teardown. Every other orchestration test boots the
+// sample's networked configuration. copyOnWrite:false is untested: a non-CoW boot writes into
+// the base VHDX, and the only base image on the runner is shared by every other test.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class NoNetworkTeardownTests(ITestOutputHelper output)
 {
@@ -46,9 +44,8 @@ public sealed class NoNetworkTeardownTests(ITestOutputHelper output)
         await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
         output.WriteLine("booted to Running without a network");
 
-        // A network-less boot must not have created an HCN endpoint at all. hcsctl reports the
-        // endpoint it made in the create document, so a null here is the tool's own account of
-        // having made none.
+        // A network-less boot creates no HCN endpoint. hcsctl reports the endpoint it made in
+        // the create document; null is the tool's own account of having made none.
         Assert.Null(vm.EndpointId);
 
         ExecuteCommandResult stopped = await app.ResourceCommands
@@ -56,9 +53,8 @@ public sealed class NoNetworkTeardownTests(ITestOutputHelper output)
         Assert.True(stopped.Success, $"Stop failed: {stopped.Message}");
         await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Exited, cts.Token);
 
-        // The VM, its differencing disk and its access grants all go with `vm rm`. The disk now
-        // lives in hcsctl's store rather than a work directory of ours, so the store's own
-        // account of what exists is the residue check.
+        // The VM, its differencing disk and its access grants all go with `vm rm`. The disk
+        // lives in hcsctl's store, so the store's own account of what exists is the residue check.
         Assert.DoesNotContain(vm.VmId, HcsCtlProbes.VmIds(vm.StorePath));
         Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
 

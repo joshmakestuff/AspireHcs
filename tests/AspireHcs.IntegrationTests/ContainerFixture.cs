@@ -12,7 +12,7 @@ namespace AspireHcs.IntegrationTests;
 
 /// <summary>
 /// The container reported FailedToStart. Carries the resource's logs, which hold hcsctl's own
-/// error — the reason a boot failed is in there, and a bare assertion failure would discard it.
+/// error and the reason the boot failed.
 /// </summary>
 internal sealed class ContainerStartFailedException(string logs)
     : Exception($"The container resource failed to start. Resource logs:{Environment.NewLine}{logs}")
@@ -32,9 +32,8 @@ internal static class ContainerFixture
     public const string HcsCtlVariable = "ASPIREHCS_HCSCTL";
 
     /// <summary>
-    /// Whether this process holds an enabled <c>BUILTIN\Administrators</c> SID. A few hcsctl
-    /// operations need it — sizing the scratch does, running a container does not — so a test
-    /// that needs it says so rather than failing on every ordinary dev box.
+    /// Whether this process holds an enabled <c>BUILTIN\Administrators</c> SID. Sizing the
+    /// scratch needs it; running a container does not.
     /// </summary>
     public static bool IsElevated =>
         new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent())
@@ -58,8 +57,7 @@ internal static class ContainerFixture
 
     /// <summary>
     /// Builds the sample AppHost, which adds the container when <c>ASPIREHCS_TEST_IMAGE</c> is
-    /// set. Going through the sample rather than an in-process builder is what #39 asks for, and
-    /// it is also the only way to get DCP and the dashboard configured.
+    /// set. The sample is the only path that configures DCP and the dashboard.
     /// </summary>
     public static async Task<IDistributedApplicationTestingBuilder> SampleAppHostAsync(
         string command, CancellationToken cancellationToken)
@@ -80,8 +78,8 @@ internal static class ContainerFixture
     /// a developer would see in the dashboard.
     /// </summary>
     /// <param name="configure">
-    /// Applied to the sample's container before the app is built, so a test can add environment,
-    /// mounts or a scratch size without the sample growing a knob per test.
+    /// Applied to the sample's container before the app is built; a test can add environment,
+    /// mounts or a scratch size.
     /// </param>
     public static async Task<string> RunAndCaptureAsync(
         string command,
@@ -106,17 +104,15 @@ internal static class ContainerFixture
         using CancellationTokenSource watching = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task pump = PumpLogsAsync(app, captured, watching.Token);
 
-        // FailedToStart is waited for alongside the success states, not left out. A boot that
-        // fails never reaches Finished, so omitting it means blocking until the test's own
-        // timeout — five minutes of nothing, ending in a cancellation that says far less than
-        // the failure did.
+        // FailedToStart is waited for alongside the success states: a boot that fails never
+        // reaches Finished.
         string reached = await app.ResourceNotifications.WaitForResourceAsync(
             "worker",
             [KnownResourceStates.Finished, KnownResourceStates.Exited, KnownResourceStates.FailedToStart],
             cancellationToken);
 
-        // A short grace period so the last lines land before the pump is cut off — the resource
-        // reaching a terminal state and its logs being flushed are not the same instant.
+        // Grace period: the resource reaching a terminal state and its logs being flushed are
+        // not the same instant.
         await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
         await watching.CancelAsync();
         await pump;
@@ -154,9 +150,7 @@ internal static class ContainerFixture
     }
 
     /// <summary>
-    /// Runs hcsctl and returns its one stdout document. Deliberately a separate implementation
-    /// from the product's own runner: a check that reuses the code under test can only confirm it
-    /// is self-consistent.
+    /// Runs hcsctl and returns its one stdout document. Independent of the product's own runner.
     /// </summary>
     public static async Task<string> RunHcsCtlJsonAsync(
         string hcsctl, CancellationToken cancellationToken, params string[] arguments)
@@ -190,7 +184,7 @@ internal static class ContainerFixture
         if (!document.RootElement.TryGetProperty("containers", out JsonElement containers)
             || containers.ValueKind != JsonValueKind.Array)
         {
-            // hcsctl is Go: an empty list marshals as null, not []. That is "none", not a fault.
+            // hcsctl is Go: an empty list marshals as null, not [].
             return [];
         }
 

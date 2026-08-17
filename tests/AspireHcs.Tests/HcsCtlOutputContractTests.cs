@@ -4,12 +4,11 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// hcsctl promises stdout carries *exactly one* JSON document. The seam is built on that promise,
-// so these pin what happens when it is broken — with a stand-in binary rather than hcsctl, since
-// hcsctl cannot be made to violate its own contract on demand and a claim nothing can falsify is
-// not a claim.
+// hcsctl promises stdout carries exactly one JSON document. These pin what happens when that
+// promise is broken, with a stand-in binary: hcsctl cannot be made to violate its own contract
+// on demand.
 //
-// These need no hcsctl and no HCS, so unlike HcsCtlContractTests they never skip.
+// These need no hcsctl and no HCS, so they never skip.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlOutputContractTests : IDisposable
 {
@@ -23,7 +22,7 @@ public class HcsCtlOutputContractTests : IDisposable
         }
         catch (IOException)
         {
-            // A leftover temp directory is not worth failing a test over.
+            // A leftover temp directory does not fail the test.
         }
 
         GC.SuppressFinalize(this);
@@ -46,7 +45,7 @@ public class HcsCtlOutputContractTests : IDisposable
             () => fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument));
 
         Assert.Contains("not one JSON document", thrown.Message);
-        // The offending stdout is quoted, so the failure is diagnosable without a re-run.
+        // The offending stdout is quoted.
         Assert.Contains("this is not a document", thrown.Message);
     }
 
@@ -61,8 +60,7 @@ public class HcsCtlOutputContractTests : IDisposable
         Assert.Contains("no document on stdout", thrown.Message);
     }
 
-    // The half of the contract that a naive parser silently breaks: reading the first document
-    // and ignoring the rest would bind successfully here and hide that something is very wrong.
+    // Reading the first document and ignoring the rest would bind successfully here.
     [Fact]
     public async Task A_second_document_on_stdout_is_rejected_rather_than_ignored()
     {
@@ -90,7 +88,7 @@ public class HcsCtlOutputContractTests : IDisposable
     }
 
     // A non-zero exit with no failure document must still fail, and must say the document was
-    // missing rather than inventing a reason.
+    // missing.
     [Fact]
     public async Task A_failure_without_a_document_still_fails_and_says_so()
     {
@@ -103,13 +101,9 @@ public class HcsCtlOutputContractTests : IDisposable
         Assert.Contains("without a failure document", thrown.Message);
     }
 
-    // hcsctl is Go, and Go marshals a nil slice or map as JSON `null`, not `[]`. So "no
-    // containers" arrives as `"containers": null` — routine output, not an error. A `= []`
-    // property initializer does NOT survive it: the deserializer assigns the null over the top.
-    //
-    // This is a regression test. The teardown verification in HcsContainerInstance.Remove threw
-    // ArgumentNullException instead of verifying anything, and the round-trip test still passed,
-    // because its own independent check happened to be right.
+    // hcsctl is Go, and Go marshals a nil slice or map as JSON `null`, not `[]`. "No containers"
+    // arrives as `"containers": null`: routine output, not an error. A `= []` property
+    // initializer does not survive it: the deserializer assigns the null over the top.
     [Fact]
     public async Task A_null_collection_binds_to_empty_rather_than_null()
     {
@@ -147,7 +141,7 @@ public class HcsCtlOutputContractTests : IDisposable
     }
 
     // A null `services` must not read as "the preflight passed". An absent service report is a
-    // blocker, and that has to survive the null binding too.
+    // blocker, and that must survive the null binding too.
     [Fact]
     public async Task A_null_services_map_still_blocks_the_preflight()
     {
@@ -158,8 +152,7 @@ public class HcsCtlOutputContractTests : IDisposable
         Assert.NotNull(HcsCtlPreflight.DescribeBlocker(info));
     }
 
-    // An exit code hcsctl does not document is a failure, not a success. Falling through to
-    // "parse the document" for, say, exit 3 would report a broken run as a good one.
+    // An exit code hcsctl does not document is a failure, not a success.
     [Fact]
     public async Task An_undocumented_exit_code_is_a_failure_and_keeps_its_code()
     {

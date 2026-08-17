@@ -7,10 +7,10 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// Issue #17 acceptance: a boot that fails after the copy-on-write disk exists but before any
-// HCS compute system does must still release everything it acquired — the work directory in
-// TEMP most of all, since nothing else ever cleans it up (each run has a fresh VM id) — and
-// must leave the resource retryable from the dashboard.
+// A boot that fails after the copy-on-write disk exists but before any HCS compute system
+// does must release everything it acquired (the work directory in TEMP most of all: each run
+// has a fresh VM id, so nothing else cleans it up) and must leave the resource retryable from
+// the dashboard.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class BootFailureCleanupTests(ITestOutputHelper output)
 {
@@ -30,8 +30,8 @@ public sealed class BootFailureCleanupTests(ITestOutputHelper output)
 
         // Occupy the resource's own VM id out of band. hcsctl refuses to create a second VM
         // under an id its store already holds, so the boot fails deterministically inside
-        // `vm create` — after the disk work, before anything is running. The scavenger cannot
-        // clear it either: this VM carries no owner label of ours, so it is not ours to reclaim.
+        // `vm create`: after the disk work, before anything is running. The scavenger does not
+        // clear it: this VM carries no owner label, so it is not reclaimed.
         Assert.True(
             HcsCtlProbes.TryRun(["vm", "create", "--id", vm.VmId, "--vhdx", vhdx!], out string arranged, vm.StorePath),
             $"could not arrange the conflict: {arranged}");
@@ -48,9 +48,8 @@ public sealed class BootFailureCleanupTests(ITestOutputHelper output)
             // cleaned up would show here as an extra ACE.
             Assert.Equal(aclBefore, TeardownProbes.ReadAcl(vhdx!));
 
-            // Clear the conflict; a retry from the dashboard must now boot for real, which also
-            // proves the failed boot released everything a fresh one needs -- same VM id, same
-            // store, same disk.
+            // Clear the conflict; a retry from the dashboard must now boot for real with the same
+            // VM id, store and disk, which proves the failed boot released everything.
             Assert.True(
                 HcsCtlProbes.TryRun(["vm", "rm", "--id", vm.VmId, "--force"], out string cleared, vm.StorePath),
                 $"could not clear the conflict: {cleared}");
@@ -68,8 +67,8 @@ public sealed class BootFailureCleanupTests(ITestOutputHelper output)
         }
         finally
         {
-            // Removed whatever happened: on the success path the retry already owns this id, and
-            // on any failure path the arranged conflict must not outlive the test.
+            // On the success path the retry already owns this id; on any failure path the
+            // arranged conflict must not outlive the test.
             _ = HcsCtlProbes.TryRun(["vm", "rm", "--id", vm.VmId, "--force"], out _, vm.StorePath);
         }
     }

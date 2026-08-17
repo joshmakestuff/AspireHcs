@@ -6,12 +6,9 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// #49. The trap this exists for: HCS treats FOO= as a DELETION, so an empty value leaves the
-// variable absent inside the guest rather than present-and-empty. An app reading it sees nothing
-// set, while the AppHost model swears it was.
-//
-// Aspire makes empty values likely rather than exotic — an unresolved parameter or a
-// not-yet-allocated endpoint reference produces one — so the decision is to fail loudly.
+// HCS treats FOO= as a deletion, so an empty value leaves the variable absent inside the guest,
+// not present-and-empty. Aspire makes empty values likely (an unresolved parameter or a
+// not-yet-allocated endpoint reference produces one), so resolution fails on them.
 [SupportedOSPlatform("windows10.0.17763")]
 public class ContainerEnvironmentTests
 {
@@ -71,11 +68,10 @@ public class ContainerEnvironmentTests
         InvalidOperationException thrown = await Assert.ThrowsAsync<InvalidOperationException>(
             () => ContainerEnvironment.ResolveAsync(container.Resource, RunMode));
 
-        // The message must name the variable and the resource; "an environment variable was
-        // empty" would leave a developer grepping their AppHost.
+        // The message must name the variable and the resource.
         Assert.Contains("EMPTY", thrown.Message);
         Assert.Contains("worker", thrown.Message);
-        // And it must explain the mechanism, or the reader concludes it is an arbitrary rule.
+        // And it must name the mechanism.
         Assert.Contains("deletion", thrown.Message);
     }
 
@@ -93,7 +89,7 @@ public class ContainerEnvironmentTests
     }
 
     // WithReference compiles down to WithEnvironment, so a connection string must survive the
-    // same path. Without this, referencing another resource from a container is dead on arrival.
+    // same path.
     [Fact]
     public async Task A_referenced_connection_string_resolves_to_its_value()
     {
