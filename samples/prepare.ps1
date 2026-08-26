@@ -34,6 +34,8 @@ dotnet publish (Join-Path $samples 'HcsSample.GuestApi') -c Release -o $publishD
 if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed.' }
 
 # ---- 2. Pull and import the image ------------------------------------------------------------
+# Resolution mirrors the AppHost: ASPIREHCS_HCSCTL, then PATH, then the repo's pinned drop in
+# tools\hcsctl — fetched (hash-verified) on demand, so a fresh clone needs no setup at all.
 $hcsctl = if ($env:ASPIREHCS_HCSCTL) {
     if (Test-Path $env:ASPIREHCS_HCSCTL -PathType Container) { Join-Path $env:ASPIREHCS_HCSCTL 'hcsctl.exe' }
     else { $env:ASPIREHCS_HCSCTL }
@@ -41,8 +43,16 @@ $hcsctl = if ($env:ASPIREHCS_HCSCTL) {
     (Get-Command hcsctl.exe -ErrorAction SilentlyContinue)?.Source
 }
 if (-not $hcsctl -or -not (Test-Path $hcsctl)) {
-    throw 'hcsctl.exe was not found. Put it on PATH or point ASPIREHCS_HCSCTL at it. ' +
-          'Releases: https://github.com/joshmakestuff/hcsctl/releases'
+    $pinned = Join-Path (Split-Path $samples -Parent) 'tools\hcsctl\hcsctl.exe'
+    if (-not (Test-Path $pinned)) {
+        Write-Host 'Fetching the pinned hcsctl drop into tools\hcsctl ...'
+        & (Join-Path (Split-Path $samples -Parent) 'eng\Get-HcsCtl.ps1')
+    }
+    $hcsctl = $pinned
+}
+if (-not (Test-Path $hcsctl)) {
+    throw 'hcsctl.exe was not found. Put it on PATH, point ASPIREHCS_HCSCTL at it, or run ' +
+          'eng\Get-HcsCtl.ps1. Releases: https://github.com/joshmakestuff/hcsctl/releases'
 }
 
 $storeArgs = if ($Store) { @('--store', $Store) } else { @() }

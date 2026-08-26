@@ -32,6 +32,19 @@ if (!Directory.Exists(guestApiPublish))
         "HcsSample.GuestApi and imports the container image into the store.");
 }
 
+// The repo pins hcsctl in tools\hcsctl (eng\Get-HcsCtl.ps1; prepare.ps1 fetches it). Falling
+// back to it means a fresh clone needs no PATH entry and no environment variable. The fallback
+// is used only when the ordinary resolution (ASPIREHCS_HCSCTL, then PATH) would find nothing,
+// so a deliberate override still wins.
+string pinnedHcsCtl = Path.GetFullPath(
+    Path.Combine(builder.AppHostDirectory, "..", "..", "tools", "hcsctl", "hcsctl.exe"));
+bool ordinaryResolutionWorks =
+    !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ASPIREHCS_HCSCTL"))
+    || (Environment.GetEnvironmentVariable("PATH") ?? "")
+        .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Any(dir => dir.IndexOfAny(Path.GetInvalidPathChars()) < 0 && File.Exists(Path.Combine(dir, "hcsctl.exe")));
+string? repoHcsCtl = !ordinaryResolutionWorks && File.Exists(pinnedHcsCtl) ? pinnedHcsCtl : null;
+
 var worker = builder.AddHcsContainer("worker")
     .WithImage(image)
     // Both mounts are read-only in the guest and still live — a file edited on the host
@@ -46,6 +59,11 @@ var worker = builder.AddHcsContainer("worker")
     .WithNetwork()
     .WithEndpoint("http", targetPort: 8080, scheme: "http")
     .WithTcpHealthCheck();
+
+if (repoHcsCtl is not null)
+{
+    worker.WithHcsCtl(repoHcsCtl);
+}
 
 // ---- Frontend -------------------------------------------------------------------------------
 // An ordinary Aspire project consuming the guests. Each referenced endpoint arrives as
@@ -70,6 +88,11 @@ if (Setting("LinuxVhdx", "HCS_TEST_VHDX") is { } linuxVhdx)
         .WithEndpoint("ssh", targetPort: 22)
         // Dashboard "Connect (SSH)" button. The account must exist in the image.
         .WithSshCommand(userName: linuxUser);
+
+    if (repoHcsCtl is not null)
+    {
+        appliance.WithHcsCtl(repoHcsCtl);
+    }
 
     web.WithReference(appliance.GetEndpoint("ssh"));
 
@@ -107,6 +130,11 @@ if (Setting("WindowsVhdx", "HCS_SAMPLE_WINDOWS_VHDX") is { } windowsVhdx)
         .WithTcpHealthCheck("rdp")
         // Dashboard "Connect (RDP)" button: opens mstsc with the leased address and this user.
         .WithRdpCommand(userName: Setting("WindowsUser", "HCS_SAMPLE_WINDOWS_USER") ?? "Administrator");
+
+    if (repoHcsCtl is not null)
+    {
+        winserver.WithHcsCtl(repoHcsCtl);
+    }
 
     web.WithReference(winserver.GetEndpoint("rdp"));
 }
