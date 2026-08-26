@@ -16,7 +16,8 @@ After this, `aspire run` (or `dotnet run`) in HcsSample.AppHost works with nothi
 Image reference to pull and import. Default: the sample's default image.
 
 .PARAMETER Store
-hcsctl store directory. Default: $env:ASPIREHCS_STORE if set, otherwise hcsctl's per-user store.
+hcsctl store directory. Default: $env:ASPIREHCS_STORE if set, otherwise samples\.store —
+beside the sample, not in per-user AppData. The AppHost defaults to the same directory.
 #>
 [CmdletBinding()]
 param(
@@ -26,6 +27,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $samples = $PSScriptRoot
+if (-not $Store) { $Store = Join-Path $samples '.store' }
 
 # ---- 1. Publish the guest app ----------------------------------------------------------------
 $publishDir = Join-Path $samples 'HcsSample.GuestApi\bin\publish'
@@ -55,7 +57,7 @@ if (-not (Test-Path $hcsctl)) {
           'eng\Get-HcsCtl.ps1. Releases: https://github.com/joshmakestuff/hcsctl/releases'
 }
 
-$storeArgs = if ($Store) { @('--store', $Store) } else { @() }
+$storeArgs = @('--store', $Store)
 
 Write-Host "Pulling $Image ..."
 & $hcsctl image pull --ref $Image @storeArgs
@@ -76,9 +78,10 @@ if ($elevated) {
 }
 
 Write-Host ''
-Write-Host 'Done. Run the sample:'
+Write-Host "Done. Store: $Store"
+Write-Host 'Run the sample:'
 Write-Host "  cd $(Join-Path $samples 'HcsSample.AppHost')"
 Write-Host '  aspire run   # or: dotnet run'
-if ($Store) {
-    Write-Host "The AppHost finds the store through ASPIREHCS_STORE; keep it set to '$Store'."
+if ($env:ASPIREHCS_STORE) {
+    Write-Host "The AppHost finds this store through ASPIREHCS_STORE; keep it set to '$Store'."
 }

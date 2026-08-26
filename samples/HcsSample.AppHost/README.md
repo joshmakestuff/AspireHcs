@@ -39,16 +39,16 @@ variable fallbacks:
 
 | Setting | Env var | Value |
 | --- | --- | --- |
+| `Store` | `ASPIREHCS_STORE` | hcsctl image store (default `samples\.store` — beside the sample, not in per-user AppData; delete the directory to reclaim everything the sample materialized) |
 | `ContainerImage` | `ASPIREHCS_TEST_IMAGE` | Image reference (default `mcr.microsoft.com/windows/nanoserver:ltsc2025`) |
 | `LinuxVhdx` | `HCS_TEST_VHDX` | Bootable Gen2/UEFI VHDX for the Linux VM |
 | `LinuxUser` | `HCS_TEST_VM_USER` | SSH account (default `root`) |
 | `WindowsVhdx` | `HCS_SAMPLE_WINDOWS_VHDX` | Bootable Gen2/UEFI VHDX for the Windows VM |
 | `WindowsUser` | `HCS_SAMPLE_WINDOWS_USER` | RDP account (default `Administrator`) |
 
-The store comes from `ASPIREHCS_STORE` when set, otherwise hcsctl's per-user store; the
-in-dashboard terminal additionally needs `aspire config set features.terminalCommandsEnabled
-true` for the matching `aspire terminal` CLI commands (the dashboard terminal itself needs no
-flag).
+The in-dashboard terminal additionally needs `aspire config set
+features.terminalCommandsEnabled true` for the matching `aspire terminal` CLI commands (the
+dashboard terminal itself needs no flag).
 
 ## Preparing a VM image
 

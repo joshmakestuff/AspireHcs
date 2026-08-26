@@ -45,6 +45,12 @@ bool ordinaryResolutionWorks =
         .Any(dir => dir.IndexOfAny(Path.GetInvalidPathChars()) < 0 && File.Exists(Path.Combine(dir, "hcsctl.exe")));
 string? repoHcsCtl = !ordinaryResolutionWorks && File.Exists(pinnedHcsCtl) ? pinnedHcsCtl : null;
 
+// The image store lives beside the sample, not in per-user AppData: it is discoverable,
+// travels with the clone, and deleting it deletes everything the sample materialized.
+// prepare.ps1 imports into the same default; explicit config still wins.
+string store = Setting("Store", "ASPIREHCS_STORE")
+    ?? Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", ".store"));
+
 var worker = builder.AddHcsContainer("worker")
     .WithImage(image)
     // Both mounts are read-only in the guest and still live — a file edited on the host
@@ -58,7 +64,8 @@ var worker = builder.AddHcsContainer("worker")
     .WithEnvironment("GREETING", "Hello from a Hyper-V-isolated container")
     .WithNetwork()
     .WithEndpoint("http", targetPort: 8080, scheme: "http")
-    .WithTcpHealthCheck();
+    .WithTcpHealthCheck()
+    .WithStore(store);
 
 if (repoHcsCtl is not null)
 {
@@ -89,16 +96,14 @@ if (Setting("LinuxVhdx", "HCS_TEST_VHDX") is { } linuxVhdx)
         // Dashboard "Connect (SSH)" button. The account must exist in the image.
         .WithSshCommand(userName: linuxUser);
 
-    if (repoHcsCtl is not null)
-    {
-        appliance.WithHcsCtl(repoHcsCtl);
-    }
+    appliance.WithHcsCtl(repoHcsCtl, storePath: store);
 
     web.WithReference(appliance.GetEndpoint("ssh"));
 
     // Aspire 13.5's experimental terminal: an interactive SSH session into the guest, embedded
     // in the dashboard. The address is resolved when the process starts, after the VM's DHCP
     // lease has landed.
+    #pragma warning disable ASPIRETERMINAL001
     EndpointReference ssh = appliance.GetEndpoint("ssh");
     builder.AddExecutable("appliance-shell", "ssh.exe", ".")
         .WithArgs(context =>
@@ -113,6 +118,7 @@ if (Setting("LinuxVhdx", "HCS_TEST_VHDX") is { } linuxVhdx)
         .WithTerminal()
         .WithExplicitStart()
         .ExcludeFromManifest();
+    #pragma warning restore ASPIRETERMINAL001
 }
 
 // ---- Windows VM (opt-in) --------------------------------------------------------------------
@@ -131,10 +137,7 @@ if (Setting("WindowsVhdx", "HCS_SAMPLE_WINDOWS_VHDX") is { } windowsVhdx)
         // Dashboard "Connect (RDP)" button: opens mstsc with the leased address and this user.
         .WithRdpCommand(userName: Setting("WindowsUser", "HCS_SAMPLE_WINDOWS_USER") ?? "Administrator");
 
-    if (repoHcsCtl is not null)
-    {
-        winserver.WithHcsCtl(repoHcsCtl);
-    }
+    winserver.WithHcsCtl(repoHcsCtl, storePath: store);
 
     web.WithReference(winserver.GetEndpoint("rdp"));
 }

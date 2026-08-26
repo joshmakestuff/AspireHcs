@@ -489,3 +489,4 @@ $RECYCLE.BIN/
 # reproducible from the release and verified by SHA256, so it is not carried in history.
 tools/hcsctl/
 .playwright/
+samples/.store/
