@@ -98,27 +98,9 @@ if (Setting("LinuxVhdx", "HCS_TEST_VHDX") is { } linuxVhdx)
 
     appliance.WithHcsCtl(repoHcsCtl, storePath: store);
 
-    web.WithReference(appliance.GetEndpoint("ssh"));
-
-    // Aspire 13.5's experimental terminal: an interactive SSH session into the guest, embedded
-    // in the dashboard. The address is resolved when the process starts, after the VM's DHCP
-    // lease has landed.
-    #pragma warning disable ASPIRETERMINAL001
-    EndpointReference ssh = appliance.GetEndpoint("ssh");
-    builder.AddExecutable("appliance-shell", "ssh.exe", ".")
-        .WithArgs(context =>
-        {
-            context.Args.Add("-o");
-            context.Args.Add("StrictHostKeyChecking=accept-new");
-            context.Args.Add("-p");
-            context.Args.Add($"{ssh.Port}");
-            context.Args.Add($"{linuxUser}@{ssh.Host}");
-        })
-        .WaitFor(appliance)
-        .WithTerminal()
-        .WithExplicitStart()
-        .ExcludeFromManifest();
-    #pragma warning restore ASPIRETERMINAL001
+    // WaitFor as well as WithReference: the guest address exists only after the DHCP lease,
+    // so the web app must not start (and capture its environment) before the VM is healthy.
+    web.WithReference(appliance.GetEndpoint("ssh")).WaitFor(appliance);
 }
 
 // ---- Windows VM (opt-in) --------------------------------------------------------------------
@@ -139,7 +121,7 @@ if (Setting("WindowsVhdx", "HCS_SAMPLE_WINDOWS_VHDX") is { } windowsVhdx)
 
     winserver.WithHcsCtl(repoHcsCtl, storePath: store);
 
-    web.WithReference(winserver.GetEndpoint("rdp"));
+    web.WithReference(winserver.GetEndpoint("rdp")).WaitFor(winserver);
 }
 
 builder.Build().Run();
