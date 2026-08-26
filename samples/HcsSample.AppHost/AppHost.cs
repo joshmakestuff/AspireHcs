@@ -34,16 +34,17 @@ if (!Directory.Exists(guestApiPublish))
 
 var worker = builder.AddHcsContainer("worker")
     .WithImage(image)
-    // The published app, read-only. VSMB carries both mounts; the data mount is writable and
-    // live — a file edited on the host changes in the guest without a restart.
+    // Both mounts are read-only in the guest and still live — a file edited on the host
+    // changes in the guest without a restart. Read-only matters beyond hygiene: a writable
+    // VSMB mount makes HCS refuse pause (0x80070032), and pause/resume is part of the demo.
     .WithBindMount(guestApiPublish, @"C:\app", isReadOnly: true)
-    .WithBindMount("data", @"C:\data")
+    .WithBindMount("data", @"C:\data", isReadOnly: true)
     .WithCommand(@"C:\app\HcsSample.GuestApi.exe")
     .WithEnvironment("ASPNETCORE_URLS", "http://0.0.0.0:8080")
     .WithEnvironment("DATA_DIR", @"C:\data")
     .WithEnvironment("GREETING", "Hello from a Hyper-V-isolated container")
     .WithNetwork()
-    .WithEndpoint("http", targetPort: 8080)
+    .WithEndpoint("http", targetPort: 8080, scheme: "http")
     .WithTcpHealthCheck();
 
 // ---- Frontend -------------------------------------------------------------------------------

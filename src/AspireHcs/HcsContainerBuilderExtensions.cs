@@ -217,15 +217,21 @@ public static class HcsContainerBuilderExtensions
     /// Aspire endpoint resolving to the container's own address. The first endpoint declared
     /// backs the resource's connection string. Requires <see cref="WithNetwork"/>.
     /// </summary>
+    /// <remarks>
+    /// Aspire keys service-discovery injection by the endpoint's <em>scheme</em>, and renders
+    /// dashboard URLs with it. The default is <c>tcp</c>; pass <paramref name="scheme"/> as
+    /// <c>http</c> for an HTTP service so consumers see
+    /// <c>services__&lt;name&gt;__http__0=http://...</c> and get a clickable URL.
+    /// </remarks>
     public static IResourceBuilder<HcsContainerResource> WithEndpoint(
-        this IResourceBuilder<HcsContainerResource> builder, string name, int targetPort)
+        this IResourceBuilder<HcsContainerResource> builder, string name, int targetPort, string? scheme = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(targetPort, 0);
 
         builder.Resource.PrimaryEndpointName ??= name;
-        return builder.WithEndpoint(name: name, targetPort: targetPort, isProxied: false);
+        return builder.WithEndpoint(name: name, targetPort: targetPort, scheme: scheme, isProxied: false);
     }
 
     /// <summary>
