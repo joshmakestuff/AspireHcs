@@ -488,3 +488,4 @@ $RECYCLE.BIN/
 # The pinned hcsctl drop, fetched by eng/Get-HcsCtl.ps1. Build output of another repo:
 # reproducible from the release and verified by SHA256, so it is not carried in history.
 tools/hcsctl/
+.playwright/
