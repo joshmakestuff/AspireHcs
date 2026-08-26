@@ -6,12 +6,20 @@ namespace Aspire.Hosting.ApplicationModel;
 /// when the AppHost starts and torn down when it exits.
 /// </summary>
 /// <remarks>
+/// <para>
 /// hcsctl is a child process that exits as soon as each command completes, so no handle is held
 /// and a crashed AppHost leaves the VM running. This run stamps the VM with an owner label; the
 /// next run lists what exists, finds a VM owned by a pid that is gone, and removes it.
+/// </para>
+/// <para>
+/// A VM is an environment consumer — <c>WithReference</c> and <c>WithEnvironment</c> work — but
+/// nothing injects variables into a VHDX at create. The values are written to
+/// <c>/etc/aspire.env</c> in the guest once it is up, over hvsocket; see the delivery in
+/// <c>HcsVmInstance</c> for the boot-ordering caveat that convention carries.
+/// </para>
 /// </remarks>
 public sealed class HcsVirtualMachineResource([ResourceName] string name)
-    : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString
+    : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString, IResourceWithEnvironment
 {
     /// <summary>
     /// Connection string for <c>WithReference(vm)</c>: host:port of the first endpoint

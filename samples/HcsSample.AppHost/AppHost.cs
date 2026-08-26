@@ -80,6 +80,20 @@ var web = builder.AddProject<Projects.HcsSample_Web>("web")
     .WithReference(worker.GetEndpoint("http"))
     .WaitFor(worker);
 
+// ---- Consumer direction (opt-in) ------------------------------------------------------------
+// The container consuming the web project: WithReference on an HCS resource delivers the
+// endpoint into the guest, relayed through a hidden Docker socat container so the guest can
+// reach the host-loopback DCP proxy. Opt-in because it requires Docker, which the rest of the
+// sample deliberately does not. WEB_URL arrives in the guest as <gateway>:<relay port>; the
+// literal BIND_DEMO is delivered exactly as written, untouched by the rewrite.
+bool consumeWeb = Setting("ConsumeWeb", "HCS_SAMPLE_CONSUME_WEB") is not null;
+if (consumeWeb)
+{
+    worker
+        .WithReference(web.GetEndpoint("http"))
+        .WithEnvironment("BIND_DEMO", "127.0.0.1:9999");
+}
+
 // ---- Linux VM (opt-in) ----------------------------------------------------------------------
 // Fixture: a Gen2/UEFI VHDX with a Linux OS installed, the hcsguest agent running (systemd),
 // NIC on DHCP, and sshd enabled. Reference fixture: Rocky Linux 10, root only.
@@ -101,6 +115,16 @@ if (Setting("LinuxVhdx", "HCS_TEST_VHDX") is { } linuxVhdx)
     // WaitFor as well as WithReference: the guest address exists only after the DHCP lease,
     // so the web app must not start (and capture its environment) before the VM is healthy.
     web.WithReference(appliance.GetEndpoint("ssh")).WaitFor(appliance);
+
+    // The VM as a consumer: the same references, delivered to /etc/aspire.env in the guest
+    // over hvsocket. The web endpoint is a DCP proxy that listens from AppHost start, so the
+    // VM can resolve it even though web itself waits for this VM.
+    if (consumeWeb)
+    {
+        appliance
+            .WithReference(web.GetEndpoint("http"))
+            .WithEnvironment("BIND_DEMO", "127.0.0.1:9999");
+    }
 }
 
 // ---- Windows VM (opt-in) --------------------------------------------------------------------

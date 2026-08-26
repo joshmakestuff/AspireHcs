@@ -154,6 +154,6 @@ internal static class HcsCtlVirtualMachines
     /// Formats a duration the way Go's <c>time.ParseDuration</c> reads it. Seconds only; .NET's
     /// own round-trip formats are not durations hcsctl accepts.
     /// </summary>
-    private static string FormatDuration(TimeSpan timeout)
+    internal static string FormatDuration(TimeSpan timeout)
         => $"{Math.Max(1, (long)Math.Ceiling(timeout.TotalSeconds)).ToString(CultureInfo.InvariantCulture)}s";
 }
