@@ -27,7 +27,7 @@ internal static class ConnectCommands
             // Interactivity and state are read per click, not captured at model-build time.
             context => Task.FromResult(Execute(
                 resource, endpointName, "an SSH session", Environment.UserInteractive,
-                CurrentState(context.ServiceProvider, context.ResourceName),
+                CurrentState(context.Services, context.ResourceName),
                 allocated => BuildSshStartInfo(allocated.Address, allocated.Port, userName),
                 ShellExecute)),
             new CommandOptions
@@ -50,7 +50,7 @@ internal static class ConnectCommands
             "Connect (RDP)",
             context => Task.FromResult(Execute(
                 resource, endpointName, "a Remote Desktop session", Environment.UserInteractive,
-                CurrentState(context.ServiceProvider, context.ResourceName),
+                CurrentState(context.Services, context.ResourceName),
                 allocated => BuildRdpStartInfo(resource, endpointName, allocated.Address, allocated.Port, userName),
                 ShellExecute)),
             new CommandOptions
@@ -186,11 +186,11 @@ internal static class ConnectCommands
     /// <summary>
     /// Rewritten on every click; the guest's address changes across restarts. The file is not
     /// deleted afterwards: mstsc reads it asynchronously after launch. It holds only an address
-    /// and a user name.
+    /// and a user name. The directory follows <c>ASPIREHCS_TEMP</c> when set.
     /// </summary>
     internal static string RdpFilePath(HcsVirtualMachineResource resource, string endpointName)
     {
-        string directory = Path.Combine(Path.GetTempPath(), "AspireHcs", "connect");
+        string directory = Path.Combine(AspireHcsEnvironment.TempDirectory, "connect");
         string path = Path.GetFullPath(Path.Combine(directory, $"{resource.VmId}-{endpointName}.rdp"));
 
         // The endpoint name becomes part of a file name. This asserts that the file lands

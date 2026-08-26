@@ -63,7 +63,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
                 command.UpdateState(new UpdateCommandStateContext
                 {
                     ResourceSnapshot = running.Snapshot,
-                    ServiceProvider = app.Services,
+                    Services = app.Services,
                 }));
 
             // 3389 accepting a connection from the host proves the guest serves Remote Desktop
@@ -172,7 +172,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
             ResourceCommandAnnotation command = vm.Annotations.OfType<ResourceCommandAnnotation>()
                 .Single(a => a.Name == ConnectCommands.SshCommandName);
             ResourceCommandState state = command.UpdateState(
-                new UpdateCommandStateContext { ResourceSnapshot = running.Snapshot, ServiceProvider = app.Services });
+                new UpdateCommandStateContext { ResourceSnapshot = running.Snapshot, Services = app.Services });
             Assert.Equal(ResourceCommandState.Enabled, state);
 
             // The product's own argument list, verbatim.

@@ -392,7 +392,7 @@ public class ConnectCommandTests
             State = state is null ? null : new ResourceStateSnapshot(state, null),
         };
 
-        return command.UpdateState(new UpdateCommandStateContext { ResourceSnapshot = snapshot, ServiceProvider = null! });
+        return command.UpdateState(new UpdateCommandStateContext { ResourceSnapshot = snapshot, Services = null! });
     }
 
     private static IResourceBuilder<HcsVirtualMachineResource> Vm()

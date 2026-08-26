@@ -396,7 +396,7 @@ internal sealed class HcsVmInstance(
             // this, WaitFor(...) on an HCS VM would never hold the boot back.
             await eventing.PublishAsync(new BeforeResourceStartedEvent(resource, services), stopping).ConfigureAwait(false);
 
-            HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath);
+            HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath ?? AspireHcsEnvironment.DefaultStorePath);
 
             HcsCtlInfoDocument info = await hcsctl.GetInfoAsync(stopping).ConfigureAwait(false);
             if (HcsCtlPreflight.DescribeBlocker(info) is { } blocker)
