@@ -90,7 +90,7 @@ public class HcsCtlContractTests
         // passed; the same fixture hcsctl uses to exercise exit 1 without HCS.
         string store = EmptyStorePath();
         Directory.CreateDirectory(Path.Combine(store, "images"));
-        await File.WriteAllTextAsync(Path.Combine(store, "images", "x.json"), "not json");
+        await File.WriteAllTextAsync(Path.Combine(store, "images", RepositoryTools.RecordFileName("x")), "not json");
 
         HcsCtlCommandException thrown = await Assert.ThrowsAsync<HcsCtlCommandException>(
             () => hcsctl.InvokeAsync(["image", "rm", "--ref", "x", "--store", store],

@@ -27,7 +27,7 @@ public class HcsCtlStoreTests
     {
         string store = Path.Combine(Directory.CreateTempSubdirectory("aspirehcs-store").FullName, "store");
         Directory.CreateDirectory(Path.Combine(store, "images"));
-        File.WriteAllText(Path.Combine(store, "images", "x.json"), "not json");
+        File.WriteAllText(Path.Combine(store, "images", RepositoryTools.RecordFileName("x")), "not json");
         return store;
     }
 
@@ -87,6 +87,12 @@ public class HcsCtlStoreTests
         string? store = Environment.GetEnvironmentVariable(PreparedStoreVariable);
         Skip.If(string.IsNullOrWhiteSpace(store),
             $"Set {PreparedStoreVariable} to a prepared hcsctl store (see AspireHcs#39) to run this.");
+
+        // The claim is about an unelevated token (info.Elevated is asserted false below), so an
+        // elevated run cannot exercise it.
+        Skip.If(new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent())
+                .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator),
+            "This process is elevated; re-run unelevated to measure the unelevated read path.");
 
         HcsCtl hcsctl = new(RequireBinary(), store);
         HcsCtlInfoDocument info = await hcsctl.GetInfoAsync();

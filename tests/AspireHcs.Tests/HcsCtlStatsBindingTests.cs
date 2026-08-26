@@ -5,48 +5,64 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// The statistics and process documents are hcsshim structs marshalled straight through, so their
-// wire names come from hcsshim's tags, not from hcsctl and not from the Go field names, which
-// differ (the field is UsageCommitBytes; the wire name is MemoryUsageCommitBytes).
+// Contract 3: `container stats` passes the raw v2 HCS property reply through under
+// "statistics" — an envelope of system identity fields with the counters nested one level
+// down, under "Statistics". `container ps` re-emits hcsctl's typed rows, five fields each,
+// always present. The PascalCase names inside "statistics" are HCS's, not hcsctl's.
 //
-// Every payload below was captured verbatim from a live container.
+// Every payload below was captured verbatim from a live unelevated hyperv container
+// (nanoserver:ltsc2025, hcsctl v0.5.0, 2026-08-25); the process list is a subset of the
+// captured rows, each row unmodified.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlStatsBindingTests
 {
-    // Captured from `hcsctl container stats --json` against a running servercore container with
-    // a NAT endpoint. Processor carries only TotalRuntime100ns: the user/kernel splits were zero
-    // and every field is omitempty.
+    // Captured from `hcsctl container stats --json` against a running container with no
+    // endpoint. Processor carries only TotalRuntime100ns: HCS omits zero counters. Network is
+    // an EMPTY array even so — the schema-1 per-endpoint counters did not survive into v2, so
+    // nothing binds it.
     private const string LiveStats = """
         {
           "command": "container stats",
-          "id": "stats-net",
+          "id": "m91",
           "ok": true,
           "statistics": {
-            "Timestamp": "2026-08-07T16:40:20.4091491Z",
-            "ContainerStartTime": "2026-08-07T16:40:17.3530983Z",
-            "Uptime100ns": 30560508,
-            "Memory": {
-              "MemoryUsageCommitBytes": 1089224704,
-              "MemoryUsageCommitPeakBytes": 2156318720,
-              "MemoryUsagePrivateWorkingSetBytes": 366006272
+            "Id": "m91",
+            "SystemType": "Container",
+            "RuntimeOsType": "Windows",
+            "Name": "m91",
+            "Owner": "hcsctl",
+            "RuntimeId": "e104557f-d094-4ad1-9786-781da77eb6fd",
+            "RuntimeImagePath": "E:\\source\\repos\\hcs\\hcsspike\\store-aspire91\\layers\\dde2700babae600587126dee2c652b3dfa6a0f51e1112fc1585d87f87ca09272\\UtilityVM",
+            "State": "Running",
+            "Statistics": {
+              "Timestamp": "2026-08-25T23:32:19.0685861Z",
+              "ContainerStartTime": "2026-08-25T23:32:10.7938384Z",
+              "Uptime100ns": 82747477,
+              "Processor": {
+                "TotalRuntime100ns": 25549260
+              },
+              "Memory": {
+                "MemoryUsageCommitBytes": 1626234880,
+                "MemoryUsageCommitPeakBytes": 1626234880,
+                "MemoryUsagePrivateWorkingSetBytes": 376479744
+              },
+              "Storage": {
+                "ReadCountNormalized": 17120,
+                "ReadSizeBytes": 118282240,
+                "WriteCountNormalized": 233,
+                "WriteSizeBytes": 1570816
+              },
+              "Network": []
             },
-            "Processor": { "TotalRuntime100ns": 17454902 },
-            "Storage": {
-              "ReadCountNormalized": 159,
-              "ReadSizeBytes": 1007616,
-              "WriteCountNormalized": 20,
-              "WriteSizeBytes": 155648
+            "MemoryTopology": {
+              "AccessTrackingEnabled": false,
+              "HardwareAccessTrackingSupported": false,
+              "DeviceAccessTrackingSupported": false,
+              "AccessTrackingRangeSizeInPages": 0,
+              "AccessTrackingBitmapSizeInBits": 0,
+              "GpaMappingSizeInPages": 0
             },
-            "Network": [
-              {
-                "BytesReceived": 56402,
-                "BytesSent": 5787,
-                "PacketsReceived": 51,
-                "PacketsSent": 58,
-                "EndpointId": "918169B1-1264-4B26-9CB5-4988CE1DC3E0",
-                "InstanceId": "C917E626-C251-4BEC-99CA-53C4C856EA43"
-              }
-            ]
+            "ServiceSessionId": 1
           }
         }
         """;
@@ -57,19 +73,17 @@ public class HcsCtlStatsBindingTests
         HcsCtlStatsDocument document = JsonSerializer.Deserialize(LiveStats, HcsCtlJsonContext.Default.HcsCtlStatsDocument)!;
 
         Assert.True(document.Ok);
-        HcsCtlStatistics stats = Assert.IsType<HcsCtlStatistics>(document.Statistics);
+        HcsCtlStatistics stats = Assert.IsType<HcsCtlStatistics>(document.Properties!.Statistics);
 
-        Assert.Equal(30560508, stats.Uptime100ns);
-        Assert.Equal(1089224704, stats.Memory!.CommitBytes);
-        Assert.Equal(2156318720, stats.Memory.CommitPeakBytes);
-        Assert.Equal(366006272, stats.Memory.PrivateWorkingSetBytes);
-        Assert.Equal(17454902, stats.Processor!.TotalRuntime100ns);
-        Assert.Equal(159, stats.Storage!.ReadCount);
-        Assert.Equal(155648, stats.Storage.WriteBytes);
-
-        HcsCtlNetworkStats network = Assert.Single(stats.Network);
-        Assert.Equal(56402, network.BytesReceived);
-        Assert.Equal(5787, network.BytesSent);
+        Assert.Equal(82747477, stats.Uptime100ns);
+        Assert.Equal(1626234880, stats.Memory!.CommitBytes);
+        Assert.Equal(1626234880, stats.Memory.CommitPeakBytes);
+        Assert.Equal(376479744, stats.Memory.PrivateWorkingSetBytes);
+        Assert.Equal(25549260, stats.Processor!.TotalRuntime100ns);
+        Assert.Equal(17120, stats.Storage!.ReadCount);
+        Assert.Equal(118282240, stats.Storage.ReadBytes);
+        Assert.Equal(233, stats.Storage.WriteCount);
+        Assert.Equal(1570816, stats.Storage.WriteBytes);
     }
 
     // HCS reports 100-nanosecond ticks, which is also .NET's TimeSpan tick.
@@ -78,49 +92,71 @@ public class HcsCtlStatsBindingTests
     {
         HcsCtlStatsDocument document = JsonSerializer.Deserialize(LiveStats, HcsCtlJsonContext.Default.HcsCtlStatsDocument)!;
 
-        // 30,560,508 ticks x 100 ns = 3.056 s, and the capture was taken ~3 s after start.
-        Assert.Equal(3.0560508, document.Statistics!.Uptime.TotalSeconds, precision: 4);
+        // 82,747,477 ticks x 100 ns = 8.27 s, and the capture was taken ~8 s after start.
+        Assert.Equal(8.2747477, document.Properties!.Statistics!.Uptime.TotalSeconds, precision: 4);
     }
 
-    // A container with no endpoint has no Network key at all. Binding it to null would NRE the
-    // property formatter.
+    // HCS omits zero counters inside Statistics, so a sparse reply must bind with nulls and
+    // zeros, not fail or NRE the property formatter.
     [Fact]
-    public void A_container_with_no_network_binds_to_an_empty_collection()
+    public void A_sparse_statistics_reply_binds_with_defaults()
     {
-        const string noNetwork = """
-            {"ok":true,"id":"c","statistics":{"Uptime100ns":20657106,"Memory":{"MemoryUsageCommitBytes":1088274432}}}
+        const string sparse = """
+            {"ok":true,"id":"c","statistics":{"Id":"c","State":"Running","Statistics":{"Uptime100ns":20657106,"Memory":{"MemoryUsageCommitBytes":1088274432}}}}
             """;
 
-        HcsCtlStatsDocument document = JsonSerializer.Deserialize(noNetwork, HcsCtlJsonContext.Default.HcsCtlStatsDocument)!;
+        HcsCtlStatsDocument document = JsonSerializer.Deserialize(sparse, HcsCtlJsonContext.Default.HcsCtlStatsDocument)!;
 
-        Assert.Empty(document.Statistics!.Network);
-        Assert.Null(document.Statistics.Storage);
-        Assert.Equal(0, document.Statistics.Processor?.TotalRuntime100ns ?? 0);
+        HcsCtlStatistics stats = document.Properties!.Statistics!;
+        Assert.Null(stats.Storage);
+        Assert.Equal(0, stats.Processor?.TotalRuntime100ns ?? 0);
+        Assert.Equal(1088274432, stats.Memory!.CommitBytes);
     }
 
-    // Captured from `hcsctl container ps --json`. Two rows: one with both CPU fields present, one
-    // with neither; omitempty means a zero counter is an absent key.
+    // The envelope can arrive without a Statistics object at all (a reply for a system that is
+    // not running). The consumer's `Properties?.Statistics is { }` guard depends on null here.
+    [Fact]
+    public void An_envelope_without_statistics_binds_to_null()
+    {
+        const string headerOnly = """
+            {"ok":true,"id":"c","statistics":{"Id":"c","SystemType":"Container","State":"Stopped"}}
+            """;
+
+        HcsCtlStatsDocument document = JsonSerializer.Deserialize(headerOnly, HcsCtlJsonContext.Default.HcsCtlStatsDocument)!;
+
+        Assert.NotNull(document.Properties);
+        Assert.Null(document.Properties.Statistics);
+    }
+
+    // Captured from `hcsctl container ps --json` (three of the seventeen captured rows). All
+    // five fields are always present — hcsctl re-marshals its typed row, so a zero counter is
+    // an explicit 0, not an absent key.
     private const string LiveProcesses = """
         {
           "command": "container ps",
-          "id": "stats-probe",
+          "id": "m91",
           "ok": true,
           "processes": [
             {
-              "CreateTimestamp": "2026-08-07T16:39:41.9911421Z",
-              "ImageName": "fontdrvhost.exe",
-              "MemoryCommitBytes": 954368,
-              "MemoryWorkingSetPrivateBytes": 536576,
-              "MemoryWorkingSetSharedBytes": 2691072,
-              "ProcessId": 240
+              "ProcessId": 344,
+              "ImageName": "smss.exe",
+              "UserTime100ns": 156250,
+              "KernelTime100ns": 156250,
+              "MemoryCommitBytes": 667648
             },
             {
-              "CreateTimestamp": "2026-08-07T16:39:41.6164725Z",
+              "ProcessId": 588,
               "ImageName": "csrss.exe",
-              "KernelTime100ns": 468750,
-              "MemoryCommitBytes": 2326528,
-              "ProcessId": 292,
-              "UserTime100ns": 156250
+              "UserTime100ns": 0,
+              "KernelTime100ns": 0,
+              "MemoryCommitBytes": 1359872
+            },
+            {
+              "ProcessId": 704,
+              "ImageName": "lsass.exe",
+              "UserTime100ns": 781250,
+              "KernelTime100ns": 625000,
+              "MemoryCommitBytes": 3133440
             }
           ]
         }
@@ -132,23 +168,21 @@ public class HcsCtlStatsBindingTests
         HcsCtlProcessListDocument document =
             JsonSerializer.Deserialize(LiveProcesses, HcsCtlJsonContext.Default.HcsCtlProcessListDocument)!;
 
-        Assert.Equal(2, document.Processes.Count);
+        Assert.Equal(3, document.Processes.Count);
 
-        HcsCtlGuestProcess csrss = document.Processes.Single(p => p.ProcessId == 292);
-        Assert.Equal("csrss.exe", csrss.ImageName);
-        Assert.Equal(2326528, csrss.MemoryCommitBytes);
-        Assert.Equal(TimeSpan.FromTicks(468750 + 156250), csrss.CpuTime);
+        HcsCtlGuestProcess lsass = document.Processes.Single(p => p.ProcessId == 704);
+        Assert.Equal("lsass.exe", lsass.ImageName);
+        Assert.Equal(3133440, lsass.MemoryCommitBytes);
+        Assert.Equal(TimeSpan.FromTicks(781250 + 625000), lsass.CpuTime);
     }
 
-    // A process with no CPU counters must read as zero, not as missing data. Both keys are absent
-    // on the first row above.
     [Fact]
-    public void A_process_with_no_cpu_counters_reads_as_zero()
+    public void A_process_with_zero_cpu_counters_reads_as_zero()
     {
         HcsCtlProcessListDocument document =
             JsonSerializer.Deserialize(LiveProcesses, HcsCtlJsonContext.Default.HcsCtlProcessListDocument)!;
 
-        Assert.Equal(TimeSpan.Zero, document.Processes.Single(p => p.ProcessId == 240).CpuTime);
+        Assert.Equal(TimeSpan.Zero, document.Processes.Single(p => p.ProcessId == 588).CpuTime);
     }
 
     // HCS reports no parent process id, so the list is flat and cannot be made a tree. If a

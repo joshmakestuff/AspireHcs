@@ -109,8 +109,8 @@ internal sealed record HcsCtlImageInfo
     public string? OsVersion { get; init; }
 
     /// <summary>
-    /// AspireHcs does not act on it. Process isolation is out of scope, and hcsctl does not
-    /// implement it.
+    /// AspireHcs does not act on it. Process isolation is out of scope here — it needs an
+    /// elevated create, which the unelevated dev loop does not have.
     /// </summary>
     [JsonPropertyName("processIsolationCompatible")]
     public bool ProcessIsolationCompatible { get; init; }
@@ -274,13 +274,12 @@ internal sealed record HcsCtlExecDocument
     public string? Output { get; init; }
 }
 
-// The statistics and process documents are hcsshim structs marshalled straight through, so their
-// names are PascalCase and come from hcsshim's tags, not hcsctl's. The wire names differ from the
-// Go field names: the Go field is `UsageCommitBytes` but the wire name is
-// `MemoryUsageCommitBytes`.
+// The statistics document is a raw v2 HCS property passthrough (contract 3): hcsctl asks HCS
+// for the Statistics property and puts the whole reply, unmodified, under "statistics". The
+// names inside are PascalCase because they are HCS's, not hcsctl's. HCS omits zero counters,
+// so an absent key and zero mean the same thing and every numeric defaults to zero.
 //
-// Fields are `omitempty` throughout, so a zero counter is an ABSENT key. Absent and zero mean the
-// same thing here, so every numeric is nullable or defaults to zero.
+// There is no network section: the schema-1 per-endpoint counters did not survive into v2.
 
 /// <summary><c>hcsctl container stats</c>.</summary>
 internal sealed record HcsCtlStatsDocument
@@ -291,7 +290,18 @@ internal sealed record HcsCtlStatsDocument
     [JsonPropertyName("id")]
     public string? Id { get; init; }
 
+    /// <summary>The raw v2 property reply. The counters are one level down, under Statistics.</summary>
     [JsonPropertyName("statistics")]
+    public HcsCtlContainerProperties? Properties { get; init; }
+}
+
+/// <summary>
+/// The v2 property reply's envelope. It carries system identity fields (Id, SystemType, State…)
+/// that AspireHcs does not read; only the nested Statistics object is bound.
+/// </summary>
+internal sealed record HcsCtlContainerProperties
+{
+    [JsonPropertyName("Statistics")]
     public HcsCtlStatistics? Statistics { get; init; }
 }
 
@@ -316,10 +326,6 @@ internal sealed record HcsCtlStatistics
 
     [JsonPropertyName("Storage")]
     public HcsCtlStorageStats? Storage { get; init; }
-
-    /// <summary>One entry per endpoint. Absent entirely on a container with no network.</summary>
-    [JsonPropertyName("Network")]
-    public IReadOnlyList<HcsCtlNetworkStats> Network { get => field ?? []; init; } = [];
 
     /// <summary>Uptime as a duration. HCS ticks are 100 ns, so this is ticks × 100 ns.</summary>
     public TimeSpan Uptime => TimeSpan.FromTicks(Uptime100ns);
@@ -366,24 +372,6 @@ internal sealed record HcsCtlStorageStats
     public long WriteBytes { get; init; }
 }
 
-internal sealed record HcsCtlNetworkStats
-{
-    [JsonPropertyName("EndpointId")]
-    public string? EndpointId { get; init; }
-
-    [JsonPropertyName("BytesReceived")]
-    public long BytesReceived { get; init; }
-
-    [JsonPropertyName("BytesSent")]
-    public long BytesSent { get; init; }
-
-    [JsonPropertyName("PacketsReceived")]
-    public long PacketsReceived { get; init; }
-
-    [JsonPropertyName("PacketsSent")]
-    public long PacketsSent { get; init; }
-}
-
 /// <summary><c>hcsctl container ps</c> — what is running inside the guest.</summary>
 internal sealed record HcsCtlProcessListDocument
 {
@@ -398,7 +386,8 @@ internal sealed record HcsCtlProcessListDocument
 }
 
 /// <summary>
-/// One process inside the guest.
+/// One process inside the guest. Contract 3 reports exactly these five fields, always present:
+/// hcsctl parses the v2 ProcessList property into a typed row and re-emits it.
 /// </summary>
 /// <remarks>
 /// <b>There is no parent process id.</b> HCS does not report one, so this is a flat list and
@@ -412,17 +401,8 @@ internal sealed record HcsCtlGuestProcess
     [JsonPropertyName("ImageName")]
     public string? ImageName { get; init; }
 
-    [JsonPropertyName("CreateTimestamp")]
-    public DateTimeOffset? CreatedAt { get; init; }
-
     [JsonPropertyName("MemoryCommitBytes")]
     public long MemoryCommitBytes { get; init; }
-
-    [JsonPropertyName("MemoryWorkingSetPrivateBytes")]
-    public long WorkingSetPrivateBytes { get; init; }
-
-    [JsonPropertyName("MemoryWorkingSetSharedBytes")]
-    public long WorkingSetSharedBytes { get; init; }
 
     [JsonPropertyName("KernelTime100ns")]
     public long KernelTime100ns { get; init; }
@@ -430,7 +410,7 @@ internal sealed record HcsCtlGuestProcess
     [JsonPropertyName("UserTime100ns")]
     public long UserTime100ns { get; init; }
 
-    /// <summary>Kernel plus user time. Both are omitted from the wire when zero.</summary>
+    /// <summary>Kernel plus user time.</summary>
     public TimeSpan CpuTime => TimeSpan.FromTicks(KernelTime100ns + UserTime100ns);
 }
 

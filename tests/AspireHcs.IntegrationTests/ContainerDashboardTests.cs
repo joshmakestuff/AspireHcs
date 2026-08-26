@@ -81,6 +81,11 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
             await app.StartAsync(cts.Token);
             await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
 
+            // Running is the resource's state, not the workload's: the guest process is created
+            // asynchronously after it, and pausing inside that window kills the workload create
+            // (AspireHcs#74). The premise here is a RUNNING ping accruing CPU, so wait for it.
+            await ContainerFixture.WaitForGuestProcessAsync(hcsctl, store, app, "ping.exe", cts.Token);
+
             ResourceCommandService commands = app.Services.GetRequiredService<ResourceCommandService>();
 
             ExecuteCommandResult paused = await commands.ExecuteCommandAsync("worker", "container-pause", cts.Token);
@@ -148,8 +153,12 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
             hcsctl, cancellationToken, "container", "stats", "--id", id, "--store", store);
 
         using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(json);
+        // Contract 3: "statistics" is the raw v2 property reply; the counters sit one level
+        // down, under "Statistics". A paused container still reports Processor, so no
+        // absent-key tolerance is needed here.
         return document.RootElement
             .GetProperty("statistics")
+            .GetProperty("Statistics")
             .GetProperty("Processor")
             .GetProperty("TotalRuntime100ns")
             .GetInt64();

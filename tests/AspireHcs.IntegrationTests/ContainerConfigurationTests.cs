@@ -153,7 +153,9 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
 
     /// <summary>
     /// Pulls the "total bytes" figure out of <c>fsutil volume diskfree</c>. Its output carries
-    /// three byte counts with localized labels; total is the largest of free, total and avail.
+    /// several byte counts with localized labels; total is the largest of them. Newer builds
+    /// (ltsc2025) append a humanized figure — "42,814,382,080 (39.9 GB)" — so the value ends at
+    /// the opening parenthesis; folding its digits in would inflate the count a thousandfold.
     /// </summary>
     private static long ParseTotalBytes(string logs)
     {
@@ -166,10 +168,17 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
                 continue;
             }
 
-            string digits = new([.. line[(colon + 1)..].Where(char.IsAsciiDigit)]);
-            if (digits.Length > 0 && long.TryParse(digits, out long value))
+            string value = line[(colon + 1)..];
+            int parenthesis = value.IndexOf('(');
+            if (parenthesis >= 0)
             {
-                largest = Math.Max(largest, value);
+                value = value[..parenthesis];
+            }
+
+            string digits = new([.. value.Where(char.IsAsciiDigit)]);
+            if (digits.Length > 0 && long.TryParse(digits, out long parsed))
+            {
+                largest = Math.Max(largest, parsed);
             }
         }
 
