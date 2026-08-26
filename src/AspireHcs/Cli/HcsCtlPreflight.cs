@@ -7,7 +7,7 @@ namespace AspireHcs.Cli;
 internal static class HcsCtlPreflight
 {
     /// <summary>The one wire-contract version AspireHcs understands. Exact string match, not numeric.</summary>
-    public const string SupportedContractVersion = "1";
+    public const string SupportedContractVersion = "3";
 
     /// <summary>Services that must be running before any compute system can be created.</summary>
     private static readonly string[] RequiredServices = ["vmcompute", "hvhost"];

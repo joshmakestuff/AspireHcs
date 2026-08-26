@@ -46,6 +46,18 @@ internal static class RepositoryTools
         return false;
     }
 
+    /// <summary>
+    /// The file name hcsctl's store gives a record for <paramref name="reference"/>: the
+    /// sanitized reference plus the first eight bytes of its SHA-256, lowercase hex. Mirrored
+    /// here so a test can plant a record where hcsctl will actually look.
+    /// </summary>
+    public static string RecordFileName(string reference)
+    {
+        string safe = reference.Replace('/', '_').Replace(':', '_').Replace('@', '_').Replace('\\', '_');
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(reference));
+        return $"{safe}-{Convert.ToHexStringLower(hash.AsSpan(0, 8))}.json";
+    }
+
     private static bool TryFindRepositoryRoot([NotNullWhen(true)] out string? root)
     {
         for (DirectoryInfo? directory = new(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)

@@ -175,6 +175,36 @@ internal static class ContainerFixture
         return stdout;
     }
 
+    /// <summary>
+    /// Polls <c>container ps</c> until a guest process with the given image name exists. A test
+    /// that manipulates a running workload (pause, kill) must first see it actually running:
+    /// the resource reports Running before the workload's guest process is created, and pausing
+    /// inside that window freezes the guest first — the workload's HcsCreateProcess then fails
+    /// 0x80370105 and the workload is marked exited (AspireHcs#74).
+    /// </summary>
+    public static async Task WaitForGuestProcessAsync(
+        string hcsctl, string store, DistributedApplication app, string imageName, CancellationToken cancellationToken)
+    {
+        string id = ContainerIdOf(app);
+        while (true)
+        {
+            string json = await RunHcsCtlJsonAsync(hcsctl, cancellationToken, "container", "ps", "--id", id, "--store", store);
+            using (JsonDocument document = JsonDocument.Parse(json))
+            {
+                if (document.RootElement.TryGetProperty("processes", out JsonElement processes)
+                    && processes.ValueKind == JsonValueKind.Array
+                    && processes.EnumerateArray().Any(p =>
+                        p.TryGetProperty("ImageName", out JsonElement name)
+                        && string.Equals(name.GetString(), imageName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return;
+                }
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+        }
+    }
+
     /// <summary>Asks hcsctl directly what containers exist.</summary>
     public static async Task<string[]> ListContainerIdsAsync(string hcsctl, string store, CancellationToken cancellationToken)
     {

@@ -40,14 +40,17 @@ public class HcsCtlPreflightTests
     }
 
     // The contract gate runs before every other rule: without a recognized contractVersion the
-    // document shape is unknown, so no service or group check is safe to interpret. "1" is the
-    // only supported value and is covered by A_healthy_unelevated_host_has_no_blocker above.
+    // document shape is unknown, so no service or group check is safe to interpret. "3" is the
+    // only supported value and is covered by A_healthy_unelevated_host_has_no_blocker above;
+    // earlier contracts are rejected, not tolerated — their document shapes differ.
     [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
     [InlineData("0")]
+    [InlineData("1")]
     [InlineData("2")]
+    [InlineData("4")]
     public void An_unknown_or_missing_contract_version_is_a_blocker(string? contractVersion)
     {
         Assert.NotNull(HcsCtlPreflight.DescribeBlocker(Healthy(contractVersion: contractVersion)));

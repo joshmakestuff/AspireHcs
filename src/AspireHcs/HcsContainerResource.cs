@@ -22,9 +22,9 @@ internal readonly record struct HcsContainerMount(string Source, string Target, 
 /// and torn down when it exits, with leftovers from a crashed run scavenged on the next one.
 /// </summary>
 /// <remarks>
-/// Hyper-V isolation is the only mode. Process isolation needs an enabled
-/// <c>BUILTIN\Administrators</c> SID at <c>PrepareLayer</c>, which runs at <em>every</em>
-/// container start; no user-rights assignment satisfies that check in a UAC-filtered token.
+/// Hyper-V isolation is the only mode. Process isolation needs elevation at container create —
+/// the scratch attach mounts no volume from an unelevated token — and the unelevated dev loop
+/// this integration targets rules that out.
 /// </remarks>
 public sealed class HcsContainerResource([ResourceName] string name)
     : Resource(name), IResourceWithEndpoints, IResourceWithConnectionString, IResourceWithEnvironment

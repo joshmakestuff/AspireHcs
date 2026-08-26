@@ -42,9 +42,9 @@ hcsctl image pull   --ref <ref> --store <dir>
 hcsctl image import --ref <ref> --store <dir>   # elevated, once per image
 ```
 
-**Hyper-V isolation is the only container mode.** Process isolation needs an enabled
-`BUILTIN\Administrators` SID at `PrepareLayer` on every container start, which a UAC-filtered
-token does not have; AspireHcs refuses it at model-build time.
+**Hyper-V isolation is the only container mode.** Process isolation needs an elevated token at
+container create, which the unelevated dev loop does not have; AspireHcs refuses it at
+model-build time. Hyper-V isolation runs fully unelevated.
 
 A container has no guest-kernel readiness signal. Without `WithTcpHealthCheck()` it is declared
 ready as soon as it reports Running, before anything inside it is listening.

@@ -408,9 +408,12 @@ internal sealed class HcsContainerInstance(
             string network = resource.NetworkName ?? throw new InvalidOperationException(
                 $"Resource '{resource.Name}' declares endpoints but no network; add WithNetwork().");
 
-            string endpointId = created.Endpoint ?? throw new InvalidOperationException(
-                $"Resource '{resource.Name}' is on network '{network}' but hcsctl reported no " +
-                "endpoint for the container, so its address can never be discovered.");
+            // Contract 3 reports "no endpoint" as an empty string, not a missing key.
+            string endpointId = string.IsNullOrEmpty(created.Endpoint)
+                ? throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' is on network '{network}' but hcsctl reported no " +
+                    "endpoint for the container, so its address can never be discovered.")
+                : created.Endpoint;
 
             address = await WaitForLeasedAddressAsync(
                 token => hcsctl.ListEndpointsAsync(network, token),
@@ -509,7 +512,7 @@ internal sealed class HcsContainerInstance(
                     .StatsAsync(resource.ContainerId, cancellationToken)
                     .ConfigureAwait(false);
 
-                if (stats.Statistics is { } s)
+                if (stats.Properties?.Statistics is { } s)
                 {
                     await notifications.PublishUpdateAsync(resource, snapshot => snapshot with
                     {
@@ -574,14 +577,8 @@ internal sealed class HcsContainerInstance(
             properties.Add(new("hcs.storage.write", $"{storage.WriteCount} ops, {FormatBytes(storage.WriteBytes)}"));
         }
 
-        // Indexed: a container can carry more than one endpoint.
-        for (int i = 0; i < stats.Network.Count; i++)
-        {
-            HcsCtlNetworkStats network = stats.Network[i];
-            string suffix = stats.Network.Count == 1 ? "" : $".{i}";
-            properties.Add(new($"hcs.network{suffix}.received", FormatBytes(network.BytesReceived)));
-            properties.Add(new($"hcs.network{suffix}.sent", FormatBytes(network.BytesSent)));
-        }
+        // No network counters: the schema-1 per-endpoint section did not survive into the v2
+        // statistics this contract passes through.
 
         return [.. properties];
     }
