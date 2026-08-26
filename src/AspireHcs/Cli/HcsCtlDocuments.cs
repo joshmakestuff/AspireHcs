@@ -206,6 +206,127 @@ internal sealed record HcsCtlNetworkEndpointRow
     public string? MacAddress { get; init; }
 }
 
+/// <summary><c>hcsctl network ls</c> — the host's HNS networks, read live from HCN.</summary>
+internal sealed record HcsCtlNetworkListDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("networks")]
+    public IReadOnlyList<HcsCtlNetworkRow> Networks { get => field ?? []; init; } = [];
+}
+
+/// <summary>One HNS network.</summary>
+internal sealed record HcsCtlNetworkRow
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    /// <summary>HNS's network flavor: <c>ICS</c>, <c>NAT</c>, <c>Transparent</c>, ...</summary>
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+
+    /// <summary>CIDR strings, e.g. <c>172.18.176.0/20</c>. Empty for a Transparent network.</summary>
+    [JsonPropertyName("subnets")]
+    public IReadOnlyList<string> Subnets { get => field ?? []; init; } = [];
+
+    [JsonPropertyName("endpoints")]
+    public int EndpointCount { get; init; }
+}
+
+/// <summary>
+/// <c>hcsctl network inspect</c> — one network in full. Only the parts AspireHcs reads are
+/// bound; the document carries more (policies, DNS, flags).
+/// </summary>
+internal sealed record HcsCtlNetworkInspectDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+
+    [JsonPropertyName("ipams")]
+    public IReadOnlyList<HcsCtlNetworkIpam> Ipams { get => field ?? []; init; } = [];
+}
+
+/// <summary>One IPAM block: how addresses on the network are assigned.</summary>
+internal sealed record HcsCtlNetworkIpam
+{
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+
+    [JsonPropertyName("subnets")]
+    public IReadOnlyList<HcsCtlNetworkSubnet> Subnets { get => field ?? []; init; } = [];
+}
+
+/// <summary>One subnet with its routes.</summary>
+internal sealed record HcsCtlNetworkSubnet
+{
+    /// <summary>CIDR, e.g. <c>172.18.176.0/20</c>.</summary>
+    [JsonPropertyName("prefix")]
+    public string? Prefix { get; init; }
+
+    [JsonPropertyName("routes")]
+    public IReadOnlyList<HcsCtlNetworkRoute> Routes { get => field ?? []; init; } = [];
+}
+
+/// <summary>
+/// One route. The default route's next hop is the gateway a guest reaches the host through —
+/// HCN stores it here, not as a property of the prefix.
+/// </summary>
+internal sealed record HcsCtlNetworkRoute
+{
+    [JsonPropertyName("nextHop")]
+    public string? NextHop { get; init; }
+
+    [JsonPropertyName("destinationPrefix")]
+    public string? DestinationPrefix { get; init; }
+
+    [JsonPropertyName("metric")]
+    public int Metric { get; init; }
+}
+
+/// <summary><c>hcsctl guest exec</c> — one command run inside a VM guest, over hvsocket.</summary>
+internal sealed record HcsCtlGuestExecDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("vmId")]
+    public string? VmId { get; init; }
+
+    /// <summary>The command line that ran, echoed back for attribution.</summary>
+    [JsonPropertyName("ran")]
+    public string? Ran { get; init; }
+
+    /// <summary>
+    /// The guest process's own exit code — never hcsctl's, which reports the two separately for
+    /// exactly this reason. <c>-1</c> when the guest never produced one.
+    /// </summary>
+    [JsonPropertyName("exitCode")]
+    public int ExitCode { get; init; }
+
+    [JsonPropertyName("timedOut")]
+    public bool TimedOut { get; init; }
+
+    /// <summary>The agent's error text for a process that ended abnormally, when there is one.</summary>
+    [JsonPropertyName("detail")]
+    public string? Detail { get; init; }
+
+    [JsonPropertyName("elapsedMs")]
+    public long ElapsedMs { get; init; }
+}
+
 /// <summary><c>hcsctl container ls</c> — the store and HCS reconciled.</summary>
 internal sealed record HcsCtlContainerListDocument
 {
@@ -592,6 +713,9 @@ internal sealed record HcsCtlStreamRecord
 [JsonSerializable(typeof(HcsCtlContainerCreateDocument))]
 [JsonSerializable(typeof(HcsCtlContainerListDocument))]
 [JsonSerializable(typeof(HcsCtlNetworkEndpointsDocument))]
+[JsonSerializable(typeof(HcsCtlNetworkListDocument))]
+[JsonSerializable(typeof(HcsCtlNetworkInspectDocument))]
+[JsonSerializable(typeof(HcsCtlGuestExecDocument))]
 [JsonSerializable(typeof(HcsCtlExecDocument))]
 [JsonSerializable(typeof(HcsCtlStreamRecord))]
 [JsonSerializable(typeof(HcsCtlVmCreateDocument))]

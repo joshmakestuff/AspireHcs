@@ -27,7 +27,7 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
     /// The verb groups that reject <c>--store</c>; every other group accepts it, and passing it
     /// to one of these is exit 64. Pinned by <c>HcsCtlStoreTests</c>.
     /// </summary>
-    private static readonly string[] GroupsWithoutStore = ["network"];
+    private static readonly string[] GroupsWithoutStore = ["network", "guest"];
 
     private HcsCtlInfoDocument? _info;
 
