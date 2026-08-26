@@ -457,6 +457,12 @@ internal sealed class HcsVmInstance(
                 ThrowIfExitedMidBoot(boot);
             }
 
+            // After the lease (the guest is demonstrably up), before Running: a dependent that
+            // WaitFor's this VM must not be released while the reference values are still in
+            // flight. A VM with no environment skips this entirely — no agent required.
+            await DeliverEnvironmentAsync(hcsctl, stopping).ConfigureAwait(false);
+            ThrowIfExitedMidBoot(boot);
+
             // hcsctl has no verb that blocks until a compute system exits, so the exit watch is a
             // poll.
             StartExitWatch(boot, hcsctl, pumpCts.Token);
@@ -762,6 +768,79 @@ internal sealed class HcsVmInstance(
         {
             Urls = [.. s.Urls.Select(u => u with { IsInactive = false })],
         }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// How long the guest shell gets to write <c>/etc/aspire.env</c>. The write is one pipe into
+    /// one file; anything slower than this is a wedged guest, and an unbounded exec would wedge
+    /// the boot with it.
+    /// </summary>
+    private static readonly TimeSpan EnvironmentWriteTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Writes the resource's resolved environment — <c>WithReference</c> values included, with
+    /// host-loopback endpoints redirected through the relay — to <c>/etc/aspire.env</c> in the
+    /// guest, over hvsocket.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A VM has no create-time injection: nothing writes environment variables into a VHDX. So
+    /// the convention: once the guest is up, the values land in <c>/etc/aspire.env</c>, and a
+    /// workload reads the file when it starts. The stated caveat travels with it — a workload
+    /// that autostarts at boot may run before the file lands; one that reads the file when it
+    /// starts is correct today.
+    /// </para>
+    /// <para>
+    /// The transport needs the <c>hcsguest</c> agent in the image (the same prerequisite as
+    /// <c>hcsctl guest info</c>) but no NIC: hvsocket works on a networkless VM, which is why a
+    /// VM without <c>WithNetwork()</c> can still receive plain <c>WithEnvironment</c> values —
+    /// only host-loopback <em>references</em> are refused there, since the guest could not reach
+    /// the relay. The content crosses the guest's shell base64-encoded in a variable rather than
+    /// quoted into the command line, so no value can break out of the write. <c>/bin/sh</c> and
+    /// <c>base64</c> are assumed in the guest — the convention is for Linux guests today.
+    /// </para>
+    /// </remarks>
+    private async Task DeliverEnvironmentAsync(HcsCtl hcsctl, CancellationToken cancellationToken)
+    {
+        ResolvedGuestEnvironment resolved = await GuestEnvironment.ResolveAsync(
+            resource, services.GetRequiredService<DistributedApplicationExecutionContext>(), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (resolved.Values.Count == 0)
+        {
+            return;
+        }
+
+        IReadOnlyDictionary<string, string> environment = await GuestReferences.RedirectLoopbackAsync(
+            resource.Name,
+            resource.NetworkName,
+            resolved,
+            hcsctl.ListNetworksAsync,
+            (id, ct) => hcsctl.InspectNetworkAsync(id, ct),
+            services.GetRequiredService<DockerRelay>().EnsurePublishedAsync,
+            cancellationToken).ConfigureAwait(false);
+
+        string file = GuestEnvironment.BuildEnvFile(resource.Name, environment);
+        string encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(file));
+
+        HcsCtlGuestExecDocument written = await hcsctl.GuestExecAsync(
+            resource.VmId,
+            "printf '%s' \"$ASPIRE_ENV_B64\" | base64 -d > /etc/aspire.env",
+            new Dictionary<string, string> { ["ASPIRE_ENV_B64"] = encoded },
+            EnvironmentWriteTimeout,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (written.ExitCode != 0)
+        {
+            // The values ARE the reference feature for a VM; a guest that did not take them has
+            // not honoured WithReference, and reporting Running anyway would hide that.
+            throw new InvalidOperationException(
+                $"Writing /etc/aspire.env in '{resource.Name}' failed: the guest shell " +
+                $"{(written.TimedOut ? "timed out" : $"exited {written.ExitCode}")}." +
+                (string.IsNullOrEmpty(written.Detail) ? "" : $" {written.Detail}"));
+        }
+
+        logger.LogInformation("Wrote {Count} environment value(s) to /etc/aspire.env in the guest.", environment.Count);
     }
 
     /// <summary>

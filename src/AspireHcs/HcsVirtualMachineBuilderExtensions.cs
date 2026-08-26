@@ -2,6 +2,7 @@ using AspireHcs;
 using AspireHcs.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 // Extensions live in Aspire.Hosting so they are in scope as soon as the package is referenced.
@@ -26,6 +27,11 @@ public static class HcsVirtualMachineBuilderExtensions
             // The package contract: an unsupported host fails at model-build time.
             HcsPlatform.ThrowIfUnsupported();
         }
+
+        // One relay per AppHost session, shared by every HCS consumer — the multiplexing shape.
+        // Registered here so the instance can resolve it; it starts nothing until a reference
+        // actually needs forwarding.
+        builder.Services.TryAddSingleton<DockerRelay>();
 
         HcsVirtualMachineResource resource = new(name);
 
