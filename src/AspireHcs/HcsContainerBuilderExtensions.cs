@@ -81,8 +81,8 @@ public static class HcsContainerBuilderExtensions
     }
 
     /// <summary>
-    /// Names the hcsctl store holding the image. Defaults to hcsctl's per-user store, which is
-    /// rarely where a prepared image lives.
+    /// Names the hcsctl store holding the image. Defaults to <c>ASPIREHCS_STORE</c> when set,
+    /// otherwise hcsctl's per-user store — which is rarely where a prepared image lives.
     /// </summary>
     public static IResourceBuilder<HcsContainerResource> WithStore(
         this IResourceBuilder<HcsContainerResource> builder, string storePath)

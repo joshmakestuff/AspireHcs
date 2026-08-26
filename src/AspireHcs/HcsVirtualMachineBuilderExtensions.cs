@@ -58,7 +58,8 @@ public static class HcsVirtualMachineBuilderExtensions
 
     /// <summary>
     /// Points this resource at a specific <c>hcsctl.exe</c> and store, instead of discovering the
-    /// binary and using hcsctl's per-user default store.
+    /// binary and defaulting the store (<c>ASPIREHCS_STORE</c> when set, otherwise hcsctl's
+    /// per-user default).
     /// </summary>
     public static IResourceBuilder<HcsVirtualMachineResource> WithHcsCtl(
         this IResourceBuilder<HcsVirtualMachineResource> builder, string? executablePath = null, string? storePath = null)

@@ -236,7 +236,7 @@ internal sealed class HcsContainerInstance(
                     $"Resource '{resource.Name}' declares endpoints but no network; add WithNetwork().");
             }
 
-            HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath);
+            HcsCtl hcsctl = new(HcsCtlBinary.Locate(resource.HcsCtlPath), resource.StorePath ?? AspireHcsEnvironment.DefaultStorePath);
             _hcsctl = hcsctl;
 
             // Preflight before anything is acquired. Each condition has a fix a developer can act on.

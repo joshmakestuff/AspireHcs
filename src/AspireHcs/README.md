@@ -42,6 +42,11 @@ hcsctl image pull   --ref <ref> --store <dir>
 hcsctl image import --ref <ref> --store <dir>   # elevated, once per image
 ```
 
+Two more environment variables override defaults machine-wide: `ASPIREHCS_STORE` is the store
+for any resource that does not name one with `WithStore(...)`/`WithHcsCtl(...)` (unset means
+hcsctl's per-user store), and `ASPIREHCS_TEMP` relocates AspireHcs's temporary files — the
+generated `.rdp` connection files — from `AspireHcs` under the system temp directory.
+
 **Hyper-V isolation is the only container mode.** Process isolation needs an elevated token at
 container create, which the unelevated dev loop does not have; AspireHcs refuses it at
 model-build time. Hyper-V isolation runs fully unelevated.

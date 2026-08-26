@@ -3,8 +3,9 @@ using Xunit;
 namespace AspireHcs.Tests;
 
 /// <summary>
-/// Serializes every test that touches <c>ASPIREHCS_HCSCTL</c> or runs the real binary. The
-/// environment variable is process-wide, and xunit runs collections in parallel.
+/// Serializes every test that touches an <c>ASPIREHCS_*</c> environment variable or runs the
+/// real binary. The environment variables are process-wide, and xunit runs collections in
+/// parallel.
 /// </summary>
 [CollectionDefinition(Name)]
 public sealed class HcsCtlEnvironmentCollection
