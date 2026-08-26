@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AspireHcs sample</title>
+  <style>
+    :root { color-scheme: light dark; font-family: "Segoe UI", system-ui, sans-serif; }
+    body { max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    h1 { font-size: 1.4rem; }
+    .card { border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: .5rem; padding: 1rem 1.25rem; margin: 1rem 0; }
+    .status { font-weight: 600; }
+    .up { color: #2e8b57; }
+    .down { color: #c0392b; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; margin: .5rem 0 0; }
+    dt { opacity: .7; }
+    dd { margin: 0; font-family: Consolas, monospace; overflow-wrap: anywhere; }
+    pre { background: color-mix(in srgb, currentColor 8%, transparent); padding: .5rem .75rem; border-radius: .3rem; white-space: pre-wrap; }
+    small { opacity: .7; }
+  </style>
+</head>
+<body>
+  <h1>AspireHcs sample</h1>
+  <p>The <strong>worker</strong> card below is served by a process running inside a
+  Hyper-V-isolated Windows container — your published binary, bind-mounted from the host, no
+  image build. Edit a file under the AppHost's <code>data\</code> directory and it changes here
+  live. Pause the container from the Aspire dashboard and watch it stop answering.</p>
+
+  <div class="card" id="worker">loading…</div>
+  <div id="vms"></div>
+  <small>Refreshes every 2 seconds.</small>
+
+  <script>
+    const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+    async function refreshWorker() {
+      const el = document.getElementById("worker");
+      try {
+        const info = await (await fetch("/api/worker/info")).json();
+        if (!info.reachable) {
+          el.innerHTML = `<div class="status down">worker — not answering</div>
+            <p>${esc(info.address ?? "")} (${esc(info.reason ?? "not configured")}). Paused, stopped, or still starting.</p>`;
+          return;
+        }
+        const files = await (await fetch("/api/worker/files")).json();
+        const p = info.payload;
+        const fileRows = (files.payload ?? []).map(f =>
+          `<dt>${esc(f.name)}</dt><dd>${f.text !== null ? `<pre>${esc(f.text)}</pre>` : esc(f.bytes + " bytes")}</dd>`).join("");
+        el.innerHTML = `<div class="status up">worker — running in the guest</div>
+          <dl>
+            <dt>machine</dt><dd>${esc(p.machine)}</dd>
+            <dt>os</dt><dd>${esc(p.os)}</dd>
+            <dt>process</dt><dd>${esc(p.processPath)}</dd>
+            <dt>uptime</dt><dd>${esc(p.uptimeSeconds)} s</dd>
+            <dt>greeting</dt><dd>${esc(p.greeting)}</dd>
+            <dt>address</dt><dd>${esc(info.address)}</dd>
+          </dl>
+          <h3>data\\ (bind-mounted from the host)</h3><dl>${fileRows || "<dt>empty</dt><dd></dd>"}</dl>`;
+      } catch {
+        el.innerHTML = `<div class="status down">worker — frontend error</div>`;
+      }
+    }
+
+    async function refreshVms() {
+      const el = document.getElementById("vms");
+      try {
+        const vms = await (await fetch("/api/vms")).json();
+        el.innerHTML = vms.map(vm => `<div class="card">
+          <div class="status ${vm.reachable ? "up" : "down"}">${esc(vm.resource)} — ${vm.reachable ? "reachable" : "unreachable"}</div>
+          <dl><dt>${esc(vm.endpoint)}</dt><dd>${esc(vm.address)}</dd></dl>
+        </div>`).join("");
+      } catch { /* VM section is optional; leave as-is on error */ }
+    }
+
+    async function tick() { await Promise.all([refreshWorker(), refreshVms()]); }
+    tick();
+    setInterval(tick, 2000);
+  </script>
+</body>
+</html>
