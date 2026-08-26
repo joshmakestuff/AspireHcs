@@ -264,9 +264,10 @@ internal sealed class HcsContainerInstance(
 
             // Resolved before anything is created. An empty value is rejected here, before a
             // compute system and a scratch layer exist.
-            IReadOnlyDictionary<string, string> environment = await ContainerEnvironment
+            ResolvedGuestEnvironment resolved = await GuestEnvironment
                 .ResolveAsync(resource, services.GetRequiredService<DistributedApplicationExecutionContext>(), stopping)
                 .ConfigureAwait(false);
+            IReadOnlyDictionary<string, string> environment = resolved.Values;
 
             logger.LogInformation("Creating container {ContainerId} from {Image} ({MemoryMb} MB, {Processors} vCPU)",
                 resource.ContainerId, image, resource.MemoryMb, resource.ProcessorCount);
