@@ -27,7 +27,7 @@ internal static class ConnectCommands
             // Interactivity and state are read per click, not captured at model-build time.
             context => Task.FromResult(Execute(
                 resource, endpointName, "an SSH session", Environment.UserInteractive,
-                CurrentState(context.ServiceProvider, context.ResourceName),
+                CurrentState(context.Services, context.ResourceName),
                 allocated => BuildSshStartInfo(allocated.Address, allocated.Port, userName),
                 ShellExecute)),
             new CommandOptions
@@ -50,7 +50,7 @@ internal static class ConnectCommands
             "Connect (RDP)",
             context => Task.FromResult(Execute(
                 resource, endpointName, "a Remote Desktop session", Environment.UserInteractive,
-                CurrentState(context.ServiceProvider, context.ResourceName),
+                CurrentState(context.Services, context.ResourceName),
                 allocated => BuildRdpStartInfo(resource, endpointName, allocated.Address, allocated.Port, userName),
                 ShellExecute)),
             new CommandOptions
