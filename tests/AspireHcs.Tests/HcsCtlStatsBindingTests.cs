@@ -10,9 +10,9 @@ namespace AspireHcs.Tests;
 // down, under "Statistics". `container ps` re-emits hcsctl's typed rows, five fields each,
 // always present. The PascalCase names inside "statistics" are HCS's, not hcsctl's.
 //
-// Every payload below was captured verbatim from a live unelevated hyperv container
+// Every payload below was captured from a live unelevated hyperv container
 // (nanoserver:ltsc2025, hcsctl v0.5.0, 2026-08-25); the process list is a subset of the
-// captured rows, each row unmodified.
+// captured rows. Only the store path in RuntimeImagePath was generalized.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlStatsBindingTests
 {
@@ -32,7 +32,7 @@ public class HcsCtlStatsBindingTests
             "Name": "m91",
             "Owner": "hcsctl",
             "RuntimeId": "e104557f-d094-4ad1-9786-781da77eb6fd",
-            "RuntimeImagePath": "E:\\source\\repos\\hcs\\hcsspike\\store-aspire91\\layers\\dde2700babae600587126dee2c652b3dfa6a0f51e1112fc1585d87f87ca09272\\UtilityVM",
+            "RuntimeImagePath": "C:\\hcs\\store\\layers\\dde2700babae600587126dee2c652b3dfa6a0f51e1112fc1585d87f87ca09272\\UtilityVM",
             "State": "Running",
             "Statistics": {
               "Timestamp": "2026-08-25T23:32:19.0685861Z",
