@@ -1,23 +1,54 @@
 # HcsSample.AppHost
 
-One AppHost with three opt-in resources: a Linux VM, a Windows VM, and a Hyper-V-isolated
-Windows container. Each resource is added only when its environment variable is set, because
-each needs a fixture that is not in the repository.
+A small showcase of HCS guests as Aspire resources:
 
-| Variable | Resource | Value |
+- **worker** — a Hyper-V-isolated Windows container running `HcsSample.GuestApi`, a published
+  .NET binary bind-mounted from the host into a stock nanoserver image. No Dockerfile, no image
+  build: your code, hardware-isolated.
+- **web** — an ordinary Aspire project that consumes the guests through endpoint references and
+  shows what the container answers, including the live content of the bind-mounted `data\`
+  directory. Edit `data\hello.txt` while it runs; the guest serves the change immediately.
+- **appliance** / **winserver** — opt-in VMs (they need a bootable VHDX you provide), with
+  Connect (SSH/RDP) buttons, and for the Linux VM an in-dashboard SSH terminal
+  (Aspire 13.5's experimental `WithTerminal()`; start `appliance-shell` from the dashboard).
+
+## Run it
+
+```powershell
+# once: publishes the guest app and imports the container image (one elevated step)
+.\..\prepare.ps1
+
+# then, from this directory
+aspire run     # or: dotnet run
+```
+
+The AppHost must run elevated or as a member of **Hyper-V Administrators**, and
+[hcsctl](https://github.com/joshmakestuff/hcsctl) must be on `PATH` or in `ASPIREHCS_HCSCTL`.
+Nothing else is required for the container and the web frontend.
+
+Things to try while it runs:
+
+- Edit `data\hello.txt` — the web page picks it up on the next refresh, live over VSMB.
+- Pause **worker** from the dashboard — the page shows it stop answering; resume it.
+- The dashboard's **worker** details show guest statistics and its process list.
+
+## Configuration
+
+All optional, in the `Hcs` section of `appsettings.json` (or user secrets), with environment
+variable fallbacks:
+
+| Setting | Env var | Value |
 | --- | --- | --- |
-| `HCS_TEST_VHDX` | Linux VM `appliance` | Path to a bootable Gen2/UEFI VHDX |
-| `HCS_TEST_VM_USER` | Linux VM | SSH account for the Connect button (default `root`) |
-| `HCS_SAMPLE_WINDOWS_VHDX` | Windows VM `winserver` | Path to a bootable Gen2/UEFI VHDX |
-| `HCS_SAMPLE_WINDOWS_USER` | Windows VM | RDP account for the Connect button (default `Administrator`) |
-| `ASPIREHCS_TEST_IMAGE` | Container `worker` | Image reference already imported into the store |
-| `ASPIREHCS_TEST_COMMAND` | Container | Command (default `cmd /c ping -t 127.0.0.1`) |
-| `ASPIREHCS_TEST_STORE` | All | hcsctl store directory (default: hcsctl's per-user store) |
-| `ASPIREHCS_HCSCTL` | All | Path to `hcsctl.exe` when it is not on `PATH` |
+| `ContainerImage` | `ASPIREHCS_TEST_IMAGE` | Image reference (default `mcr.microsoft.com/windows/nanoserver:ltsc2025`) |
+| `LinuxVhdx` | `HCS_TEST_VHDX` | Bootable Gen2/UEFI VHDX for the Linux VM |
+| `LinuxUser` | `HCS_TEST_VM_USER` | SSH account (default `root`) |
+| `WindowsVhdx` | `HCS_SAMPLE_WINDOWS_VHDX` | Bootable Gen2/UEFI VHDX for the Windows VM |
+| `WindowsUser` | `HCS_SAMPLE_WINDOWS_USER` | RDP account (default `Administrator`) |
 
-Run with `aspire run` (or `dotnet run`) from this directory. The AppHost must run elevated or as a
-member of **Hyper-V Administrators**. All three resources drive
-[hcsctl](https://github.com/joshmakestuff/hcsctl); it must be on `PATH` or in `ASPIREHCS_HCSCTL`.
+The store comes from `ASPIREHCS_STORE` when set, otherwise hcsctl's per-user store; the
+in-dashboard terminal additionally needs `aspire config set features.terminalCommandsEnabled
+true` for the matching `aspire terminal` CLI commands (the dashboard terminal itself needs no
+flag).
 
 ## Preparing a VM image
 
@@ -61,18 +92,18 @@ hcsctl vm rm     --id <id> --force
 
 - Install from the distribution ISO into a Gen2 VM. Secure Boot: off, or the "Microsoft UEFI
   Certificate Authority" template.
-- Enable `sshd` (`systemctl enable sshd`) and permit the account you will pass as
-  `HCS_TEST_VM_USER`. The reference fixture has `root` and no other account; set
-  `PermitRootLogin` accordingly, or create a user.
+- Enable `sshd` (`systemctl enable sshd`) and permit the account you configure as `LinuxUser`.
+  The reference fixture has `root` and no other account; set `PermitRootLogin` accordingly, or
+  create a user.
 - Leave the NIC on DHCP (NetworkManager default).
 - Install the agent as root: `install/install-hcsguest.sh` from the hcsctl repository, pinned to
   the host's hcsctl version. Confirm `systemctl is-active hcsguest`.
-- Shut down; point `HCS_TEST_VHDX` at the VHDX.
+- Shut down; point `LinuxVhdx` at the VHDX.
 
 ### Windows VM (reference: Windows Server 2025)
 
 - Install from the ISO into a Gen2 VM. Set the local `Administrator` password (or create the
-  account you pass as `HCS_SAMPLE_WINDOWS_USER`).
+  account you configure as `WindowsUser`).
 - Enable Remote Desktop and open its firewall group:
 
   ```powershell
@@ -83,16 +114,16 @@ hcsctl vm rm     --id <id> --force
 - Leave the NIC on DHCP.
 - Install the agent from an elevated PowerShell: `install/Install-HcsGuest.ps1` from the hcsctl
   repository, pinned to the host's hcsctl version. Confirm `Get-Service hcsguest` is Running.
-- Shut down; point `HCS_SAMPLE_WINDOWS_VHDX` at the VHDX.
+- Shut down; point `WindowsVhdx` at the VHDX.
 
-## Preparing a container image
+## Preparing a container image by hand
 
-Images live in an hcsctl store. Pull and import once; the import is elevated:
+`prepare.ps1` does this for the default image. For another image:
 
 ```
-hcsctl image pull   --ref mcr.microsoft.com/windows/servercore:ltsc2022 --store <dir>
-hcsctl image import --ref mcr.microsoft.com/windows/servercore:ltsc2022 --store <dir>   # elevated
+hcsctl image pull   --ref <ref> --store <dir>
+hcsctl image import --ref <ref> --store <dir>   # elevated, once per image
 ```
 
-Then set `ASPIREHCS_TEST_IMAGE` to the reference and `ASPIREHCS_TEST_STORE` to `<dir>`. Only
-Hyper-V isolation is supported.
+Then set `ContainerImage` (or `ASPIREHCS_TEST_IMAGE`) to the reference and `ASPIREHCS_STORE` to
+`<dir>`. Only Hyper-V isolation is supported.

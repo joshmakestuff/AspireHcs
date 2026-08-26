@@ -5,6 +5,8 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- WithTerminal() is experimental in Aspire 13.5. -->
+    <NoWarn>$(NoWarn);ASPIRETERMINAL001</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -14,6 +16,7 @@
   <ItemGroup>
     <!-- IsAspireProjectResource=false: this is the hosting integration itself, not a service project. -->
     <ProjectReference Include="..\..\src\AspireHcs\AspireHcs.csproj" IsAspireProjectResource="false" />
+    <ProjectReference Include="..\HcsSample.Web\HcsSample.Web.csproj" />
   </ItemGroup>
 
 </Project>

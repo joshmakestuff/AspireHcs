@@ -5,52 +5,97 @@ using System.Runtime.Versioning;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
-// Every resource is opt-in through an environment variable, because each needs a fixture that
-// is not in the repository: a bootable VHDX per VM, and an image already imported into an hcsctl
-// store for the container. See README.md beside this file for how to prepare each fixture.
-//
-//   HCS_TEST_VHDX             Linux VM  ("appliance")
-//   HCS_TEST_VM_USER          SSH account for the Linux VM (default: root)
-//   HCS_SAMPLE_WINDOWS_VHDX   Windows VM ("winserver")
-//   HCS_SAMPLE_WINDOWS_USER   RDP/SSH account for the Windows VM (default: Administrator)
-//   ASPIREHCS_TEST_IMAGE      Windows container ("worker"): image reference in the store
-//   ASPIREHCS_TEST_COMMAND    Container command (default: a long-running ping)
-//   ASPIREHCS_TEST_STORE      hcsctl store used by all three (default: hcsctl's per-user store)
-//   ASPIREHCS_HCSCTL          Path to hcsctl.exe when it is not on PATH
+// Settings come from the "Hcs" section of appsettings.json (or user secrets), with an
+// environment variable fallback. Only the VMs need any of them: they require a bootable VHDX
+// that cannot ship with the repository. The container runs with no settings at all once
+// prepare.ps1 has imported the default image.
+string? Setting(string key, string environmentVariable)
+    => builder.Configuration[$"Hcs:{key}"] is { Length: > 0 } fromConfig
+        ? fromConfig
+        : Environment.GetEnvironmentVariable(environmentVariable) is { Length: > 0 } fromEnvironment
+            ? fromEnvironment
+            : null;
 
-string? store = Environment.GetEnvironmentVariable("ASPIREHCS_TEST_STORE") is { Length: > 0 } s ? s : null;
+// ---- Windows container ----------------------------------------------------------------------
+// A stock nanoserver image runs HcsSample.GuestApi straight from a bind-mounted publish
+// directory: your binary, built on the host, hardware-isolated — no Dockerfile, no image build.
+// prepare.ps1 publishes the app and imports the image (once, elevated).
+string image = Setting("ContainerImage", "ASPIREHCS_TEST_IMAGE")
+    ?? "mcr.microsoft.com/windows/nanoserver:ltsc2025";
 
-// ---- Linux VM -------------------------------------------------------------------------------
+string guestApiPublish = Path.GetFullPath(
+    Path.Combine(builder.AppHostDirectory, "..", "HcsSample.GuestApi", "bin", "publish"));
+if (!Directory.Exists(guestApiPublish))
+{
+    throw new InvalidOperationException(
+        $"'{guestApiPublish}' does not exist. Run samples\\prepare.ps1 once: it publishes " +
+        "HcsSample.GuestApi and imports the container image into the store.");
+}
+
+var worker = builder.AddHcsContainer("worker")
+    .WithImage(image)
+    // The published app, read-only. VSMB carries both mounts; the data mount is writable and
+    // live — a file edited on the host changes in the guest without a restart.
+    .WithBindMount(guestApiPublish, @"C:\app", isReadOnly: true)
+    .WithBindMount("data", @"C:\data")
+    .WithCommand(@"C:\app\HcsSample.GuestApi.exe")
+    .WithEnvironment("ASPNETCORE_URLS", "http://0.0.0.0:8080")
+    .WithEnvironment("DATA_DIR", @"C:\data")
+    .WithEnvironment("GREETING", "Hello from a Hyper-V-isolated container")
+    .WithNetwork()
+    .WithEndpoint("http", targetPort: 8080)
+    .WithTcpHealthCheck();
+
+// ---- Frontend -------------------------------------------------------------------------------
+// An ordinary Aspire project consuming the guests. Each referenced endpoint arrives as
+// service-discovery configuration; the page shows what the container answers and probes the
+// VMs' endpoints.
+var web = builder.AddProject<Projects.HcsSample_Web>("web")
+    .WithReference(worker.GetEndpoint("http"))
+    .WaitFor(worker);
+
+// ---- Linux VM (opt-in) ----------------------------------------------------------------------
 // Fixture: a Gen2/UEFI VHDX with a Linux OS installed, the hcsguest agent running (systemd),
 // NIC on DHCP, and sshd enabled. Reference fixture: Rocky Linux 10, root only.
-string? linuxVhdx = Environment.GetEnvironmentVariable("HCS_TEST_VHDX");
-if (!string.IsNullOrWhiteSpace(linuxVhdx))
+if (Setting("LinuxVhdx", "HCS_TEST_VHDX") is { } linuxVhdx)
 {
+    string linuxUser = Setting("LinuxUser", "HCS_TEST_VM_USER") ?? "root";
+
     var appliance = builder.AddHcsVm("appliance")
         .WithVhdx(linuxVhdx)
         .WithMemory(gigabytes: 2)
         .WithProcessorCount(2)
         .WithNetwork()
         .WithEndpoint("ssh", targetPort: 22)
-        // Dashboard "Connect (SSH)" button. The account must exist in the image. Add
-        // .WithTcpHealthCheck("ssh") to make readiness wait for sshd; see the Windows VM below.
-        .WithSshCommand(userName: Environment.GetEnvironmentVariable("HCS_TEST_VM_USER") ?? "root");
+        // Dashboard "Connect (SSH)" button. The account must exist in the image.
+        .WithSshCommand(userName: linuxUser);
 
-    if (store is not null)
-    {
-        appliance.WithHcsCtl(storePath: store);
-    }
+    web.WithReference(appliance.GetEndpoint("ssh"));
+
+    // Aspire 13.5's experimental terminal: an interactive SSH session into the guest, embedded
+    // in the dashboard. The address is resolved when the process starts, after the VM's DHCP
+    // lease has landed.
+    EndpointReference ssh = appliance.GetEndpoint("ssh");
+    builder.AddExecutable("appliance-shell", "ssh.exe", ".")
+        .WithArgs(context =>
+        {
+            context.Args.Add("-o");
+            context.Args.Add("StrictHostKeyChecking=accept-new");
+            context.Args.Add("-p");
+            context.Args.Add($"{ssh.Port}");
+            context.Args.Add($"{linuxUser}@{ssh.Host}");
+        })
+        .WaitFor(appliance)
+        .WithTerminal()
+        .WithExplicitStart()
+        .ExcludeFromManifest();
 }
 
-// ---- Windows VM -----------------------------------------------------------------------------
-// Fixture: a Gen2/UEFI VHDX with Windows Server (or client) installed, the hcsguest agent
-// running as a service, NIC on DHCP, Remote Desktop enabled and its firewall group opened, and
-// the local account below able to log on.
-string? windowsVhdx = Environment.GetEnvironmentVariable("HCS_SAMPLE_WINDOWS_VHDX");
-if (!string.IsNullOrWhiteSpace(windowsVhdx))
+// ---- Windows VM (opt-in) --------------------------------------------------------------------
+// Fixture: a Gen2/UEFI VHDX with Windows installed, the hcsguest agent running as a service,
+// NIC on DHCP, Remote Desktop enabled and its firewall group opened.
+if (Setting("WindowsVhdx", "HCS_SAMPLE_WINDOWS_VHDX") is { } windowsVhdx)
 {
-    string windowsUser = Environment.GetEnvironmentVariable("HCS_SAMPLE_WINDOWS_USER") ?? "Administrator";
-
     var winserver = builder.AddHcsVm("winserver")
         .WithVhdx(windowsVhdx)
         .WithMemory(gigabytes: 4)
@@ -60,39 +105,9 @@ if (!string.IsNullOrWhiteSpace(windowsVhdx))
         // Healthy once TermService accepts a connection on 3389.
         .WithTcpHealthCheck("rdp")
         // Dashboard "Connect (RDP)" button: opens mstsc with the leased address and this user.
-        .WithRdpCommand(userName: windowsUser);
+        .WithRdpCommand(userName: Setting("WindowsUser", "HCS_SAMPLE_WINDOWS_USER") ?? "Administrator");
 
-    if (store is not null)
-    {
-        winserver.WithHcsCtl(storePath: store);
-    }
-}
-
-// ---- Windows container ----------------------------------------------------------------------
-// Fixture: an image imported into an hcsctl store (elevated, once):
-//   hcsctl image pull   --ref <ref> --store <dir>
-//   hcsctl image import --ref <ref> --store <dir>
-string? image = Environment.GetEnvironmentVariable("ASPIREHCS_TEST_IMAGE");
-if (!string.IsNullOrWhiteSpace(image))
-{
-    var worker = builder.AddHcsContainer("worker")
-        .WithImage(image)
-        // A long-running default keeps the resource Running; a one-shot command reaches Finished
-        // as soon as it exits.
-        .WithCommand(Environment.GetEnvironmentVariable("ASPIREHCS_TEST_COMMAND") ?? "cmd /c ping -t 127.0.0.1");
-
-    if (store is not null)
-    {
-        worker.WithStore(store);
-    }
-}
-
-if (linuxVhdx is null or { Length: 0 } && windowsVhdx is null or { Length: 0 } && image is null or { Length: 0 })
-{
-    throw new InvalidOperationException(
-        "Nothing to run. Set HCS_TEST_VHDX (Linux VM) or HCS_SAMPLE_WINDOWS_VHDX (Windows VM) to a bootable " +
-        "Gen2/UEFI VHDX, or ASPIREHCS_TEST_IMAGE to an image reference already imported into an hcsctl store " +
-        "(with ASPIREHCS_TEST_STORE naming that store). See samples/HcsSample.AppHost/README.md.");
+    web.WithReference(winserver.GetEndpoint("rdp"));
 }
 
 builder.Build().Run();

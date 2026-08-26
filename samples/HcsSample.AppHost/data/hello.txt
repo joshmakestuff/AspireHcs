@@ -1,0 +1,5 @@
+Hello from the host!
+
+This file lives in samples/HcsSample.AppHost/data on the host and is bind-mounted into the
+container at C:\data over VSMB. Edit it while the sample runs and refresh the web page — the
+guest sees the change immediately, no restart.

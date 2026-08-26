@@ -8,5 +8,7 @@
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/HcsSample.AppHost/HcsSample.AppHost.csproj" />
+    <Project Path="samples/HcsSample.GuestApi/HcsSample.GuestApi.csproj" />
+    <Project Path="samples/HcsSample.Web/HcsSample.Web.csproj" />
   </Folder>
 </Solution>
