@@ -70,6 +70,47 @@ network a Windows container host conventionally has, out of reach of Default Swi
 A resource that never calls `WithNetwork()` gets no NIC, and declaring endpoints on it is
 refused at start.
 
+## Consuming other resources: `WithReference`
+
+HCS resources are consumers, not only servers:
+
+```csharp
+var cache = builder.AddRedis("cache");
+
+var worker = builder.AddHcsContainer("worker")
+    .WithImage(...)
+    .WithNetwork()
+    .WithReference(cache);   // ConnectionStrings__cache arrives inside the guest, reachable
+```
+
+Stock Aspire resolves reference values from the host's perspective — endpoints on the host's
+loopback, which no HCS guest can reach. AspireHcs rewrites those values for the guest and stands
+up the path they name: one hidden Docker relay container per AppHost session
+(`aspirehcs-relay-<pid>-<suffix>`, `alpine/socat`) publishes one `0.0.0.0` host port per
+referenced endpoint and forwards it to the endpoint's host port via `host.docker.internal`.
+Where a host process would read `localhost:<port>`, the guest reads `<gateway>:<relay port>` —
+the gateway being the default route of its own HNS network, read live from
+`hcsctl network inspect`.
+
+Only values that actually came from `WithReference` are rewritten. A literal set through
+`WithEnvironment` — even one spelling `127.0.0.1:8080` — is configuration meant as written and
+is delivered untouched. Referenced endpoints that do not point at the host's loopback (another
+HCS guest on the same network, a real remote) also pass through, and need no Docker.
+
+**This needs Docker** (Docker Desktop, or any engine with a docker-compatible CLI on `PATH`) —
+already an Aspire prerequisite in practice. An AppHost whose HCS resources reference nothing on
+the host's loopback never touches it. Relay containers left by crashed runs are scavenged by the
+same pid discipline as HCS containers.
+
+Delivery differs by resource kind:
+
+- **Containers** get the values as process environment, at exec.
+- **VMs** have no create-time injection — nothing writes variables into a VHDX — so once the
+  guest is up, the values are written to **`/etc/aspire.env`** in the guest over hvsocket
+  (requires the `hcsguest` agent in the image; the convention is for Linux guests today). The
+  caveat that comes with it: a workload that autostarts at boot may run before the file lands; a
+  workload that reads the file when it starts is correct. Tighter ordering is future work.
+
 ## Readiness
 
 A VM reports **Running** once the `hcsguest` agent inside it answers and reports the address the
