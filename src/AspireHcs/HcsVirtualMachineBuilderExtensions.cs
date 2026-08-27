@@ -235,9 +235,9 @@ public static class HcsVirtualMachineBuilderExtensions
     /// <remarks>
     /// The guest must serve RDP. Windows Server images do not by default: Remote Desktop needs
     /// enabling and its firewall group opening. Over the forward, mstsc connects to
-    /// <c>127.0.0.1</c> rather than the guest's own hostname, so its RDP certificate no longer
-    /// matches the address dialled — expect a name-mismatch warning that was not there before;
-    /// it is a consequence of the forward, not a fault.
+    /// <c>127.0.0.1</c> rather than the guest's own hostname, so its RDP certificate does not
+    /// match the address dialled — expect a name-mismatch warning; it is a consequence of the
+    /// forward, not a fault.
     /// </remarks>
     public static IResourceBuilder<HcsVirtualMachineResource> WithRdpCommand(
         this IResourceBuilder<HcsVirtualMachineResource> builder,

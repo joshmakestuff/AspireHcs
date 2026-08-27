@@ -179,7 +179,7 @@ public static class HcsContainerBuilderExtensions
     /// which anything that unpacks, builds or caches inside the container can fill.
     /// </summary>
     /// <remarks>
-    /// The guest sees about 0.1 GB less than requested: a 40 GB request gives a 39.9 GB C:.
+    /// The guest filesystem exposes slightly less than the requested size.
     /// </remarks>
     public static IResourceBuilder<HcsContainerResource> WithScratchSize(
         this IResourceBuilder<HcsContainerResource> builder, int gigabytes)

@@ -16,8 +16,8 @@ public class DockerRelayTests
     // ---- ownership: the name parse that licenses deletion ----
 
     [Theory]
-    [InlineData("aspirehcs-relay-4242-0f3a9b2c")]   // this build's form: pid plus session suffix
-    [InlineData("aspirehcs-relay-4242")]            // earlier builds': pid alone, still reclaimed
+    [InlineData("aspirehcs-relay-4242-0f3a9b2c")]   // current form: pid plus session suffix
+    [InlineData("aspirehcs-relay-4242")]            // legacy form: pid alone, still reclaimed
     public void The_owner_pid_is_read_back_from_a_relay_name(string name)
     {
         Assert.Equal(4242, DockerRelay.OwnerProcessId(name));

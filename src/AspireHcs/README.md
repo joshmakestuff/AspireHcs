@@ -114,8 +114,7 @@ Delivery differs by resource kind:
 ## Readiness
 
 A VM reports **Running** once the `hcsguest` agent inside it answers and reports the address the
-guest leased (`hcsctl vm ip`); the endpoints then resolve to that address. On a Rocky Linux 10
-guest that is about 16 s after a cold start.
+guest leased (`hcsctl vm ip`); the endpoints then resolve to that address.
 
 Running is not the same as serving. Aspire declares a resource with no health checks ready the
 moment it reports Running, so `WaitFor(vm)` releases dependents while the guest is still starting

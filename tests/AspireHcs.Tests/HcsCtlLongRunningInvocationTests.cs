@@ -4,12 +4,11 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// `guest forward` (and anything else hcsctl adds later that is designed to keep running) breaks
-// InvokeAsync's "wait for exit, then parse stdout" assumption: the process never exits on its
-// own. These pin the piece that makes StartLongRunningAsync possible — reading exactly the one
-// JSON object hcsctl's contract promises without waiting for EOF — and the process-level
-// contract around it, with a stand-in binary since hcsctl cannot be made to violate its own
-// contract on demand.
+// `guest forward` breaks InvokeAsync's "wait for exit, then parse stdout" assumption: the process
+// never exits on its own. These pin the piece that makes StartLongRunningAsync possible — reading
+// exactly the one JSON object hcsctl's contract promises without waiting for EOF — and the
+// process-level contract around it, with a stand-in binary since hcsctl cannot be made to violate
+// its own contract on demand.
 //
 // These need no hcsctl and no HCS, so they never skip.
 [SupportedOSPlatform("windows10.0.17763")]

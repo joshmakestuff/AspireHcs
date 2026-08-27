@@ -204,10 +204,10 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
     }
 
     /// <summary>
-    /// Starts an hcsctl command that is designed to keep running instead of exiting — today only
-    /// <c>guest forward</c> — and returns as soon as its one stdout document is complete, without
-    /// waiting for the process to exit. The caller owns the returned process for as long as the
-    /// command's effect is wanted and is responsible for killing it.
+    /// Starts an hcsctl command that is designed to keep running instead of exiting — currently
+    /// only <c>guest forward</c> — and returns as soon as its one stdout document is complete,
+    /// without waiting for the process to exit. The caller owns the returned process for as long
+    /// as the command's effect is wanted and is responsible for killing it.
     /// </summary>
     /// <remarks>
     /// <see cref="InvokeAsync"/> cannot run a command like this: it waits for process exit before
