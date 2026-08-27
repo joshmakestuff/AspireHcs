@@ -5,11 +5,16 @@
 
 using System.Net.Sockets;
 using System.Runtime.Versioning;
+using Npgsql;
 
 [assembly: SupportedOSPlatform("windows")]
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient("worker", client => client.Timeout = TimeSpan.FromSeconds(2));
+// The AppHost's WithReference(db) injects the connection string as ConnectionStrings:appdb;
+// the client integration turns it into a pooled NpgsqlDataSource with health checks and
+// tracing wired for the dashboard.
+builder.AddNpgsqlDataSource("appdb");
 var app = builder.Build();
 
 app.UseDefaultFiles();
@@ -43,6 +48,29 @@ app.MapGet("/api/worker/{endpoint}", async (string endpoint, IHttpClientFactory 
     catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
     {
         return Results.Json(new { reachable = false, address = baseAddress, reason = ex.GetType().Name });
+    }
+});
+
+// Serves the seed rows from Postgres. WithReference(db) injected ConnectionStrings:appdb; the
+// client integration registered the pooled NpgsqlDataSource this resolves from DI.
+app.MapGet("/api/notes", async (NpgsqlDataSource dataSource, CancellationToken ct) =>
+{
+    try
+    {
+        await using NpgsqlCommand command = dataSource.CreateCommand(
+            "select id, note, created_at from notes order by id");
+        await using NpgsqlDataReader reader = await command.ExecuteReaderAsync(ct);
+        var notes = new List<object>();
+        while (await reader.ReadAsync(ct))
+        {
+            notes.Add(new { id = reader.GetInt32(0), note = reader.GetString(1), createdAt = reader.GetFieldValue<DateTimeOffset>(2) });
+        }
+
+        return Results.Json(new { reachable = true, notes });
+    }
+    catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+    {
+        return Results.Json(new { reachable = false, reason = ex.GetType().Name });
     }
 });
 

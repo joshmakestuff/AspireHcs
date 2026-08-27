@@ -16,6 +16,10 @@
     dt { opacity: .7; }
     dd { margin: 0; font-family: Consolas, monospace; overflow-wrap: anywhere; }
     pre { background: color-mix(in srgb, currentColor 8%, transparent); padding: .5rem .75rem; border-radius: .3rem; white-space: pre-wrap; }
+    table { border-collapse: collapse; margin: .5rem 0 0; }
+    th, td { border: 1px solid color-mix(in srgb, currentColor 25%, transparent); padding: .15rem .6rem; text-align: left; }
+    th { opacity: .7; font-weight: 600; }
+    td { font-family: Consolas, monospace; overflow-wrap: anywhere; }
     small { opacity: .7; }
   </style>
 </head>
@@ -26,7 +30,11 @@
   image build. Edit a file under the AppHost's <code>data\</code> directory and it changes here
   live. Pause the container from the Aspire dashboard and watch it stop answering.</p>
 
+  <p>The <strong>appdb</strong> card reads rows seeded into an ordinary Postgres container —
+  an Aspire integration resource for contrast with the raw-HCS guests above.</p>
+
   <div class="card" id="worker">loading…</div>
+  <div class="card" id="db">loading…</div>
   <div id="vms"></div>
   <small>Refreshes every 2 seconds.</small>
 
@@ -61,6 +69,24 @@
       }
     }
 
+    async function refreshDb() {
+      const el = document.getElementById("db");
+      try {
+        const db = await (await fetch("/api/notes")).json();
+        if (!db.reachable) {
+          el.innerHTML = `<div class="status down">appdb (postgres) — not answering</div>
+            <p>${esc(db.reason ?? "")}</p>`;
+          return;
+        }
+        const rows = (db.notes ?? []).map(n =>
+          `<tr><td>${esc(n.id)}</td><td>${esc(n.note)}</td><td>${esc(n.createdAt)}</td></tr>`).join("");
+        el.innerHTML = `<div class="status up">appdb (postgres) — seeded</div>
+          <table><thead><tr><th>id</th><th>note</th><th>created_at</th></tr></thead><tbody>${rows}</tbody></table>`;
+      } catch {
+        el.innerHTML = `<div class="status down">appdb (postgres) — frontend error</div>`;
+      }
+    }
+
     async function refreshVms() {
       const el = document.getElementById("vms");
       try {
@@ -72,7 +98,7 @@
       } catch { /* VM section is optional; leave as-is on error */ }
     }
 
-    async function tick() { await Promise.all([refreshWorker(), refreshVms()]); }
+    async function tick() { await Promise.all([refreshWorker(), refreshDb(), refreshVms()]); }
     tick();
     setInterval(tick, 2000);
   </script>

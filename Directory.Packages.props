@@ -2,11 +2,12 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
-
   <ItemGroup>
     <PackageVersion Include="Aspire.Hosting" Version="13.5.3" />
     <PackageVersion Include="Aspire.Hosting.AppHost" Version="13.5.3" />
+    <PackageVersion Include="Aspire.Hosting.PostgreSQL" Version="13.5.3" />
     <PackageVersion Include="Aspire.Hosting.Testing" Version="13.5.3" />
+    <PackageVersion Include="Aspire.Npgsql" Version="13.5.3" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
     <PackageVersion Include="Microsoft.Windows.CsWin32" Version="0.3.298" />
     <PackageVersion Include="xunit" Version="2.9.3" />
