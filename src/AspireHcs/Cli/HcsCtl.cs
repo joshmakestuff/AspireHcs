@@ -29,6 +29,15 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
     /// </summary>
     private static readonly string[] GroupsWithoutStore = ["network", "guest"];
 
+    /// <summary>
+    /// How long <see cref="StartLongRunningAsync{TResult}"/> waits, after reading the result
+    /// document, to see whether the process exits on its own before treating it as genuinely
+    /// long-running. Stdout completing and the OS signalling process exit are not the same
+    /// event, so without this a command that fails right after printing its document can still
+    /// look "still running" at the instant the document finishes being read.
+    /// </summary>
+    private static readonly TimeSpan ExitGraceWindow = TimeSpan.FromMilliseconds(300);
+
     private HcsCtlInfoDocument? _info;
 
     public string ExecutablePath { get; } = executablePath;
@@ -194,6 +203,246 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
         return Interpret(process.ExitCode, stdout, commandLine, string.Join(Environment.NewLine, diagnostics), resultType);
     }
 
+    /// <summary>
+    /// Starts an hcsctl command that is designed to keep running instead of exiting — today only
+    /// <c>guest forward</c> — and returns as soon as its one stdout document is complete, without
+    /// waiting for the process to exit. The caller owns the returned process for as long as the
+    /// command's effect is wanted and is responsible for killing it.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="InvokeAsync"/> cannot run a command like this: it waits for process exit before
+    /// reading stdout, and this process is designed never to exit on its own. The document is
+    /// still exactly one JSON object under hcsctl's contract — this reads only that object,
+    /// stopping the instant its closing brace arrives, and leaves everything after it (nothing,
+    /// on the success path) alone.
+    /// <para>
+    /// A process that exits before completing that object, or immediately after — a non-zero
+    /// exit is hcsctl's normal failure shape; a clean exit is a contract violation for a command
+    /// that must not exit on its own — is reported as a failed start, and nothing is returned to
+    /// hold.
+    /// </para>
+    /// </remarks>
+    public async Task<HcsCtlLongRunningInvocation<TResult>> StartLongRunningAsync<TResult>(
+        IReadOnlyList<string> arguments,
+        JsonTypeInfo<TResult> resultType,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ProcessStartInfo startInfo = new(ExecutablePath)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            StandardErrorEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+        };
+
+        foreach (string argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        if (!string.IsNullOrEmpty(StorePath) && !RejectsStore(arguments))
+        {
+            startInfo.ArgumentList.Add("--store");
+            startInfo.ArgumentList.Add(StorePath);
+        }
+
+        startInfo.ArgumentList.Add("--json");
+
+        string commandLine = $"{Path.GetFileName(ExecutablePath)} {string.Join(' ', startInfo.ArgumentList)}";
+
+        Process process = new() { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            throw new HcsCtlContractException(
+                $"Failed to start '{ExecutablePath}'.", commandLine, exitCode: -1, diagnostics: null);
+        }
+
+        // Drained for as long as the process lives, not just for the duration of this call: on
+        // the success path the process outlives StartLongRunningAsync, and its stderr must keep
+        // being read or a chatty child fills the pipe and blocks.
+        Queue<string> diagnostics = new();
+        Task readStderr = PumpStandardErrorAsync(process, diagnostics, progress, CancellationToken.None);
+
+        string? document;
+        try
+        {
+            document = await ReadOneJsonObjectAsync(process.StandardOutput, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            KillQuietly(process);
+            await readStderr.ConfigureAwait(false);
+            process.Dispose();
+            throw;
+        }
+
+        if (document is null)
+        {
+            // EOF, or a first non-whitespace character that was not '{', before a complete
+            // object arrived.
+            KillQuietly(process);
+            await readStderr.ConfigureAwait(false);
+            int exitCode = process.HasExited ? process.ExitCode : -1;
+            string? diagnosticsOrNull = DiagnosticsOrNull(diagnostics);
+            process.Dispose();
+            throw new HcsCtlContractException(
+                "hcsctl exited before emitting its result document.", commandLine, exitCode, diagnosticsOrNull);
+        }
+
+        // A process that is about to exit right after writing its document has not necessarily
+        // done so yet at this exact instant — stdout completing and the OS signalling exit are
+        // not the same event. A short grace window disambiguates "failed and about to exit" from
+        // "genuinely long-running" without meaningfully delaying the success path.
+        if (!process.HasExited)
+        {
+            using CancellationTokenSource graceWindow = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            graceWindow.CancelAfter(ExitGraceWindow);
+            try
+            {
+                await process.WaitForExitAsync(graceWindow.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    KillQuietly(process);
+                    await readStderr.ConfigureAwait(false);
+                    process.Dispose();
+                    throw;
+                }
+                // Otherwise just the grace window elapsed: still running past it is the expected
+                // shape for a command that is designed never to exit on its own.
+            }
+        }
+
+        if (process.HasExited)
+        {
+            await readStderr.ConfigureAwait(false);
+            string diagnosticsText = string.Join(Environment.NewLine, diagnostics);
+            int exitCode = process.ExitCode;
+
+            if (exitCode != HcsCtlExitCode.Ok)
+            {
+                // hcsctl's failure documents are well-formed JSON objects too, so the same
+                // framing read above already captured this one whole. Reusing Interpret gives a
+                // one-shot failure the identical exception shape a caller already handles.
+                _ = Interpret(exitCode, document, commandLine, diagnosticsText, resultType);
+            }
+
+            process.Dispose();
+            throw new HcsCtlContractException(
+                $"hcsctl exited immediately after starting, which a long-running command must not do. stdout: {Describe(document)}",
+                commandLine, exitCode, diagnosticsText.Length == 0 ? null : diagnosticsText);
+        }
+
+        TResult result;
+        try
+        {
+            result = JsonSerializer.Deserialize(document, resultType)
+                ?? throw new HcsCtlContractException(
+                    "hcsctl's document on stdout was the JSON literal null.", commandLine, exitCode: 0, diagnostics: null);
+        }
+        catch (JsonException ex)
+        {
+            KillQuietly(process);
+            process.Dispose();
+            throw new HcsCtlContractException(
+                $"hcsctl's stdout was not one JSON document: {ex.Message} stdout: {Describe(document)}",
+                commandLine, exitCode: 0, diagnostics: null);
+        }
+
+        return new HcsCtlLongRunningInvocation<TResult>(process, result);
+    }
+
+    /// <summary>
+    /// Reads exactly one JSON object off <paramref name="reader"/> — from its first non-whitespace
+    /// character through the closing brace that returns its nesting to zero — without reading
+    /// past it. Braces and quotes inside a string value do not affect nesting; a backslash escapes
+    /// the character after it while inside one. Returns <see langword="null"/> if the stream ends,
+    /// or a character that cannot start a JSON object arrives, before the object completes.
+    /// </summary>
+    internal static async Task<string?> ReadOneJsonObjectAsync(TextReader reader, CancellationToken cancellationToken)
+    {
+        StringBuilder buffer = new();
+        char[] one = new char[1];
+        bool started = false;
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+
+        while (true)
+        {
+            int read = await reader.ReadAsync(one.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                return null;
+            }
+
+            char c = one[0];
+
+            if (!started)
+            {
+                if (char.IsWhiteSpace(c))
+                {
+                    continue;
+                }
+                if (c != '{')
+                {
+                    return null;
+                }
+                started = true;
+                depth = 1;
+                buffer.Append(c);
+                continue;
+            }
+
+            buffer.Append(c);
+
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (c == '\\')
+                {
+                    escaped = true;
+                }
+                else if (c == '"')
+                {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = true;
+            }
+            else if (c == '{')
+            {
+                depth++;
+            }
+            else if (c == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return buffer.ToString();
+                }
+            }
+        }
+    }
+
+    private static string? DiagnosticsOrNull(Queue<string> diagnostics)
+    {
+        string text = string.Join(Environment.NewLine, diagnostics);
+        return text.Length == 0 ? null : text;
+    }
+
     private static bool RejectsStore(IReadOnlyList<string> arguments)
         => arguments.Count > 0 && GroupsWithoutStore.Contains(arguments[0], StringComparer.Ordinal);
 
@@ -327,7 +576,12 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
         return trimmed.Length <= limit ? $"'{trimmed}'" : $"'{trimmed[..limit]}' (truncated)";
     }
 
-    private static void KillQuietly(Process process)
+    /// <summary>
+    /// Terminates a child process without throwing over one that is already gone. Internal: also
+    /// used by callers that hold a process past this call returning, such as a
+    /// <see cref="HcsCtlLongRunningInvocation{TResult}"/>'s owner tearing it down.
+    /// </summary>
+    internal static void KillQuietly(Process process)
     {
         try
         {
@@ -345,4 +599,16 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
             // Exiting on its own while being killed. Nothing further to do from here.
         }
     }
+}
+
+/// <summary>
+/// A long-running hcsctl invocation that started successfully: its one result document, and the
+/// still-running process that produced it. The caller owns <see cref="Process"/> — it does not
+/// exit on its own — and must kill it (<see cref="HcsCtl.KillQuietly"/>) when the command's
+/// effect is no longer wanted.
+/// </summary>
+internal sealed class HcsCtlLongRunningInvocation<TResult>(Process process, TResult result)
+{
+    public Process Process { get; } = process;
+    public TResult Result { get; } = result;
 }

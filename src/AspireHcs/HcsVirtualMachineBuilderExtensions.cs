@@ -186,8 +186,9 @@ public static class HcsVirtualMachineBuilderExtensions
 
     /// <summary>
     /// Adds a <c>Connect (SSH)</c> command to the resource in the dashboard, which opens an SSH
-    /// client on the host pointed at the guest's leased address. Offered only while the VM is
-    /// running and <paramref name="endpointName"/> has resolved to an address.
+    /// client on the host — over an hvsocket forward once one is running (issue #56), the
+    /// guest's leased address otherwise. Offered only while the VM is running and
+    /// <paramref name="endpointName"/> has resolved to an address.
     /// </summary>
     /// <param name="builder">The VM to add the command to.</param>
     /// <param name="endpointName">The endpoint carrying SSH; must already be declared with <see cref="WithEndpoint"/>.</param>
@@ -208,22 +209,35 @@ public static class HcsVirtualMachineBuilderExtensions
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointName);
         RequireUsableUserName(userName);
 
-        RequireEndpoint(builder.Resource, endpointName, nameof(WithSshCommand));
+        EndpointAnnotation endpoint = RequireEndpoint(builder.Resource, endpointName, nameof(WithSshCommand));
+
+        // The button will prefer an hvsocket forward over the leased address once one is
+        // running (issue #56); GuestForwardPump reads this at boot to know what to start.
+        // Nothing here needs the target port to be resolved yet — WithEndpoint always sets it.
+        if (endpoint.TargetPort is { } targetPort)
+        {
+            builder.Resource.HvsocketForwardTargets[endpointName] = targetPort;
+        }
+
         ConnectCommands.RegisterSsh(builder, endpointName, userName);
         return builder;
     }
 
     /// <summary>
     /// Adds a <c>Connect (RDP)</c> command to the resource in the dashboard, which opens mstsc
-    /// on the host pointed at the guest's leased address. Offered only while the VM is running
-    /// and <paramref name="endpointName"/> has resolved to an address.
+    /// on the host — over an hvsocket forward once one is running (issue #56), the guest's
+    /// leased address otherwise. Offered only while the VM is running and
+    /// <paramref name="endpointName"/> has resolved to an address.
     /// </summary>
     /// <param name="builder">The VM to add the command to.</param>
     /// <param name="endpointName">The endpoint carrying RDP; must already be declared with <see cref="WithEndpoint"/>.</param>
     /// <param name="userName">Prefilled in the generated <c>.rdp</c>; mstsc still prompts for the password.</param>
     /// <remarks>
     /// The guest must serve RDP. Windows Server images do not by default: Remote Desktop needs
-    /// enabling and its firewall group opening.
+    /// enabling and its firewall group opening. Over the forward, mstsc connects to
+    /// <c>127.0.0.1</c> rather than the guest's own hostname, so its RDP certificate no longer
+    /// matches the address dialled — expect a name-mismatch warning that was not there before;
+    /// it is a consequence of the forward, not a fault.
     /// </remarks>
     public static IResourceBuilder<HcsVirtualMachineResource> WithRdpCommand(
         this IResourceBuilder<HcsVirtualMachineResource> builder,
@@ -234,13 +248,20 @@ public static class HcsVirtualMachineBuilderExtensions
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointName);
         RequireUsableUserName(userName);
 
-        RequireEndpoint(builder.Resource, endpointName, nameof(WithRdpCommand));
+        EndpointAnnotation endpoint = RequireEndpoint(builder.Resource, endpointName, nameof(WithRdpCommand));
 
         // A user name the .rdp format cannot represent fails at model-build time, by the same
         // check that guards the write.
         if (!string.IsNullOrEmpty(userName))
         {
             RdpFile.ValidateValue("username", userName);
+        }
+
+        // Same reasoning as WithSshCommand: GuestForwardPump reads this at boot to know what to
+        // start, and the button prefers the forward once one is running.
+        if (endpoint.TargetPort is { } targetPort)
+        {
+            builder.Resource.HvsocketForwardTargets[endpointName] = targetPort;
         }
 
         ConnectCommands.RegisterRdp(builder, endpointName, userName);
@@ -262,14 +283,10 @@ public static class HcsVirtualMachineBuilderExtensions
         }
     }
 
-    private static void RequireEndpoint(HcsVirtualMachineResource resource, string endpointName, string caller)
-    {
-        if (!resource.Annotations.OfType<EndpointAnnotation>()
-                .Any(e => string.Equals(e.Name, endpointName, StringComparison.OrdinalIgnoreCase)))
-        {
-            throw new InvalidOperationException(
+    private static EndpointAnnotation RequireEndpoint(HcsVirtualMachineResource resource, string endpointName, string caller)
+        => resource.Annotations.OfType<EndpointAnnotation>()
+            .FirstOrDefault(e => string.Equals(e.Name, endpointName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException(
                 $"Resource '{resource.Name}' has no endpoint named '{endpointName}'. " +
                 $"Declare it with WithEndpoint(\"{endpointName}\", targetPort) before calling {caller}().");
-        }
-    }
 }

@@ -175,7 +175,8 @@ public class ConnectCommandTests
 
         ExecuteCommandResult result = ConnectCommands.Execute(
             vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: "Running",
-            allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
+            preferForward: true,
+            (address, port) => ConnectCommands.BuildSshStartInfo(address, port, null),
             launched.Add);
 
         Assert.False(result.Success);
@@ -192,7 +193,8 @@ public class ConnectCommandTests
 
         ExecuteCommandResult result = ConnectCommands.Execute(
             vm.Resource, "ssh", "an SSH session", userInteractive: false, currentState: "Running",
-            allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
+            preferForward: true,
+            (address, port) => ConnectCommands.BuildSshStartInfo(address, port, null),
             launched.Add);
 
         Assert.False(result.Success);
@@ -210,7 +212,8 @@ public class ConnectCommandTests
 
         ExecuteCommandResult result = ConnectCommands.Execute(
             vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: "Running",
-            allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
+            preferForward: true,
+            (address, port) => ConnectCommands.BuildSshStartInfo(address, port, null),
             _ => throw new System.ComponentModel.Win32Exception("The system cannot find the file specified"));
 
         Assert.False(result.Success);
@@ -227,13 +230,124 @@ public class ConnectCommandTests
 
         ExecuteCommandResult result = ConnectCommands.Execute(
             vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: "Running",
-            allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, "Administrator"),
+            preferForward: true,
+            (address, port) => ConnectCommands.BuildSshStartInfo(address, port, "Administrator"),
             launched.Add);
 
         Assert.True(result.Success);
         ProcessStartInfo startInfo = Assert.Single(launched);
         Assert.Equal("ssh.exe", startInfo.FileName);
         Assert.Equal(["-p", "22", "-l", "Administrator", "192.168.1.20"], startInfo.ArgumentList);
+    }
+
+    [Fact]
+    public void An_ssh_click_prefers_a_running_forward_over_the_leased_address()
+    {
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithSshCommand();
+        Allocate(vm, "ssh", "192.168.1.20", 22);
+        vm.Resource.ForwardedConnectAddresses["ssh"] = "127.0.0.1:54321";
+        List<ProcessStartInfo> launched = [];
+
+        ExecuteCommandResult result = ConnectCommands.Execute(
+            vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: "Running",
+            preferForward: true,
+            (address, port) => ConnectCommands.BuildSshStartInfo(address, port, null),
+            launched.Add);
+
+        Assert.True(result.Success);
+        Assert.Contains("127.0.0.1:54321", result.Message, StringComparison.Ordinal);
+        ProcessStartInfo startInfo = Assert.Single(launched);
+        Assert.Equal(["-p", "54321", "127.0.0.1"], startInfo.ArgumentList);
+    }
+
+    [Fact]
+    public void An_ssh_click_falls_back_to_the_leased_address_once_the_forward_is_gone()
+    {
+        // The forward died mid-session (or the agent was never present); the leased address is
+        // still there, exactly as it was before the forward existed.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithSshCommand();
+        Allocate(vm, "ssh", "192.168.1.20", 22);
+        List<ProcessStartInfo> launched = [];
+
+        ExecuteCommandResult result = ConnectCommands.Execute(
+            vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: "Running",
+            preferForward: true,
+            (address, port) => ConnectCommands.BuildSshStartInfo(address, port, null),
+            launched.Add);
+
+        Assert.True(result.Success);
+        ProcessStartInfo startInfo = Assert.Single(launched);
+        Assert.Equal(["-p", "22", "192.168.1.20"], startInfo.ArgumentList);
+    }
+
+    [Fact]
+    public void An_rdp_click_prefers_a_running_forward_over_the_leased_address()
+    {
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("rdp", 3389).WithRdpCommand();
+        Allocate(vm, "rdp", "192.168.1.20", 3389);
+        vm.Resource.ForwardedConnectAddresses["rdp"] = "127.0.0.1:54321";
+        List<ProcessStartInfo> launched = [];
+        string path = ConnectCommands.RdpFilePath(vm.Resource, "rdp");
+
+        try
+        {
+            ExecuteCommandResult result = ConnectCommands.Execute(
+                vm.Resource, "rdp", "a Remote Desktop session", userInteractive: true, currentState: "Running",
+                preferForward: true,
+                (address, port) => ConnectCommands.BuildRdpStartInfo(vm.Resource, "rdp", address, port, null),
+                launched.Add);
+
+            Assert.True(result.Success);
+            Assert.Contains("127.0.0.1:54321", result.Message, StringComparison.Ordinal);
+
+            string content = File.ReadAllText(path, RdpFile.FileEncoding);
+            Assert.Contains("full address:s:127.0.0.1:54321", content, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void An_rdp_click_falls_back_to_the_leased_address_once_the_forward_is_gone()
+    {
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("rdp", 3389).WithRdpCommand();
+        Allocate(vm, "rdp", "192.168.1.20", 3389);
+        List<ProcessStartInfo> launched = [];
+        string path = ConnectCommands.RdpFilePath(vm.Resource, "rdp");
+
+        try
+        {
+            ExecuteCommandResult result = ConnectCommands.Execute(
+                vm.Resource, "rdp", "a Remote Desktop session", userInteractive: true, currentState: "Running",
+                preferForward: true,
+                (address, port) => ConnectCommands.BuildRdpStartInfo(vm.Resource, "rdp", address, port, null),
+                launched.Add);
+
+            Assert.True(result.Success);
+            Assert.Contains("192.168.1.20:3389", result.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void With_ssh_command_records_the_endpoints_target_port_for_the_forward_pump()
+    {
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("ssh", 22).WithSshCommand();
+
+        Assert.Equal(22, vm.Resource.HvsocketForwardTargets["ssh"]);
+    }
+
+    [Fact]
+    public void With_rdp_command_records_the_endpoints_target_port_for_the_forward_pump()
+    {
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithEndpoint("rdp", 3389).WithRdpCommand();
+
+        Assert.Equal(3389, vm.Resource.HvsocketForwardTargets["rdp"]);
     }
 
     [Fact]
@@ -248,8 +362,9 @@ public class ConnectCommandTests
         {
             ExecuteCommandResult result = ConnectCommands.Execute(
                 vm.Resource, "rdp", "a Remote Desktop session", userInteractive: true, currentState: "Running",
-                allocated => ConnectCommands.BuildRdpStartInfo(
-                    vm.Resource, "rdp", allocated.Address, allocated.Port, "Administrator"),
+                preferForward: true,
+                (address, port) => ConnectCommands.BuildRdpStartInfo(
+                    vm.Resource, "rdp", address, port, "Administrator"),
                 launched.Add);
 
             Assert.True(result.Success);
@@ -287,7 +402,8 @@ public class ConnectCommandTests
 
         ExecuteCommandResult result = ConnectCommands.Execute(
             vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: state,
-            allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
+            preferForward: true,
+            (address, port) => ConnectCommands.BuildSshStartInfo(address, port, null),
             launched.Add);
 
         Assert.False(result.Success);
@@ -306,7 +422,8 @@ public class ConnectCommandTests
 
         ExecuteCommandResult result = ConnectCommands.Execute(
             vm.Resource, "ssh", "an SSH session", userInteractive: true, currentState: null,
-            allocated => ConnectCommands.BuildSshStartInfo(allocated.Address, allocated.Port, null),
+            preferForward: true,
+            (address, port) => ConnectCommands.BuildSshStartInfo(address, port, null),
             launched.Add);
 
         Assert.True(result.Success);

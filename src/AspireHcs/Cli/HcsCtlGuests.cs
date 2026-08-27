@@ -50,4 +50,58 @@ internal static class HcsCtlGuests
 
         return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlGuestExecDocument, progress, cancellationToken);
     }
+
+    /// <summary>
+    /// Runs <c>guest info</c>: what the guest agent says about itself, over hvsocket. The
+    /// forward pump's agent-presence check — a VM whose image has no <c>hcsguest</c>, or one not
+    /// yet up, answers <see cref="HcsCtlGuestInfoDocument.Reachable"/> false here rather than
+    /// leaving a forward half-started.
+    /// </summary>
+    public static Task<HcsCtlGuestInfoDocument> GuestInfoAsync(
+        this HcsCtl hcsctl,
+        string vmId,
+        TimeSpan? timeout = null,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+
+        List<string> arguments = ["guest", "info", "--vmid", vmId];
+
+        if (timeout is { } bound)
+        {
+            arguments.Add("--timeout");
+            arguments.Add(HcsCtlVirtualMachines.FormatDuration(bound));
+        }
+
+        return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlGuestInfoDocument, progress, cancellationToken);
+    }
+
+    /// <summary>
+    /// Starts <c>guest forward --vmid &lt;id&gt; --port &lt;guestPort&gt; --listen 127.0.0.1:0</c>:
+    /// a Hyper-V-socket relay of one guest TCP port to an OS-assigned host loopback port. Returns
+    /// once the listener is up and the bound address is known — see
+    /// <see cref="HcsCtl.StartLongRunningAsync{TResult}"/> — not once the relay stops; the caller
+    /// owns the process and kills it when the forward is no longer wanted.
+    /// </summary>
+    public static Task<HcsCtlLongRunningInvocation<HcsCtlGuestForwardDocument>> GuestForwardAsync(
+        this HcsCtl hcsctl,
+        string vmId,
+        int guestPort,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(guestPort, 0);
+
+        List<string> arguments =
+        [
+            "guest", "forward",
+            "--vmid", vmId,
+            "--port", guestPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "--listen", "127.0.0.1:0",
+        ];
+
+        return hcsctl.StartLongRunningAsync(arguments, HcsCtlJsonContext.Default.HcsCtlGuestForwardDocument, progress, cancellationToken);
+    }
 }
