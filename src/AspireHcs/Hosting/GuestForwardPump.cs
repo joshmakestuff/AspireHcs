@@ -13,8 +13,7 @@ namespace AspireHcs.Hosting;
 /// immediately after starting, torn down with the boot.
 /// <para>
 /// Never fails the boot. An absent agent, or a forward that fails to start, degrades to
-/// nothing — <see cref="ConnectCommands"/> falls back to the leased address it already has,
-/// exactly as it did before this existed.
+/// nothing — <see cref="ConnectCommands"/> falls back to the leased address it already has.
 /// </para>
 /// </summary>
 internal static class GuestForwardPump

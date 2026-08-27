@@ -37,7 +37,7 @@ if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed.' }
 
 # ---- 2. Pull and import the image ------------------------------------------------------------
 # Resolution mirrors the AppHost: ASPIREHCS_HCSCTL, then PATH, then the repo's pinned drop in
-# tools\hcsctl — fetched (hash-verified) on demand, so a fresh clone needs no setup at all.
+# tools\hcsctl — fetched (hash-verified) on demand, so a fresh clone needs no setup.
 $hcsctl = if ($env:ASPIREHCS_HCSCTL) {
     if (Test-Path $env:ASPIREHCS_HCSCTL -PathType Container) { Join-Path $env:ASPIREHCS_HCSCTL 'hcsctl.exe' }
     else { $env:ASPIREHCS_HCSCTL }

@@ -14,7 +14,7 @@ It adds two resource types to the Aspire local dev loop, both ephemeral — crea
 
 Both kinds consume as well as serve: `WithReference(other)` delivers connection strings and
 endpoints into the guest, with host-loopback addresses relayed through a hidden Docker socat
-container so the guest can actually reach them.
+container so the guest can reach them.
 
 All HCS access goes through [hcsctl](https://github.com/joshmakestuff/hcsctl)'s `--json`
 contract; this package contains no HCS interop of its own.

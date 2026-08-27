@@ -13,7 +13,6 @@ namespace AspireHcs.Hosting;
 /// hidden Docker container per AppHost session, running one <c>socat</c> forwarder per relayed
 /// endpoint; each forwarder is published on <c>0.0.0.0</c> and dials
 /// <c>host.docker.internal:&lt;target&gt;</c>, which reaches host loopback from inside Docker.
-/// The chain is measured end to end from inside a VM (HTTP 200 from a loopback-bound Kestrel):
 /// guest → HNS gateway → docker-published port → socat → host.docker.internal → target.
 /// </summary>
 /// <remarks>
@@ -310,8 +309,8 @@ internal sealed class DockerRelay(IHostApplicationLifetime lifetime, ILogger<Doc
     /// <summary>
     /// Extracts the owning process id from a relay container's name, or null if this integration
     /// did not write it. The name is <c>aspirehcs-relay-&lt;pid&gt;-&lt;hex&gt;</c>; the bare
-    /// <c>aspirehcs-relay-&lt;pid&gt;</c> form earlier builds wrote is accepted too, so their
-    /// leftovers still get reclaimed. Anything else — <c>aspirehcs-relay-123x</c>, a malformed
+    /// <c>aspirehcs-relay-&lt;pid&gt;</c> form is accepted too, so its leftovers still get
+    /// reclaimed. Anything else — <c>aspirehcs-relay-123x</c>, a malformed
     /// suffix — is somebody else's container, never a candidate.
     /// </summary>
     internal static int? OwnerProcessId(string? name)

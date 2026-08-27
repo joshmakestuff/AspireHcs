@@ -7,7 +7,7 @@ var builder = DistributedApplication.CreateBuilder(args);
 
 // Settings come from the "Hcs" section of appsettings.json (or user secrets), with an
 // environment variable fallback. Only the VMs need any of them: they require a bootable VHDX
-// that cannot ship with the repository. The container runs with no settings at all once
+// that cannot ship with the repository. The container runs with no settings once
 // prepare.ps1 has imported the default image.
 string? Setting(string key, string environmentVariable)
     => builder.Configuration[$"Hcs:{key}"] is { Length: > 0 } fromConfig

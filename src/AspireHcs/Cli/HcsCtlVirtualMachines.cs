@@ -87,10 +87,8 @@ internal static class HcsCtlVirtualMachines
     /// Waits for the address the guest's DHCP client leases, and returns it.
     /// </summary>
     /// <remarks>
-    /// Blocks until the lease lands. Measured against a Rocky 10 guest on the Default Switch:
-    /// about 16 s from start on a cold boot and 10 s on a restart. hcsctl polls the endpoint.
-    ///
-    /// A timeout fails the call; it does not return an empty address.
+    /// Blocks until the lease lands. hcsctl polls the endpoint. A timeout fails the call; it
+    /// does not return an empty address.
     /// </remarks>
     public static Task<HcsCtlVmAddressDocument> WaitForAddressAsync(
         this HcsCtl hcsctl,

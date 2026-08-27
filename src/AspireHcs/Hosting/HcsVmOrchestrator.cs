@@ -273,8 +273,8 @@ internal sealed class HcsVmInstance(
     private static readonly TimeSpan ExitPollInterval = TimeSpan.FromSeconds(2);
 
     /// <summary>
-    /// How long to wait for the guest to take a DHCP lease. Cold boots take about 16 s. A guest
-    /// with no DHCP client fails the resource; it does not hang the AppHost.
+    /// How long to wait for the guest to take a DHCP lease. A guest with no DHCP client fails
+    /// the resource; it does not hang the AppHost.
     /// </summary>
     private static readonly TimeSpan AddressTimeout = TimeSpan.FromSeconds(90);
 
@@ -735,8 +735,7 @@ internal sealed class HcsVmInstance(
     /// <remarks>
     /// The address is not knowable before the guest boots. An HCN endpoint carries none when it is
     /// created, none when it is attached to a NIC, and none while the VM runs without a guest, so
-    /// this is a wait and not a read. A Rocky 10 guest takes about 16 s on a cold boot and 10 s on
-    /// a restart.
+    /// this is a wait and not a read.
     /// </remarks>
     private async Task AllocateEndpointsAsync(
         HcsCtl hcsctl, List<EndpointAnnotation> endpoints, CancellationToken cancellationToken)

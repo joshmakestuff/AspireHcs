@@ -3,8 +3,8 @@
 A small showcase of HCS guests as Aspire resources:
 
 - **worker** — a Hyper-V-isolated Windows container running `HcsSample.GuestApi`, a published
-  .NET binary bind-mounted from the host into a stock nanoserver image. No Dockerfile, no image
-  build: your code, hardware-isolated.
+  .NET binary bind-mounted from the host into a stock nanoserver image — no Dockerfile, no
+  image build.
 - **web** — an ordinary Aspire project that consumes the guests through endpoint references and
   shows what the container answers, including the live content of the bind-mounted `data\`
   directory. Edit `data\hello.txt` while it runs; the guest serves the change immediately.
