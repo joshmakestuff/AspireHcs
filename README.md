@@ -10,7 +10,7 @@ It adds two resource types to the Aspire local dev loop, both ephemeral — crea
   buttons in the dashboard.
 - **Hyper-V-isolated Windows containers** — run images from an
   [hcsctl](https://github.com/joshmakestuff/hcsctl) store. Process isolation is out of scope
-  and is refused up front.
+  for now.
 
 Both kinds consume as well as serve: `WithReference(other)` delivers connection strings and
 endpoints into the guest, with host-loopback addresses relayed through a hidden Docker socat
