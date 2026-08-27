@@ -65,7 +65,9 @@ var worker = builder.AddHcsContainer("worker")
     .WithNetwork()
     .WithEndpoint("http", targetPort: 8080, scheme: "http")
     .WithTcpHealthCheck()
-    .WithStore(store);
+    .WithStore(store)
+    // Dashboard "Connect (Shell)" button: opens an interactive cmd.exe inside the container.
+    .WithShellCommand();
 
 if (repoHcsCtl is not null)
 {

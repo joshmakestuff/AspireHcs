@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Globalization;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace AspireHcs.Hosting;
 
@@ -30,7 +29,7 @@ internal static class ConnectCommands
                 CurrentState(context.Services, context.ResourceName),
                 preferForward: true,
                 (address, port) => BuildSshStartInfo(address, port, userName),
-                ShellExecute)),
+                ConnectAvailability.ShellExecute)),
             new CommandOptions
             {
                 Description = $"Open an SSH session to the guest on the '{endpointName}' endpoint.",
@@ -54,7 +53,7 @@ internal static class ConnectCommands
                 CurrentState(context.Services, context.ResourceName),
                 preferForward: true,
                 (address, port) => BuildRdpStartInfo(resource, endpointName, address, port, userName),
-                ShellExecute)),
+                ConnectAvailability.ShellExecute)),
             new CommandOptions
             {
                 Description = $"Open a Remote Desktop session to the guest on the '{endpointName}' endpoint.",
@@ -83,9 +82,9 @@ internal static class ConnectCommands
         // (HcsVmOrchestrator assigns AllocatedEndpoint and never clears it). The predicate is
         // "Running", not "not terminal", so it agrees with Availability: a VM in Starting still
         // carries the previous run's allocation.
-        if (!StateAllowsConnect(currentState))
+        if (!ConnectAvailability.StateAllowsConnect(currentState))
         {
-            return Failure(
+            return ConnectAvailability.Failure(
                 $"The virtual machine is {currentState}, so there is nothing to connect to. " +
                 "Wait for it to be running.");
         }
@@ -94,7 +93,7 @@ internal static class ConnectCommands
         // leaves an invisible process. The flag is a parameter so a test can reach this branch.
         if (!userInteractive)
         {
-            return Failure(
+            return ConnectAvailability.Failure(
                 "The AppHost is not running in an interactive session, so a client window has " +
                 "nowhere to appear. Connect commands only work when the AppHost and the browser " +
                 "share a desktop.");
@@ -102,7 +101,7 @@ internal static class ConnectCommands
 
         if (ResolveAddress(resource, endpointName, preferForward) is not { } target)
         {
-            return Failure(
+            return ConnectAvailability.Failure(
                 $"Endpoint '{endpointName}' has no address yet. The guest gets one when its DHCP " +
                 "lease is discovered, shortly after it boots.");
         }
@@ -114,7 +113,7 @@ internal static class ConnectCommands
         }
         catch (Exception ex)
         {
-            return Failure($"Could not prepare {sessionDescription}: {ex.Message}");
+            return ConnectAvailability.Failure($"Could not prepare {sessionDescription}: {ex.Message}");
         }
 
         try
@@ -125,7 +124,7 @@ internal static class ConnectCommands
         {
             // Usually the client is not installed; the raw Win32 message ("The system cannot
             // find the file specified") does not make that obvious.
-            return Failure(
+            return ConnectAvailability.Failure(
                 $"Could not start '{startInfo.FileName}': {ex.Message} " +
                 "Check that the client is installed and on PATH.");
         }
@@ -244,39 +243,11 @@ internal static class ConnectCommands
     }
 
     /// <summary>
-    /// Whether the state permits connecting. <c>null</c> (state unknown) is permitted: the
-    /// resource id <see cref="CurrentState"/> looks up by is not guaranteed to equal the resource
-    /// name. <c>Availability</c> has a real snapshot and requires Running.
-    /// </summary>
-    private static bool StateAllowsConnect(string? currentState)
-        => currentState is null || currentState == KnownResourceStates.Running;
-
-    /// <summary>
-    /// Best-effort current state for the guard above. Returns null when it cannot be determined.
+    /// Best-effort current state for the guard in <see cref="Execute"/>. Returns null when it
+    /// cannot be determined. Forwards to <see cref="ConnectAvailability.CurrentState"/>.
     /// </summary>
     internal static string? CurrentState(IServiceProvider services, string resourceName)
-    {
-        try
-        {
-            ResourceNotificationService notifications =
-                services.GetRequiredService<ResourceNotificationService>();
-            return notifications.TryGetCurrentState(resourceName, out ResourceEvent? resourceEvent)
-                ? resourceEvent.Snapshot.State?.Text
-                : null;
-        }
-        catch (InvalidOperationException)
-        {
-            // The service is not registered in this host (for example a bare model in a test).
-            // Unknown state permits connecting.
-            return null;
-        }
-    }
-
-    private static void ShellExecute(ProcessStartInfo startInfo)
-    {
-        // Disposing the handle does not disturb the client: it keeps running independently.
-        using Process? _ = Process.Start(startInfo);
-    }
+        => ConnectAvailability.CurrentState(services, resourceName);
 
     /// <summary>
     /// Enabled only when the VM is Running and the endpoint has an address. The guest reaches
@@ -294,7 +265,4 @@ internal static class ConnectCommands
             ? ResourceCommandState.Disabled
             : ResourceCommandState.Enabled;
     }
-
-    private static ExecuteCommandResult Failure(string message)
-        => new() { Success = false, Message = message };
 }
