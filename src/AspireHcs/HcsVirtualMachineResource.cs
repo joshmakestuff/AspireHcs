@@ -85,4 +85,21 @@ public sealed class HcsVirtualMachineResource([ResourceName] string name)
 
     /// <inheritdoc cref="EndpointId"/>
     internal string? MacAddress { get; set; }
+
+    /// <summary>
+    /// Endpoint names <c>WithSshCommand</c> wants relayed over hvsocket instead of the leased
+    /// address, mapped to the endpoint's guest-side target port. Populated at model-build time;
+    /// read once, at boot, by <c>GuestForwardPump</c>.
+    /// </summary>
+    internal Dictionary<string, int> HvsocketForwardTargets { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// <c>host:port</c> for each endpoint name an hvsocket forward is actually running for.
+    /// Written by <c>GuestForwardPump</c> once its listener is up, and removed if the forward
+    /// process later exits unexpectedly; read by <c>ConnectCommands</c> to prefer the forward
+    /// over the leased address. A concurrent dictionary: the forward's exit can be observed on a
+    /// process-watcher thread while a dashboard click reads this on another.
+    /// </summary>
+    internal System.Collections.Concurrent.ConcurrentDictionary<string, string> ForwardedConnectAddresses { get; }
+        = new(StringComparer.OrdinalIgnoreCase);
 }

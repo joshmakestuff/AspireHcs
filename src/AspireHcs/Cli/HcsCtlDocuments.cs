@@ -327,6 +327,53 @@ internal sealed record HcsCtlGuestExecDocument
     public long ElapsedMs { get; init; }
 }
 
+/// <summary>
+/// <c>hcsctl guest info</c> — whether the guest agent answered over hvsocket, and what it said
+/// about itself. Only the fields <c>guest forward</c>'s agent-presence check reads are bound.
+/// </summary>
+internal sealed record HcsCtlGuestInfoDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    /// <summary>False with no <c>hcsguest</c> in the image, or a guest that has not answered yet.</summary>
+    [JsonPropertyName("reachable")]
+    public bool Reachable { get; init; }
+
+    /// <summary>The reading behind <see cref="Reachable"/>: <c>absent</c>, <c>unreachable</c>, or <c>ready</c>.</summary>
+    [JsonPropertyName("state")]
+    public string? State { get; init; }
+
+    [JsonPropertyName("detail")]
+    public string? Detail { get; init; }
+}
+
+/// <summary>
+/// <c>hcsctl guest forward</c> — the one document this long-running command emits, as soon as
+/// its listener is up and before it starts relaying connections.
+/// </summary>
+internal sealed record HcsCtlGuestForwardDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("command")]
+    public string? Command { get; init; }
+
+    [JsonPropertyName("vmId")]
+    public string? VmId { get; init; }
+
+    /// <summary>
+    /// The host address actually bound, e.g. <c>127.0.0.1:54321</c> — the real port even when
+    /// <c>--listen 127.0.0.1:0</c> asked for an OS-assigned one.
+    /// </summary>
+    [JsonPropertyName("listen")]
+    public string? Listen { get; init; }
+
+    [JsonPropertyName("guestPort")]
+    public int GuestPort { get; init; }
+}
+
 /// <summary><c>hcsctl container ls</c> — the store and HCS reconciled.</summary>
 internal sealed record HcsCtlContainerListDocument
 {
@@ -716,6 +763,8 @@ internal sealed record HcsCtlStreamRecord
 [JsonSerializable(typeof(HcsCtlNetworkListDocument))]
 [JsonSerializable(typeof(HcsCtlNetworkInspectDocument))]
 [JsonSerializable(typeof(HcsCtlGuestExecDocument))]
+[JsonSerializable(typeof(HcsCtlGuestInfoDocument))]
+[JsonSerializable(typeof(HcsCtlGuestForwardDocument))]
 [JsonSerializable(typeof(HcsCtlExecDocument))]
 [JsonSerializable(typeof(HcsCtlStreamRecord))]
 [JsonSerializable(typeof(HcsCtlVmCreateDocument))]

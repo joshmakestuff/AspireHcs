@@ -463,6 +463,12 @@ internal sealed class HcsVmInstance(
             await DeliverEnvironmentAsync(hcsctl, stopping).ConfigureAwait(false);
             ThrowIfExitedMidBoot(boot);
 
+            // Best-effort: a VM with no Connect (SSH) command has nothing to forward, and one
+            // whose image lacks hcsguest (or whose forward fails to start) keeps the leased
+            // address it already resolved above. Never fails the boot.
+            await GuestForwardPump.StartAsync(resource, hcsctl, boot.Ledger, logger, stopping).ConfigureAwait(false);
+            ThrowIfExitedMidBoot(boot);
+
             // hcsctl has no verb that blocks until a compute system exits, so the exit watch is a
             // poll.
             StartExitWatch(boot, hcsctl, pumpCts.Token);

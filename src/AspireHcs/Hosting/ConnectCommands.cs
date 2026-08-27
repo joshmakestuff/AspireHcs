@@ -28,7 +28,8 @@ internal static class ConnectCommands
             context => Task.FromResult(Execute(
                 resource, endpointName, "an SSH session", Environment.UserInteractive,
                 CurrentState(context.Services, context.ResourceName),
-                allocated => BuildSshStartInfo(allocated.Address, allocated.Port, userName),
+                preferForward: true,
+                (address, port) => BuildSshStartInfo(address, port, userName),
                 ShellExecute)),
             new CommandOptions
             {
@@ -51,7 +52,8 @@ internal static class ConnectCommands
             context => Task.FromResult(Execute(
                 resource, endpointName, "a Remote Desktop session", Environment.UserInteractive,
                 CurrentState(context.Services, context.ResourceName),
-                allocated => BuildRdpStartInfo(resource, endpointName, allocated.Address, allocated.Port, userName),
+                preferForward: true,
+                (address, port) => BuildRdpStartInfo(resource, endpointName, address, port, userName),
                 ShellExecute)),
             new CommandOptions
             {
@@ -72,7 +74,8 @@ internal static class ConnectCommands
         string sessionDescription,
         bool userInteractive,
         string? currentState,
-        Func<AllocatedEndpoint, ProcessStartInfo> build,
+        bool preferForward,
+        Func<string, int, ProcessStartInfo> build,
         Action<ProcessStartInfo> launch)
     {
         // UpdateState only governs what the dashboard offers; the command is reachable through
@@ -97,7 +100,7 @@ internal static class ConnectCommands
                 "share a desktop.");
         }
 
-        if (EndpointAllocations.Find(resource, endpointName) is not { } allocated)
+        if (ResolveAddress(resource, endpointName, preferForward) is not { } target)
         {
             return Failure(
                 $"Endpoint '{endpointName}' has no address yet. The guest gets one when its DHCP " +
@@ -107,7 +110,7 @@ internal static class ConnectCommands
         ProcessStartInfo startInfo;
         try
         {
-            startInfo = build(allocated);
+            startInfo = build(target.Address, target.Port);
         }
         catch (Exception ex)
         {
@@ -131,8 +134,43 @@ internal static class ConnectCommands
         {
             Success = true,
             Message = string.Create(CultureInfo.InvariantCulture,
-                $"Opened {sessionDescription} to {allocated.Address}:{allocated.Port}."),
+                $"Opened {sessionDescription} to {target.Address}:{target.Port}."),
         };
+    }
+
+    /// <summary>
+    /// The address and port to dial: an hvsocket forward's <c>127.0.0.1:&lt;port&gt;</c> when
+    /// <paramref name="preferForward"/> is set and one is running, otherwise the endpoint's
+    /// leased address — the fallback for a VM whose image has no <c>hcsguest</c>, or whose
+    /// forward failed to start or later died.
+    /// </summary>
+    private static (string Address, int Port)? ResolveAddress(
+        HcsVirtualMachineResource resource, string endpointName, bool preferForward)
+    {
+        if (preferForward
+            && resource.ForwardedConnectAddresses.TryGetValue(endpointName, out string? forwarded)
+            && TrySplitHostPort(forwarded, out string forwardAddress, out int forwardPort))
+        {
+            return (forwardAddress, forwardPort);
+        }
+
+        return EndpointAllocations.Find(resource, endpointName) is { } allocated
+            ? (allocated.Address, allocated.Port)
+            : null;
+    }
+
+    private static bool TrySplitHostPort(string hostAndPort, out string address, out int port)
+    {
+        if (System.Net.IPEndPoint.TryParse(hostAndPort, out System.Net.IPEndPoint? endpoint))
+        {
+            address = endpoint.Address.ToString();
+            port = endpoint.Port;
+            return true;
+        }
+
+        address = "";
+        port = 0;
+        return false;
     }
 
     /// <summary>
