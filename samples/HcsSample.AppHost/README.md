@@ -8,6 +8,9 @@ A small showcase of HCS guests as Aspire resources:
 - **web** — an ordinary Aspire project that consumes the guests through endpoint references and
   shows what the container answers, including the live content of the bind-mounted `data\`
   directory. Edit `data\hello.txt` while it runs; the guest serves the change immediately.
+- **pg** — an ordinary Aspire Postgres integration (a Linux Docker container) for contrast with
+  the raw-HCS guests. Scripts in `db\` seed the `appdb` database on first start, and **web**
+  reads the rows through the injected connection string.
 - **appliance** / **winserver** — opt-in VMs (they need a bootable VHDX you provide), with
   Connect (SSH/RDP) buttons on the dashboard.
 
@@ -21,7 +24,8 @@ A small showcase of HCS guests as Aspire resources:
 aspire run     # or: dotnet run
 ```
 
-The AppHost must run elevated or as a member of **Hyper-V Administrators**. Nothing else is
+The AppHost must run elevated or as a member of **Hyper-V Administrators**. **pg** additionally
+needs a running Docker engine (any daemon; the Postgres container is Linux). Nothing else is
 required for the container and the web frontend: `prepare.ps1` pins
 [hcsctl](https://github.com/joshmakestuff/hcsctl) into `tools\hcsctl`, and the AppHost falls
 back to that copy when neither `ASPIREHCS_HCSCTL` nor `PATH` finds one.
@@ -31,6 +35,8 @@ Things to try while it runs:
 - Edit `data\hello.txt` — the web page picks it up on the next refresh, live over VSMB.
 - Pause **worker** from the dashboard — the page shows it stop answering; resume it.
 - The dashboard's **worker** details show guest statistics and its process list.
+- The **appdb** card on the web page lists the rows seeded from `db\seed.sql`. The container is
+  ephemeral: restart the AppHost and seeding runs again from scratch.
 - With a VM configured, the web page probes its endpoint at the leased guest address, and the
   resource's **Connect (SSH)** / **Connect (RDP)** command opens a session to it.
 

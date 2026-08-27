@@ -74,13 +74,25 @@ if (repoHcsCtl is not null)
     worker.WithHcsCtl(repoHcsCtl);
 }
 
+// ---- Postgres (ordinary Aspire resource) ----------------------------------------------------
+// An ordinary Aspire integration for contrast with the raw-HCS guests above: a Linux Docker
+// container whose image, lifetime, and connection string Aspire owns end to end. Every script
+// in db/ runs once, on the container's first start with an empty data directory, so each fresh
+// run begins with the same rows. The container is ephemeral by default: nothing survives an
+// AppHost restart, which keeps the sample's data predictable without volume management.
+var db = builder.AddPostgres("pg")
+    .WithBindMount("db", "/docker-entrypoint-initdb.d", isReadOnly: true)
+    .AddDatabase("appdb");
+
 // ---- Frontend -------------------------------------------------------------------------------
 // An ordinary Aspire project consuming the guests. Each referenced endpoint arrives as
 // service-discovery configuration; the page shows what the container answers and probes the
 // VMs' endpoints.
 var web = builder.AddProject<Projects.HcsSample_Web>("web")
     .WithReference(worker.GetEndpoint("http"))
-    .WaitFor(worker);
+    .WithReference(db)
+    .WaitFor(worker)
+    .WaitFor(db);
 
 // ---- Consumer direction (opt-in) ------------------------------------------------------------
 // The container consuming the web project: WithReference on an HCS resource delivers the
