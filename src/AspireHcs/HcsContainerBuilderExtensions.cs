@@ -101,6 +101,27 @@ public static class HcsContainerBuilderExtensions
     }
 
     /// <summary>
+    /// Adds a "Connect (Shell)" command to the dashboard, opening an interactive console on the
+    /// host attached to a new guest process via <c>hcsctl container exec --interactive --tty</c>.
+    /// Unlike <see cref="WithSshCommand"/>/<see cref="WithRdpCommand"/> on the VM resource, no
+    /// endpoint or address is required.
+    /// </summary>
+    /// <param name="shell">
+    /// The guest binary to run, e.g. <c>cmd.exe</c> (default) or <c>powershell.exe</c>.
+    /// <c>nanoserver</c> has only <c>cmd.exe</c>. If the binary is missing in the guest, hcsctl's
+    /// own error appears directly in the console window this command opens.
+    /// </param>
+    public static IResourceBuilder<HcsContainerResource> WithShellCommand(
+        this IResourceBuilder<HcsContainerResource> builder, string shell = "cmd.exe")
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(shell);
+
+        ContainerConnectCommands.RegisterShell(builder, shell);
+        return builder;
+    }
+
+    /// <summary>
     /// Points at a specific <c>hcsctl.exe</c>, overriding the <c>ASPIREHCS_HCSCTL</c> environment
     /// variable and PATH. Accepts the binary or the directory holding it.
     /// </summary>
