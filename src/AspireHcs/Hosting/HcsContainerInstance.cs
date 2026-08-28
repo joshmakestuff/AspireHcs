@@ -30,6 +30,17 @@ internal sealed class HcsContainerInstance(
 
     private BootRecord? _current;
     private int _epoch;
+
+    /// <summary>
+    /// True while a dashboard pause is in flight or complete and its resume has not happened. The
+    /// workload thread reads it (the recovery path in <see cref="RunWorkloadAsync"/>) to decide
+    /// whether an invalid-state create is the pause race (issue #74). It is written only under
+    /// <c>_gate</c> — by <see cref="PauseAsync"/> (before the hcsctl pause, so the in-flight
+    /// window is covered), <see cref="ResumeAsync"/>, and the boot-retirement paths that clear it
+    /// — which keeps the pair atomic and pause state contained to one boot.
+    /// </summary>
+    private bool _paused;
+
     private CancellationToken _appStopping;
 
     /// <summary>
@@ -115,7 +126,53 @@ internal sealed class HcsContainerInstance(
                 throw new InvalidOperationException("The container is not running.");
             }
 
-            await hcsctl.PauseAsync(resource.ContainerId, _appStopping).ConfigureAwait(false);
+            // The pause gate (issue #74): pausing between Running publication and the workload's
+            // HcsCreateProcess makes that create fail 0x80370105/0xc0370105. Wait for the
+            // workload's guest process to be visible before pausing. A command that cannot name an
+            // executable skips the gate; a process that never appears pauses anyway — the recovery
+            // path handles the invalid-state failure.
+            if (WorkloadImageName(resource.Command) is { } imageName)
+            {
+                // Test-only signal: proves to the integration test that the pause has entered
+                // the gate (and is polling ps) before the test releases the workload barrier.
+                if (Environment.GetEnvironmentVariable("ASPIREHCS_TEST_WORKLOAD_BARRIER") is { Length: > 0 } barrier)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(barrier)!);
+                    File.WriteAllText(barrier + ".pause-gate", string.Empty);
+                }
+
+                bool seen = await WaitForWorkloadProcessAsync(
+                    token => ReadProcessListAsync(hcsctl, resource.ContainerId, token),
+                    imageName,
+                    WorkloadGateTimeout,
+                    _appStopping).ConfigureAwait(false);
+
+                if (!seen)
+                {
+                    logger.LogWarning(
+                        "Workload process {Image} not visible after {Timeout}; pausing anyway (recovery covers the invalid-state failure).",
+                        imageName,
+                        WorkloadGateTimeout);
+                }
+            }
+
+            // Set before the hcsctl call: HCS can complete the pause while the client call is
+            // still returning, and a create that fails inside that window must already see
+            // _paused=true for the recovery to trigger. The flag is visible to the workload
+            // thread, which runs detached from this gate.
+            Volatile.Write(ref _paused, true);
+
+            try
+            {
+                await hcsctl.PauseAsync(resource.ContainerId, _appStopping).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The pause never happened: the container is still running, so no create can be
+                // the pause race. Put the flag back and let the caller see the failure.
+                Volatile.Write(ref _paused, false);
+                throw;
+            }
 
             await notifications.PublishUpdateAsync(resource, s => s with
             {
@@ -139,6 +196,10 @@ internal sealed class HcsContainerInstance(
             }
 
             await hcsctl.ResumeAsync(resource.ContainerId, _appStopping).ConfigureAwait(false);
+
+            // The container is running again: an invalid-state create from here on is not the
+            // pause race and must not trigger the recovery.
+            Volatile.Write(ref _paused, false);
 
             await notifications.PublishUpdateAsync(resource, s => s with
             {
@@ -216,6 +277,11 @@ internal sealed class HcsContainerInstance(
         // no matter where this boot is when the AppHost starts stopping.
         BootRecord boot = new(Interlocked.Increment(ref _epoch), new BootLedger(logger));
         _current = boot;
+
+        // Pause state never crosses an epoch: this boot starts unpaused whatever the previous one
+        // left behind (see DrainCurrentBoot). A stale true here would let an unrelated
+        // invalid-state create trigger a bogus resume on a container that was never paused.
+        Volatile.Write(ref _paused, false);
 
         try
         {
@@ -503,6 +569,134 @@ internal sealed class HcsContainerInstance(
         }
     }
 
+    /// <summary>How long a pause waits for the workload's guest process before pausing anyway.</summary>
+    private static readonly TimeSpan WorkloadGateTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>How often the workload's guest process is looked for while the pause gate is open.</summary>
+    private static readonly TimeSpan WorkloadPollInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// The guest image name of the workload's first process, derived from the workload command:
+    /// the first token — quote-aware, so a quoted executable path with spaces is taken whole —
+    /// its file name, with <c>.exe</c> appended when it has no extension. Null when the command
+    /// cannot name an executable — the pause gate is skipped.
+    /// </summary>
+    internal static string? WorkloadImageName(string? command)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            return null;
+        }
+
+        string trimmed = command.TrimStart();
+        string executable;
+        if (trimmed[0] == '"')
+        {
+            // Quoted executable: "C:\Program Files\worker.exe" --run. Everything up to the
+            // closing quote is the path; an unterminated quote cannot name an executable.
+            int closing = trimmed.IndexOf('"', 1);
+            if (closing < 0)
+            {
+                return null;
+            }
+
+            executable = trimmed[1..closing];
+        }
+        else
+        {
+            int whitespace = IndexOfFirstWhitespace(trimmed);
+            executable = whitespace < 0 ? trimmed : trimmed[..whitespace];
+        }
+
+        if (executable.Length == 0)
+        {
+            return null;
+        }
+
+        string image = Path.GetFileName(executable);
+        if (image.Length == 0)
+        {
+            return null;
+        }
+
+        return Path.GetExtension(image).Length == 0 ? image + ".exe" : image;
+    }
+
+    /// <summary>Index of the first whitespace character in <paramref name="value"/>, or -1.</summary>
+    private static int IndexOfFirstWhitespace(string value)
+    {
+        for (int i = 0; i < value.Length; i++)
+        {
+            if (char.IsWhiteSpace(value[i]))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Polls the guest's process list until the workload's process image is visible: true on a
+    /// sighting, false when <paramref name="timeout"/> expires first.
+    /// </summary>
+    /// <remarks>
+    /// The pause gate (issue #74): pausing between Running publication and the workload's
+    /// HcsCreateProcess makes that create fail 0x80370105/0xc0370105. A failed <c>container ps</c>
+    /// is swallowed and retried — a container mid-pause refuses ps with 0xc037010a (measured),
+    /// and the first polls race the workload's own spawn.
+    /// </remarks>
+    internal static async Task<bool> WaitForWorkloadProcessAsync(
+        Func<CancellationToken, Task<HcsCtlProcessListDocument?>> listAsync,
+        string imageLower,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        long started = Stopwatch.GetTimestamp();
+
+        while (true)
+        {
+            HcsCtlProcessListDocument? listing = null;
+            try
+            {
+                listing = await listAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (HcsCtlCommandException)
+            {
+                // Swallowed: the next poll retries. A pause in flight makes `container ps` fail.
+            }
+
+            if (listing is not null)
+            {
+                foreach (HcsCtlGuestProcess process in listing.Processes)
+                {
+                    if (string.Equals(process.ImageName, imageLower, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            if (Stopwatch.GetElapsedTime(started) >= timeout)
+            {
+                return false;
+            }
+
+            await Task.Delay(WorkloadPollInterval, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Bridges the pause gate's nullable listing contract to <c>container ps</c>, which succeeds
+    /// with a document and fails by throwing. The explicit nullable result type keeps
+    /// <see cref="WaitForWorkloadProcessAsync"/>'s <c>listAsync</c> signature free of a variance
+    /// conversion the compiler rejects (CS8619); a failed poll still surfaces as an exception the
+    /// gate swallows and retries.
+    /// </summary>
+    private static async Task<HcsCtlProcessListDocument?> ReadProcessListAsync(
+        HcsCtl hcsctl, string containerId, CancellationToken cancellationToken) =>
+        await hcsctl.ProcessListAsync(containerId, cancellationToken).ConfigureAwait(false);
+
     /// <summary>How often live statistics are refreshed into the dashboard.</summary>
     private static readonly TimeSpan StatisticsInterval = TimeSpan.FromSeconds(5);
 
@@ -646,6 +840,17 @@ internal sealed class HcsContainerInstance(
     /// stderr framing: guest stdout/stderr land on the resource log, while hcsctl's own progress
     /// lines are debug-only.
     /// </summary>
+    /// <remarks>
+    /// The recovery takes <c>_gate</c> to serialize against the same holders the dashboard
+    /// commands wait on: a Stop/Restart drain retires the epoch and nulls <c>_current</c> under
+    /// it, and a public resume clears <c>_paused</c> under it. The re-validation inside the gate
+    /// therefore sees the latest truth: a stopped boot fails the epoch/<c>_current</c> check and
+    /// the recovery becomes a no-op — no resume, no publication, no re-dispatch — and a resume
+    /// that won the race makes the <c>_paused</c> check fail the same way. No deadlock: the
+    /// workload thread is a detached <see cref="Task.Run"/> from <see cref="BootAsync"/> that
+    /// never holds the gate between execs, so this callback's <c>WaitAsync</c> waits only on
+    /// holders that release in bounded time, never on this thread.
+    /// </remarks>
     private async Task RunWorkloadAsync(
         HcsCtl hcsctl,
         BootRecord boot,
@@ -654,15 +859,142 @@ internal sealed class HcsContainerInstance(
         IProgress<HcsCtlStreamRecord> progress,
         CancellationToken cancellationToken)
     {
+        // Test-only dispatch barrier (F6): parks the workload before its first exec attempt when
+        // an integration test sets ASPIREHCS_TEST_WORKLOAD_BARRIER, so the #74 pre-create window
+        // can be entered deterministically. Unset in production — a no-op.
+        await WaitForTestWorkloadBarrierAsync(command, cancellationToken).ConfigureAwait(false);
+
+        await RunWorkloadWithRecoveryAsync(
+            hcsctl,
+            resource.ContainerId,
+            command,
+            environment,
+            progress,
+            logger,
+            () => Volatile.Read(ref _paused),
+            async () =>
+            {
+                // Serialized under _gate (per the remarks above): the re-validation and the
+                // resume are atomic against a Stop/Restart drain and a public ResumeAsync.
+                await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
+                try
+                {
+                    // Re-validate BEFORE any side effect. A stopped boot (epoch advanced or
+                    // _current retired) or an already-cleared pause means this recovery must not
+                    // touch the container: return false so the loop skips the re-dispatch and
+                    // publishes nothing — exactly-once is preserved.
+                    if (Volatile.Read(ref _epoch) != boot.Epoch
+                        || !ReferenceEquals(Volatile.Read(ref _current), boot)
+                        || !Volatile.Read(ref _paused))
+                    {
+                        return false;
+                    }
+
+                    // The same shape ResumeAsync publishes: resume the container, put Running
+                    // back, and clear the flag so a later invalid-state create is not mistaken
+                    // for this pause race.
+                    await hcsctl.ResumeAsync(resource.ContainerId, _appStopping).ConfigureAwait(false);
+
+                    await notifications.PublishUpdateAsync(resource, s => s with
+                    {
+                        State = KnownResourceStates.Running,
+                    }).ConfigureAwait(false);
+
+                    Volatile.Write(ref _paused, false);
+                    return true;
+                }
+                finally
+                {
+                    _gate.Release();
+                }
+            },
+            code =>
+            {
+                // The guest's exit code, not hcsctl's. hcsctl reports the two separately.
+                logger.LogInformation("Container workload exited with code {ExitCode}.", code);
+                return OnWorkloadExitedAsync(boot, code);
+            },
+            failure =>
+            {
+                logger.LogError(failure, "Container workload failed.");
+                return OnWorkloadExitedAsync(boot, exitCode: null);
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Decides whether an exec failure is the pause race (issue #74): the container was paused
+    /// when the create ran, and the failure text names HCS_E_INVALID_STATE. The paused state is
+    /// the <c>_paused</c> flag <see cref="PauseAsync"/>/<see cref="ResumeAsync"/> maintain under
+    /// <c>_gate</c>; the failure text is classified by <see cref="HcsErrors"/>.
+    /// </summary>
+    internal static bool ShouldRetryWorkload(bool paused, string? message) =>
+        paused && HcsErrors.IsInvalidState(message);
+
+    /// <summary>
+    /// Test-only dispatch barrier for the AspireHcs#74 regression (ContainerDashboardTests): when
+    /// the <c>ASPIREHCS_TEST_WORKLOAD_BARRIER</c> environment variable names a path, the workload
+    /// waits here — before its first exec attempt — until that file exists, so the test can park
+    /// the workload inside the pre-create window deterministically and pause there. Production
+    /// (env unset) returns immediately and is unaffected.
+    /// </summary>
+    private async Task WaitForTestWorkloadBarrierAsync(string command, CancellationToken cancellationToken)
+    {
+        string? barrierPath = Environment.GetEnvironmentVariable("ASPIREHCS_TEST_WORKLOAD_BARRIER");
+        if (string.IsNullOrEmpty(barrierPath))
+        {
+            return;
+        }
+
+        logger.LogInformation(
+            "Test barrier set: workload {Image} is held until {BarrierPath} exists.",
+            WorkloadImageName(command) ?? command,
+            barrierPath);
+
+        while (!File.Exists(barrierPath))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken).ConfigureAwait(false);
+        }
+
+        logger.LogInformation("Test barrier released: dispatching workload.");
+    }
+
+    /// <summary>
+    /// Runs one workload exec, with the O3+O2 recovery for the pause race (issue #74): when the
+    /// create fails with HCS_E_INVALID_STATE while the container is paused, the container is
+    /// resumed, Running is published again and the exec is re-dispatched <b>exactly once</b>.
+    /// Any other failure — or a failed retry — falls through to <paramref name="onFailure"/>,
+    /// today's publish-Exited path. <paramref name="recoverAndRecheckEpoch"/> re-validates the
+    /// boot under the instance gate <em>before</em> any side effect and returns
+    /// <see langword="false"/> when the boot was drained or the pause was already cleared; the
+    /// retry is then skipped and nothing more is published, because the next boot owns the
+    /// resource (or the resume already happened).
+    /// </summary>
+    /// <remarks>
+    /// Internal so the unit tests can drive the whole loop against a stand-in hcsctl (the FakeCtl
+    /// pattern) and observe the resume/exit/failure routing through the delegates; the caller
+    /// supplies the real hcsctl verbs, publication and <c>_paused</c>/epoch reads.
+    /// </remarks>
+    internal static async Task RunWorkloadWithRecoveryAsync(
+        HcsCtl hcsctl,
+        string containerId,
+        string command,
+        IReadOnlyDictionary<string, string> environment,
+        IProgress<HcsCtlStreamRecord>? progress,
+        ILogger logger,
+        Func<bool> isPaused,
+        Func<Task<bool>> recoverAndRecheckEpoch,
+        Func<int?, Task> onExit,
+        Func<Exception, Task> onFailure,
+        CancellationToken cancellationToken)
+    {
         try
         {
             HcsCtlExecDocument result = await hcsctl
-                .ExecAsync(resource.ContainerId, command, environment, progress, cancellationToken)
+                .ExecAsync(containerId, command, environment, progress, cancellationToken)
                 .ConfigureAwait(false);
 
-            // The guest's exit code, not hcsctl's. hcsctl reports the two separately.
-            logger.LogInformation("Container workload exited with code {ExitCode}.", result.ExitCode);
-            await OnWorkloadExitedAsync(boot, result.ExitCode).ConfigureAwait(false);
+            await onExit(result.ExitCode).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -670,8 +1002,39 @@ internal sealed class HcsContainerInstance(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Container workload failed.");
-            await OnWorkloadExitedAsync(boot, exitCode: null).ConfigureAwait(false);
+            if (!ShouldRetryWorkload(isPaused(), ex.Message))
+            {
+                await onFailure(ex).ConfigureAwait(false);
+                return;
+            }
+
+            logger.LogWarning(
+                "Workload create failed with invalid-state while paused; resuming and re-dispatching once.");
+
+            try
+            {
+                if (!await recoverAndRecheckEpoch().ConfigureAwait(false))
+                {
+                    // The boot was drained mid-recovery: nothing more to publish for this one.
+                    return;
+                }
+
+                HcsCtlExecDocument retried = await hcsctl
+                    .ExecAsync(containerId, command, environment, progress, cancellationToken)
+                    .ConfigureAwait(false);
+
+                await onExit(retried.ExitCode).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Torn down during the recovery or the retry: not an exit either.
+            }
+            catch (Exception recoveryFailure)
+            {
+                // The resume, the re-publish, or the retried create failed: today's failure
+                // behavior, verbatim.
+                await onFailure(recoveryFailure).ConfigureAwait(false);
+            }
         }
     }
 
@@ -718,6 +1081,12 @@ internal sealed class HcsContainerInstance(
 
     private void DrainCurrentBoot()
     {
+        // Pause state never crosses a boot boundary: retiring a boot (Stop, Restart, Start's
+        // pre-boot drain, a failed boot, AppHost shutdown) must not leave _paused=true for a
+        // boot that was never paused. Cleared before the exchange so every retirement path leaves
+        // the flag clean; BootAsync also clears at its start.
+        Volatile.Write(ref _paused, false);
+
         BootRecord? boot = Interlocked.Exchange(ref _current, null);
         if (boot is null)
         {

@@ -51,6 +51,14 @@ internal static class ContainerFixture
             $"Set {StoreVariable} to an hcsctl store holding an imported image.");
         Skip.If(string.IsNullOrWhiteSpace(image),
             $"Set {ImageVariable} to an image reference materialized in that store.");
+        // The sample AppHost resolves its own store from ASPIREHCS_STORE (AppHost.cs),
+        // not from ASPIREHCS_TEST_STORE. Without this mirror the product would create its
+        // container in the AppHost's default store while the tests query the test store --
+        // every store-backed assertion would then miss the container.
+        if (!string.IsNullOrWhiteSpace(store))
+        {
+            Environment.SetEnvironmentVariable("ASPIREHCS_STORE", store);
+        }
 
         return (hcsctl!, store!, image!);
     }
@@ -63,6 +71,15 @@ internal static class ContainerFixture
         string command, CancellationToken cancellationToken)
     {
         Environment.SetEnvironmentVariable("ASPIREHCS_TEST_COMMAND", command);
+
+        // The AppHost reads ASPIREHCS_STORE, not ASPIREHCS_TEST_STORE (see Require): keep
+        // the product and the tests on the same store even when a test path skips Require.
+        string? testStore = Environment.GetEnvironmentVariable(StoreVariable);
+        if (!string.IsNullOrWhiteSpace(testStore))
+        {
+            Environment.SetEnvironmentVariable("ASPIREHCS_STORE", testStore);
+        }
+
         return await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cancellationToken);
     }
 

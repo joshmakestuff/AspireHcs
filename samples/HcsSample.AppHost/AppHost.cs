@@ -58,16 +58,28 @@ var worker = builder.AddHcsContainer("worker")
     // VSMB mount makes HCS refuse pause (0x80070032), and pause/resume is part of the demo.
     .WithBindMount(guestApiPublish, @"C:\app", isReadOnly: true)
     .WithBindMount("data", @"C:\data", isReadOnly: true)
-    .WithCommand(@"C:\app\HcsSample.GuestApi.exe")
+    // The integration tests drive this through ASPIREHCS_TEST_COMMAND
+    // (ContainerFixture.SampleAppHostAsync); the demo default still applies otherwise.
+    .WithCommand(Environment.GetEnvironmentVariable("ASPIREHCS_TEST_COMMAND") is { Length: > 0 } cmd
+        ? cmd
+        : @"C:\app\HcsSample.GuestApi.exe")
     .WithEnvironment("ASPNETCORE_URLS", "http://0.0.0.0:8080")
     .WithEnvironment("DATA_DIR", @"C:\data")
     .WithEnvironment("GREETING", "Hello from a Hyper-V-isolated container")
     .WithNetwork()
     .WithEndpoint("http", targetPort: 8080, scheme: "http")
-    .WithTcpHealthCheck()
+    // The health check probes the HTTP listener, so it belongs to the demo workload only:
+    // the integration tests inject non-listening commands (ping, cmd /c ver) through
+    // ASPIREHCS_TEST_COMMAND, and a health check on a port nothing listens on would hold
+    // the resource out of Running forever.
     .WithStore(store)
     // Dashboard "Connect (Shell)" button: opens an interactive cmd.exe inside the container.
     .WithShellCommand();
+
+if (Environment.GetEnvironmentVariable("ASPIREHCS_TEST_COMMAND") is not { Length: > 0 })
+{
+    worker.WithTcpHealthCheck();
+}
 
 if (repoHcsCtl is not null)
 {

@@ -490,3 +490,4 @@ $RECYCLE.BIN/
 tools/hcsctl/
 .playwright/
 samples/.store/
+.store/

@@ -2,6 +2,7 @@ using System.Runtime.Versioning;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Testing;
+using AspireHcs.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 using Xunit.Abstractions;
@@ -66,51 +67,139 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
     }
 
     // Pause must stop the workload. Measured by watching CPU time, which a running `ping -t`
-    // accrues continuously.
+    // accrues continuously. Also the live regression for AspireHcs#74: the workload is parked
+    // behind the test barrier before its first exec attempt, so the pause is issued inside the
+    // pre-create window deterministically — the pause gate must hold it until the workload is
+    // visible, never tearing the workload create down into Exited/Failed.
     [SkippableFact]
     public async Task A_paused_container_stops_making_progress_and_resumes()
     {
         (string hcsctl, string store, _) = ContainerFixture.Require();
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
 
-        IDistributedApplicationTestingBuilder appHost =
-            await ContainerFixture.SampleAppHostAsync("cmd /c ping -t 127.0.0.1", cts.Token);
-
-        await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
+        // The dispatch barrier (HcsContainerInstance.WaitForTestWorkloadBarrierAsync): the
+        // workload parks before its first exec until the marker file exists. The AppHost runs
+        // in-process via DistributedApplicationTestingBuilder, so the test's environment is the
+        // AppHost's — the same mechanism ASPIREHCS_TEST_COMMAND uses.
+        string barrier = Path.Combine(Path.GetTempPath(), $"aspirehcs-barrier-{Guid.NewGuid():N}.marker");
+        Environment.SetEnvironmentVariable("ASPIREHCS_TEST_WORKLOAD_BARRIER", barrier);
+        try
         {
-            await app.StartAsync(cts.Token);
-            await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
+            IDistributedApplicationTestingBuilder appHost =
+                await ContainerFixture.SampleAppHostAsync("cmd /c ping -t 127.0.0.1", cts.Token);
 
-            // Running is the resource's state, not the workload's: the guest process is created
-            // asynchronously after it, and pausing inside that window kills the workload create
-            // (AspireHcs#74). The premise here is a RUNNING ping accruing CPU, so wait for it.
-            await ContainerFixture.WaitForGuestProcessAsync(hcsctl, store, app, "ping.exe", cts.Token);
+            await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
+            {
+                await app.StartAsync(cts.Token);
+                await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
 
-            ResourceCommandService commands = app.Services.GetRequiredService<ResourceCommandService>();
+                // The barrier holds the workload before its first create, so the resource is
+                // Running while the guest does not have the workload yet: the #74 pre-create
+                // window, entered deterministically. Prove it before pausing.
+                string image = HcsContainerInstance.WorkloadImageName("cmd /c ping -t 127.0.0.1")!;
+                string ps = await ContainerFixture.RunHcsCtlJsonAsync(
+                    hcsctl, cts.Token, "container", "ps",
+                    "--id", ContainerFixture.ContainerIdOf(app), "--store", store);
+                using (System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(ps))
+                {
+                    bool workloadVisible = document.RootElement.TryGetProperty("processes", out System.Text.Json.JsonElement processes)
+                        && processes.EnumerateArray().Any(p =>
+                            p.TryGetProperty("ImageName", out System.Text.Json.JsonElement name)
+                            && string.Equals(name.GetString(), image, StringComparison.OrdinalIgnoreCase));
+                    Assert.False(workloadVisible, $"the workload ({image}) must not exist yet: the barrier did not hold it");
+                }
 
-            ExecuteCommandResult paused = await commands.ExecuteCommandAsync("worker", "container-pause", cts.Token);
-            Assert.True(paused.Success, paused.Message);
-            await app.ResourceNotifications.WaitForResourceAsync("worker", "Paused", cts.Token);
+                // AspireHcs#74 regression: pause while the workload is still absent. The gate
+                // holds the pause until the workload's process is visible, so the state must
+                // move straight Running -> Paused. Watch the state stream from before the
+                // command to prove no Exited/Failed appears while the pause is in flight.
+                ResourceCommandService commands = app.Services.GetRequiredService<ResourceCommandService>();
+                ResourceNotificationService notifications = app.Services.GetRequiredService<ResourceNotificationService>();
+                List<string> statesWhilePausing = [];
+                Task<ResourceEvent> pausedEvent = notifications.WaitForResourceAsync(
+                    "worker",
+                    @event =>
+                    {
+                        statesWhilePausing.Add(@event.Snapshot.State?.Text ?? "<none>");
+                        return @event.Snapshot.State?.Text == "Paused";
+                    },
+                    cts.Token);
 
-            // Two readings across a window in which a running container would certainly consume
-            // CPU. A paused one cannot: its vCPUs are not scheduled.
-            long first = await CpuTicksAsync(hcsctl, store, app, cts.Token);
-            await Task.Delay(TimeSpan.FromSeconds(4), cts.Token);
-            long second = await CpuTicksAsync(hcsctl, store, app, cts.Token);
-            output.WriteLine($"cpu ticks while paused: {first} -> {second}");
-            Assert.Equal(first, second);
+                // Start the pause (it blocks until the gate releases it), then release the
+                // workload: the gate's polling sees the guest process appear and pauses.
+                Task<ExecuteCommandResult> pauseCommand = commands.ExecuteCommandAsync("worker", "container-pause", cts.Token);
 
-            ExecuteCommandResult resumed = await commands.ExecuteCommandAsync("worker", "container-resume", cts.Token);
-            Assert.True(resumed.Success, resumed.Message);
-            await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
+                // Deterministic window: wait until PauseAsync has entered the gate (it writes
+                // the signal file just before polling ps), then release the barrier. The
+                // pause can only complete after the workload appears — so this sequence
+                // fails if the gate is removed from PauseAsync.
+                string gateSignal = barrier + ".pause-gate";
+                DateTimeOffset gateDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(30);
+                while (!File.Exists(gateSignal))
+                {
+                    if (DateTimeOffset.UtcNow > gateDeadline)
+                    {
+                        throw new TimeoutException($"pause gate signal {gateSignal} never appeared");
+                    }
 
-            // Running again, by the same measure.
-            await Task.Delay(TimeSpan.FromSeconds(4), cts.Token);
-            long afterResume = await CpuTicksAsync(hcsctl, store, app, cts.Token);
-            output.WriteLine($"cpu ticks after resume: {afterResume}");
-            Assert.True(afterResume > second, $"CPU time did not advance after resume ({second} -> {afterResume}).");
+                    await Task.Delay(50, cts.Token).ConfigureAwait(false);
+                }
 
-            await app.StopAsync(cts.Token);
+
+                using (File.Create(barrier))
+                {
+                }
+
+                ExecuteCommandResult paused = await pauseCommand;
+                Assert.True(paused.Success, paused.Message);
+
+                ResourceEvent reached = await pausedEvent;
+                output.WriteLine($"states while pausing: {string.Join(" -> ", statesWhilePausing)}");
+                Assert.Equal("Paused", reached.Snapshot.State?.Text);
+                Assert.DoesNotContain(statesWhilePausing, state =>
+                    state == KnownResourceStates.Exited
+                    || state == KnownResourceStates.FailedToStart
+                    || state == "Failed");
+
+                // Two readings across a window in which a running container would certainly
+                // consume CPU. A paused one cannot: its vCPUs are not scheduled.
+                long first = await CpuTicksAsync(hcsctl, store, app, cts.Token);
+                await Task.Delay(TimeSpan.FromSeconds(4), cts.Token);
+                long second = await CpuTicksAsync(hcsctl, store, app, cts.Token);
+                output.WriteLine($"cpu ticks while paused: {first} -> {second}");
+                Assert.Equal(first, second);
+
+                // The #74 failure publishes Exited over Paused milliseconds after the pause
+                // completes; the sampling window is far past that, so the settled state must
+                // still be Paused.
+                Assert.True(notifications.TryGetCurrentState("worker", out ResourceEvent? settled), "No snapshot for 'worker'.");
+                output.WriteLine($"settled state while paused: {settled!.Snapshot.State?.Text}");
+                Assert.Equal("Paused", settled.Snapshot.State?.Text);
+
+                ExecuteCommandResult resumed = await commands.ExecuteCommandAsync("worker", "container-resume", cts.Token);
+                Assert.True(resumed.Success, resumed.Message);
+                await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
+
+                // Running again, by the same measure.
+                await Task.Delay(TimeSpan.FromSeconds(4), cts.Token);
+                long afterResume = await CpuTicksAsync(hcsctl, store, app, cts.Token);
+                output.WriteLine($"cpu ticks after resume: {afterResume}");
+                Assert.True(afterResume > second, $"CPU time did not advance after resume ({second} -> {afterResume}).");
+
+                await app.StopAsync(cts.Token);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ASPIREHCS_TEST_WORKLOAD_BARRIER", null);
+            try
+            {
+                File.Delete(barrier);
+            }
+            catch (IOException)
+            {
+                // A leftover marker file does not fail the test.
+            }
         }
     }
 
@@ -156,11 +245,14 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
         // Contract 3: "statistics" is the raw v2 property reply; the counters sit one level
         // down, under "Statistics". A paused container still reports Processor, so no
         // absent-key tolerance is needed here.
-        return document.RootElement
-            .GetProperty("statistics")
-            .GetProperty("Statistics")
-            .GetProperty("Processor")
-            .GetProperty("TotalRuntime100ns")
-            .GetInt64();
+        if (!document.RootElement.TryGetProperty("statistics", out System.Text.Json.JsonElement statistics)
+            || !statistics.TryGetProperty("Statistics", out System.Text.Json.JsonElement inner)
+            || !inner.TryGetProperty("Processor", out System.Text.Json.JsonElement processor)
+            || !processor.TryGetProperty("TotalRuntime100ns", out System.Text.Json.JsonElement totalRuntime))
+        {
+            throw new InvalidOperationException($"unexpected container stats document: {json}");
+        }
+
+        return totalRuntime.GetInt64();
     }
 }
