@@ -111,10 +111,37 @@ Delivery differs by resource kind:
   caveat that comes with it: a workload that autostarts at boot may run before the file lands; a
   workload that reads the file when it starts is correct. Tighter ordering is future work.
 
+## Agentless appliance VMs
+
+A vendor VM that cannot be modified — no `hcsguest` agent, no DHCP, a fixed in-guest address —
+boots with `WithGuestAddress`, the agentless switch. The boot skips the lease wait and
+environment delivery; endpoints resolve at the declared address once it answers TCP. `WithDisk`
+attaches the appliance's extra VHDXs (SCSI LUN 1..n, copy-on-write like the boot disk),
+`WithMacAddress` pins the MAC a guest's static config is bound to, `WithVlan` tags the switch
+port, and `WithInsecureHttpsHealthCheck` health-checks a self-signed HTTPS service:
+
+```csharp
+builder.AddHcsVm("vendor")
+    .WithVhdx(@"d:\appliance\os.vhdx")
+    .WithDisk(@"d:\appliance\data.vhdx")
+    .WithNetwork("LAB")
+    .WithMacAddress("00-15-5D-02-33-0E")
+    .WithVlan(10)
+    .WithGuestAddress("10.20.10.20")
+    .WithEndpoint("https", targetPort: 443, scheme: "https")
+    .WithInsecureHttpsHealthCheck(path: "/login");
+```
+
+The vendor's disks are never written; each run boots differencing children. An agentless VM
+cannot consume `WithReference`/`WithEnvironment` (there is no agent to deliver the values) —
+that combination is refused at boot start.
+
 ## Readiness
 
 A VM reports **Running** once the `hcsguest` agent inside it answers and reports the address the
-guest leased (`hcsctl vm ip`); the endpoints then resolve to that address.
+guest leased (`hcsctl vm ip`); the endpoints then resolve to that address. An agentless VM
+(`WithGuestAddress`) reports Running once its fixed address accepts a TCP connection on the
+first endpoint's target port instead.
 
 Running is not the same as serving. Aspire declares a resource with no health checks ready the
 moment it reports Running, so `WaitFor(vm)` releases dependents while the guest is still starting

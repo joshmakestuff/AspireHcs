@@ -58,7 +58,7 @@ internal static class RepositoryTools
         return $"{safe}-{Convert.ToHexStringLower(hash.AsSpan(0, 8))}.json";
     }
 
-    private static bool TryFindRepositoryRoot([NotNullWhen(true)] out string? root)
+    public static bool TryFindRepositoryRoot([NotNullWhen(true)] out string? root)
     {
         for (DirectoryInfo? directory = new(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {

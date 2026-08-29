@@ -53,6 +53,16 @@ variable fallbacks:
 | `LinuxUser` | `HCS_TEST_VM_USER` | SSH account (default `root`) |
 | `WindowsVhdx` | `HCS_SAMPLE_WINDOWS_VHDX` | Bootable Gen2/UEFI VHDX for the Windows VM |
 | `WindowsUser` | `HCS_SAMPLE_WINDOWS_USER` | RDP account (default `Administrator`) |
+| `ApplianceVhdx` | `HCS_TEST_APPLIANCE_VHDX` | Boot VHDX of an agentless vendor appliance (no `hcsguest`, fixed in-guest address) |
+| `ApplianceAddress` | `HCS_TEST_APPLIANCE_ADDRESS` | The appliance's fixed in-guest IP; required with `ApplianceVhdx` |
+| `ApplianceDataVhdx` | `HCS_TEST_APPLIANCE_DATA_VHDX` | Extra data VHDX (SCSI LUN 1) |
+| `ApplianceNetwork` | `HCS_TEST_APPLIANCE_NETWORK` | Host compute network (default `Default Switch`) |
+| `ApplianceMac` | `HCS_TEST_APPLIANCE_MAC` | Pinned NIC MAC, e.g. `00-15-5D-02-33-0E` |
+| `ApplianceVlan` | `HCS_TEST_APPLIANCE_VLAN` | Access VLAN for the NIC's switch port |
+| `ApplianceHealthPath` | `HCS_TEST_APPLIANCE_HEALTH_PATH` | Path for the insecure HTTPS health check (default `/`) |
+| `ApplianceMemoryGb` | `HCS_TEST_APPLIANCE_MEMORY_GB` | Memory (default 6) |
+| `ApplianceCpus` | `HCS_TEST_APPLIANCE_CPUS` | vCPUs (default 4) |
+| `ApplianceSshUser` | `HCS_TEST_APPLIANCE_SSH_USER` | SSH account for the Connect button (default `root`) |
 
 ## Preparing a VM image
 

@@ -63,6 +63,111 @@ public static class HcsVirtualMachineBuilderExtensions
     }
 
     /// <summary>
+    /// Attaches an extra VHDX after the boot disk, at SCSI LUN 1..n in call order. Repeatable.
+    /// Shares the boot disk's copy-on-write policy: the VM boots a differencing child, so the
+    /// base is never written and a vendor's disks stay pristine.
+    /// </summary>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithDisk(
+        this IResourceBuilder<HcsVirtualMachineResource> builder, string path)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        string fullPath = Path.GetFullPath(path);
+        if (builder.Resource.DataDiskPaths.Contains(fullPath, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Resource '{builder.Resource.Name}' already attaches '{fullPath}'; each WithDisk() path must be distinct.");
+        }
+
+        builder.Resource.DataDiskPaths.Add(fullPath);
+        return builder;
+    }
+
+    /// <summary>
+    /// Pins the NIC's MAC instead of letting hcsctl generate one. For guests whose network
+    /// config is bound to a specific address — a RHEL guest with <c>HWADDR</c> in its interface
+    /// config silently leaves the NIC unconfigured under any other MAC. Accepts dash or colon
+    /// separators; stored normalized as <c>XX-XX-XX-XX-XX-XX</c>. Requires <see cref="WithNetwork"/>.
+    /// </summary>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithMacAddress(
+        this IResourceBuilder<HcsVirtualMachineResource> builder, string macAddress)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(macAddress);
+
+        if (!System.Net.NetworkInformation.PhysicalAddress.TryParse(macAddress, out var parsed)
+            || parsed.GetAddressBytes() is not { Length: 6 } bytes)
+        {
+            throw new ArgumentException(
+                $"'{macAddress}' is not a 48-bit MAC address. Use the form 00-15-5D-02-33-0E.",
+                nameof(macAddress));
+        }
+
+        // Normalized to the form hcsctl echoes back, so the stored value matches the create result.
+        builder.Resource.RequestedMacAddress = string.Join("-", bytes.Select(b => b.ToString("X2")));
+        return builder;
+    }
+
+    /// <summary>
+    /// Tags the NIC's switch port with an access VLAN. For networks whose other ports are
+    /// access-tagged — an untagged port on such a switch is isolated from all of them.
+    /// Requires <see cref="WithNetwork"/>.
+    /// </summary>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithVlan(
+        this IResourceBuilder<HcsVirtualMachineResource> builder, int vlanId)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentOutOfRangeException.ThrowIfLessThan(vlanId, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(vlanId, 4094);
+
+        builder.Resource.VlanId = vlanId;
+        return builder;
+    }
+
+    /// <summary>
+    /// Declares the guest's fixed in-guest address — and with it, that the VM is agentless. No
+    /// hcsguest agent is expected: the boot skips the DHCP-lease wait and environment delivery,
+    /// and every endpoint resolves at this address once it accepts a TCP connection (on the
+    /// first endpoint's target port, within <paramref name="bootTimeout"/>, default 15 minutes).
+    /// For vendor appliance VMs that cannot be modified. Requires <see cref="WithNetwork"/>;
+    /// combine with <see cref="WithMacAddress"/> and <see cref="WithVlan"/> when the guest's
+    /// static config depends on them. <c>WithReference</c>/<c>WithEnvironment</c> as a consumer
+    /// are rejected — there is no agent to deliver values to. With zero endpoints the VM reports
+    /// Running right after start; there is nothing to probe.
+    /// </summary>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithGuestAddress(
+        this IResourceBuilder<HcsVirtualMachineResource> builder, string address, TimeSpan? bootTimeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(address);
+
+        if (!System.Net.IPAddress.TryParse(address, out var parsed))
+        {
+            throw new ArgumentException($"'{address}' is not an IP address.", nameof(address));
+        }
+
+        // The parser reads leading-zero octets as octal: "10.20.10.020" is 10.20.10.16. A guest
+        // address that silently means a different address is exactly the misconfiguration this
+        // mode cannot diagnose later, so a non-canonical spelling is rejected here.
+        if (parsed.ToString() != address)
+        {
+            throw new ArgumentException(
+                $"'{address}' parses as '{parsed}'. Write the address canonically so it means what it says.",
+                nameof(address));
+        }
+
+        builder.Resource.GuestAddress = address;
+        if (bootTimeout is { } timeout)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero, nameof(bootTimeout));
+            builder.Resource.GuestAddressTimeout = timeout;
+        }
+
+        return builder;
+    }
+
+    /// <summary>
     /// Points this resource at a specific <c>hcsctl.exe</c> and store, instead of discovering the
     /// binary and defaulting the store (<c>ASPIREHCS_STORE</c> when set, otherwise hcsctl's
     /// per-user default).
@@ -178,6 +283,44 @@ public static class HcsVirtualMachineBuilderExtensions
         builder.ApplicationBuilder.Services.AddHealthChecks().Add(new HealthCheckRegistration(
             key,
             _ => new TcpEndpointHealthCheck(builder.Resource, name, connectTimeout),
+            failureStatus: null,
+            tags: null));
+
+        return builder.WithHealthCheck(key);
+    }
+
+    /// <summary>
+    /// Gates readiness on the guest serving HTTPS <em>without validating its certificate</em>:
+    /// healthy once a GET to <paramref name="path"/> on <paramref name="endpointName"/>
+    /// (default: the first endpoint declared) answers 2xx/3xx. For guests with self-signed
+    /// certificates — vendor appliances, typically — which Aspire's certificate-validating
+    /// <c>WithHttpsHealthCheck</c> can never pass. The check proves the service answers, not
+    /// the certificate's identity; the name says so, so it cannot be reached by accident.
+    /// </summary>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithInsecureHttpsHealthCheck(
+        this IResourceBuilder<HcsVirtualMachineResource> builder,
+        string? endpointName = null,
+        string path = "/",
+        TimeSpan? timeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(path);
+
+        string name = endpointName
+            ?? builder.Resource.PrimaryEndpointName
+            ?? throw new InvalidOperationException(
+                $"Resource '{builder.Resource.Name}' has no endpoints; call WithEndpoint(...) before WithInsecureHttpsHealthCheck().");
+
+        // An unknown endpoint name fails at model-build time.
+        RequireEndpoint(builder.Resource, name, nameof(WithInsecureHttpsHealthCheck));
+
+        string normalizedPath = path.StartsWith('/') ? path : "/" + path;
+        string key = $"{builder.Resource.Name}_{name}_https_check";
+        TimeSpan requestTimeout = timeout ?? TimeSpan.FromSeconds(10);
+
+        builder.ApplicationBuilder.Services.AddHealthChecks().Add(new HealthCheckRegistration(
+            key,
+            _ => new HttpsEndpointHealthCheck(builder.Resource, name, normalizedPath, acceptAnyServerCertificate: true, requestTimeout),
             failureStatus: null,
             tags: null));
 

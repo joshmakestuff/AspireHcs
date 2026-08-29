@@ -231,6 +231,52 @@ internal static class HcsVmOrchestrator
     }
 
 
+    /// <summary>
+    /// Model-shape rules that need the whole builder chain, checked once at boot start. Pure.
+    /// Builder methods cannot enforce ordering — <c>WithNetwork()</c> may legally come after
+    /// <c>WithVlan()</c> — so cross-method rules land here, before anything is acquired.
+    /// </summary>
+    internal static void ValidateConfiguration(HcsVirtualMachineResource resource)
+    {
+        ArgumentNullException.ThrowIfNull(resource);
+
+        if (resource.NetworkName is null)
+        {
+            if (resource.Annotations.OfType<EndpointAnnotation>().Any())
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNetwork().");
+            }
+            if (resource.RequestedMacAddress is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares a MAC but no network; a VM with no NIC has no address to set. Add WithNetwork().");
+            }
+            if (resource.VlanId is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares a VLAN but no network; a VM with no NIC has no port to tag. Add WithNetwork().");
+            }
+            if (resource.GuestAddress is not null)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares a guest address but no network; add WithNetwork(name).");
+            }
+        }
+
+        // Caught here rather than mid-boot: environment delivery needs the hcsguest agent, and
+        // an agentless VM by definition has none. Failing at env-write time would burn a full
+        // boot first and name the wrong cause.
+        if (resource.IsAgentless && resource.Annotations.OfType<EnvironmentCallbackAnnotation>().Any())
+        {
+            throw new InvalidOperationException(
+                $"Resource '{resource.Name}' is agentless (WithGuestAddress) but has environment values " +
+                "(WithReference/WithEnvironment). An agentless guest has no hcsguest agent to receive " +
+                "/etc/aspire.env. Remove the environment values or drop WithGuestAddress().");
+        }
+    }
+
+
     private sealed class InstanceHolder
     {
         private HcsVmInstance? _instance;
@@ -384,12 +430,8 @@ internal sealed class HcsVmInstance(
                 StopTimeStamp = null,
             }).ConfigureAwait(false);
 
+            HcsVmOrchestrator.ValidateConfiguration(resource);
             List<EndpointAnnotation> endpoints = [.. resource.Annotations.OfType<EndpointAnnotation>()];
-            if (endpoints.Count > 0 && resource.NetworkName is null)
-            {
-                throw new InvalidOperationException(
-                    $"Resource '{resource.Name}' declares endpoints but no network; add WithNetwork().");
-            }
 
             // Nothing publishes BeforeResourceStartedEvent for resources Aspire does not own,
             // and the orchestrator implements WaitFor in its handler for that event — so without
@@ -417,23 +459,31 @@ internal sealed class HcsVmInstance(
                 pumpCts.Dispose();
             });
 
-            logger.LogInformation("Creating virtual machine {VmId} from {Disk} ({MemoryMb} MB, {Processors} vCPU)",
-                resource.VmId, resource.VhdxPath, resource.MemoryMb, resource.ProcessorCount);
+            (string bootDisk, IReadOnlyList<string> dataDisks) = RequireDisks();
 
-            // One call makes the differencing disk, grants the VM access to it and the base, builds
-            // the compute system, and attaches a DHCP endpoint. It does not start it. Everything it
-            // made is released by `vm rm`, including from a later process. The ledger entry is
+            logger.LogInformation("Creating virtual machine {VmId} from {Disk} ({MemoryMb} MB, {Processors} vCPU)",
+                resource.VmId, bootDisk, resource.MemoryMb, resource.ProcessorCount);
+
+            // One call makes the differencing disks, grants the VM access to them and the bases,
+            // builds the compute system, and attaches an endpoint. It does not start it. Everything
+            // it made is released by `vm rm`, including from a later process. The ledger entry is
             // registered immediately, before anything else can fail.
             boot.Ledger.Add($"virtual machine {resource.VmId}", () => RemoveVm(boot, hcsctl));
 
             HcsCtlVmCreateDocument created = await hcsctl.CreateVmAsync(
-                resource.VmId,
-                RequireBootDisk(),
-                resource.ProcessorCount,
-                resource.MemoryMb,
-                network: resource.NetworkName,
-                serialPipe: @"\\.\pipe\" + resource.SerialPipeName,
-                labels: new Dictionary<string, string> { [HcsVmOrchestrator.OwnerPidLabel] = HcsVmOrchestrator.OwnerPidValue },
+                new HcsCtlVmCreateOptions
+                {
+                    Id = resource.VmId,
+                    VhdxPath = bootDisk,
+                    DataDisks = dataDisks,
+                    ProcessorCount = resource.ProcessorCount,
+                    MemoryMb = resource.MemoryMb,
+                    Network = resource.NetworkName,
+                    MacAddress = resource.RequestedMacAddress,
+                    VlanId = resource.VlanId,
+                    SerialPipe = @"\\.\pipe\" + resource.SerialPipeName,
+                    Labels = new Dictionary<string, string> { [HcsVmOrchestrator.OwnerPidLabel] = HcsVmOrchestrator.OwnerPidValue },
+                },
                 progress: new Progress<string>(line => logger.LogDebug("hcsctl: {Line}", line)),
                 cancellationToken: stopping).ConfigureAwait(false);
 
@@ -441,36 +491,69 @@ internal sealed class HcsVmInstance(
             resource.MacAddress = created.MacAddress;
             if (resource.NetworkName is not null)
             {
-                logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on {Network}",
-                    created.MacAddress, created.EndpointId, created.Network);
+                logger.LogInformation("Attached NIC {Mac} via HCN endpoint {EndpointId} on {Network}{Vlan}",
+                    created.MacAddress, created.EndpointId, created.Network,
+                    created.Vlan != 0 ? $" (VLAN {created.Vlan})" : "");
+            }
+            if (created.Disks.Count > 0)
+            {
+                logger.LogInformation("Attached {Count} data disk(s) at LUN 1..{Count}.", created.Disks.Count, created.Disks.Count);
             }
 
             await hcsctl.StartVmAsync(resource.VmId, cancellationToken: stopping).ConfigureAwait(false);
             _ = Task.Run(() => SerialConsolePump.RunAsync(resource.SerialPipeName, logger, pumpCts.Token), CancellationToken.None);
 
-            // The DHCP lease is the readiness gate, and the only one. A VM with no network has no
-            // readiness signal short of asking the guest agent (`hcsctl guest info`).
+            // The readiness gate. On the agent path the DHCP lease is the signal that the guest
+            // is up; an agentless VM has no lease to report (`vm ip` refuses without guest
+            // evidence), so the analogue is the fixed address answering TCP. A VM with no
+            // network has no readiness signal short of asking the guest agent.
             if (resource.NetworkName is not null)
             {
-                logger.LogInformation("VM started; waiting for the guest to take a DHCP lease...");
-                await AllocateEndpointsAsync(hcsctl, endpoints, stopping).ConfigureAwait(false);
+                string ip;
+                if (resource.GuestAddress is { } fixedAddress)
+                {
+                    // Started before the (possibly very long) reachability wait: a guest that
+                    // dies mid-boot must abort the wait, not let it probe a corpse for the full
+                    // timeout.
+                    StartExitWatch(boot, hcsctl, pumpCts.Token);
+
+                    if (ProbePort(endpoints) is { } probePort)
+                    {
+                        logger.LogInformation("VM started; waiting for {Address}:{Port} to answer (up to {Timeout})...",
+                            fixedAddress, probePort, resource.GuestAddressTimeout);
+                        await WaitForGuestReachableAsync(boot, fixedAddress, probePort, resource.GuestAddressTimeout, stopping)
+                            .ConfigureAwait(false);
+                    }
+
+                    ip = fixedAddress;
+                }
+                else
+                {
+                    logger.LogInformation("VM started; waiting for the guest to take a DHCP lease...");
+                    ip = await ResolveLeasedAddressAsync(hcsctl, stopping).ConfigureAwait(false);
+                }
+
+                await PublishEndpointsAsync(ip, endpoints, stopping).ConfigureAwait(false);
                 ThrowIfExitedMidBoot(boot);
             }
 
-            // After the lease (the guest is demonstrably up), before Running: a dependent that
-            // WaitFor's this VM must not be released while the reference values are still in
-            // flight. A VM with no environment skips this entirely — no agent required.
-            await DeliverEnvironmentAsync(hcsctl, stopping).ConfigureAwait(false);
-            ThrowIfExitedMidBoot(boot);
+            if (!resource.IsAgentless)
+            {
+                // After the lease (the guest is demonstrably up), before Running: a dependent that
+                // WaitFor's this VM must not be released while the reference values are still in
+                // flight. A VM with no environment skips this entirely — no agent required.
+                await DeliverEnvironmentAsync(hcsctl, stopping).ConfigureAwait(false);
+                ThrowIfExitedMidBoot(boot);
 
-            // Best-effort: a VM with no Connect (SSH) command has nothing to forward, and one
-            // whose image lacks hcsguest (or whose forward fails to start) keeps the leased
-            // address it already resolved above. Never fails the boot.
-            await GuestForwardPump.StartAsync(resource, hcsctl, boot.Ledger, logger, stopping).ConfigureAwait(false);
-            ThrowIfExitedMidBoot(boot);
+                // Best-effort: a VM with no Connect (SSH) command has nothing to forward, and one
+                // whose image lacks hcsguest (or whose forward fails to start) keeps the leased
+                // address it already resolved above. Never fails the boot.
+                await GuestForwardPump.StartAsync(resource, hcsctl, boot.Ledger, logger, stopping).ConfigureAwait(false);
+                ThrowIfExitedMidBoot(boot);
+            }
 
             // hcsctl has no verb that blocks until a compute system exits, so the exit watch is a
-            // poll.
+            // poll. (Already running on the agentless path; StartExitWatch is single-shot.)
             StartExitWatch(boot, hcsctl, pumpCts.Token);
 
             ThrowIfExitedMidBoot(boot);
@@ -626,7 +709,18 @@ internal sealed class HcsVmInstance(
     /// wait on this.
     /// </remarks>
     private void StartExitWatch(BootRecord boot, HcsCtl hcsctl, CancellationToken cancellationToken)
-        => _ = Task.Run(async () =>
+    {
+        // Single-shot per boot: the agentless path starts the watch early (before its long
+        // reachability wait) and the shared call site after the gate would otherwise start a
+        // second, identical poller. Both calls happen sequentially inside BootAsync, so a plain
+        // flag is enough.
+        if (boot.ExitWatchStarted)
+        {
+            return;
+        }
+        boot.ExitWatchStarted = true;
+
+        _ = Task.Run(async () =>
         {
             try
             {
@@ -661,6 +755,7 @@ internal sealed class HcsVmInstance(
                 logger.LogWarning(ex, "The exit watch for '{Name}' stopped; its state may go stale.", resource.Name);
             }
         }, CancellationToken.None);
+    }
 
     private void OnVmExited(BootRecord boot, string how)
     {
@@ -730,15 +825,16 @@ internal sealed class HcsVmInstance(
     }
 
     /// <summary>
-    /// Waits for the guest's DHCP lease and resolves every declared endpoint at that address.
+    /// Waits for the guest's DHCP lease and returns the leased address. Agent path only: an
+    /// agentless guest never reports a lease, and <c>vm ip</c> refuses to answer without guest
+    /// evidence.
     /// </summary>
     /// <remarks>
     /// The address is not knowable before the guest boots. An HCN endpoint carries none when it is
     /// created, none when it is attached to a NIC, and none while the VM runs without a guest, so
     /// this is a wait and not a read.
     /// </remarks>
-    private async Task AllocateEndpointsAsync(
-        HcsCtl hcsctl, List<EndpointAnnotation> endpoints, CancellationToken cancellationToken)
+    private async Task<string> ResolveLeasedAddressAsync(HcsCtl hcsctl, CancellationToken cancellationToken)
     {
         HcsCtlVmAddressDocument leased = await hcsctl
             .WaitForAddressAsync(resource.VmId, AddressTimeout, cancellationToken: cancellationToken)
@@ -749,8 +845,71 @@ internal sealed class HcsVmInstance(
             ?? throw new InvalidOperationException(
                 $"hcsctl reported no address for '{resource.Name}' despite succeeding.");
 
-        logger.LogInformation("Guest leased {Ip} after {Elapsed} ms; publishing {Count} endpoint(s).",
-            ip, leased.WaitedMs, endpoints.Count);
+        logger.LogInformation("Guest leased {Ip} after {Elapsed} ms.", ip, leased.WaitedMs);
+        return ip;
+    }
+
+    /// <summary>
+    /// The port the agentless reachability wait probes: the primary endpoint's target port, or
+    /// the first endpoint's. Null when the VM declares no endpoints — then there is nothing to
+    /// probe and start alone is the readiness signal.
+    /// </summary>
+    private int? ProbePort(List<EndpointAnnotation> endpoints)
+    {
+        EndpointAnnotation? chosen = endpoints
+            .FirstOrDefault(e => string.Equals(e.Name, resource.PrimaryEndpointName, StringComparison.OrdinalIgnoreCase))
+            ?? endpoints.FirstOrDefault();
+        return chosen?.TargetPort;
+    }
+
+    /// <summary>
+    /// Waits until <paramref name="address"/> accepts a TCP connection on <paramref name="port"/>.
+    /// The agentless readiness gate: for a guest that reports nothing, "a service listens at the
+    /// declared address" is the only observable boot signal.
+    /// </summary>
+    /// <remarks>
+    /// 3 s per connection attempt — a guest that drops the SYN outright must not hang an attempt
+    /// for the OS retry budget — with 5 s between attempts, under the overall timeout. A timeout
+    /// names the likely misconfigurations: this is where a wrong VLAN, MAC or address surfaces,
+    /// and "Running but forever unhealthy" would name none of them.
+    /// </remarks>
+    private async Task WaitForGuestReachableAsync(
+        BootRecord boot, string address, int port, TimeSpan timeout, CancellationToken stopping)
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        cts.CancelAfter(timeout);
+
+        while (true)
+        {
+            ThrowIfExitedMidBoot(boot);
+            try
+            {
+                using System.Net.Sockets.TcpClient client = new();
+                using CancellationTokenSource attempt = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                attempt.CancelAfter(TimeSpan.FromSeconds(3));
+                await client.ConnectAsync(address, port, attempt.Token).ConfigureAwait(false);
+                return;
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested && !stopping.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"'{resource.Name}' did not answer at {address}:{port} within {timeout}. " +
+                    $"Check the network '{resource.NetworkName}', the VLAN, the MAC, and that the " +
+                    $"guest's static address is {address}.");
+            }
+            catch (Exception) when (!cts.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Resolves every declared endpoint at <paramref name="ip"/> and activates their URLs.
+    /// </summary>
+    private async Task PublishEndpointsAsync(string ip, List<EndpointAnnotation> endpoints, CancellationToken cancellationToken)
+    {
+        logger.LogInformation("Publishing {Count} endpoint(s) at {Ip}.", endpoints.Count, ip);
 
         foreach (EndpointAnnotation endpoint in endpoints)
         {
@@ -849,10 +1008,11 @@ internal sealed class HcsVmInstance(
     }
 
     /// <summary>
-    /// The boot disk. Checked here so a missing one is a clear message; hcsctl would exit 64
-    /// about <c>--vhdx</c>. hcsctl makes the differencing child itself and removes it with the VM.
+    /// The boot disk and the data disks. Checked here so a missing one is a clear message;
+    /// hcsctl would exit 64 about <c>--vhdx</c>. hcsctl makes the differencing children itself
+    /// and removes them with the VM.
     /// </summary>
-    private string RequireBootDisk()
+    private (string Boot, IReadOnlyList<string> Data) RequireDisks()
     {
         if (string.IsNullOrEmpty(resource.VhdxPath))
         {
@@ -863,7 +1023,23 @@ internal sealed class HcsVmInstance(
         {
             throw new FileNotFoundException($"Boot VHDX for resource '{resource.Name}' not found.", resource.VhdxPath);
         }
-        return resource.VhdxPath;
+
+        for (int i = 0; i < resource.DataDiskPaths.Count; i++)
+        {
+            string disk = resource.DataDiskPaths[i];
+            if (string.Equals(disk, resource.VhdxPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' attaches its boot disk again via WithDisk(); '{disk}' can be attached once.");
+            }
+            if (!File.Exists(disk))
+            {
+                throw new FileNotFoundException(
+                    $"Data VHDX for resource '{resource.Name}' (LUN {i + 1}) not found.", disk);
+            }
+        }
+
+        return (resource.VhdxPath, resource.DataDiskPaths);
     }
 
 
@@ -877,5 +1053,8 @@ internal sealed class HcsVmInstance(
         public int Epoch { get; } = epoch;
         public BootLedger Ledger { get; } = ledger;
         public volatile bool Exited;
+
+        /// <summary>Set by <see cref="StartExitWatch"/>; only BootAsync's own flow touches it.</summary>
+        public bool ExitWatchStarted;
     }
 }
