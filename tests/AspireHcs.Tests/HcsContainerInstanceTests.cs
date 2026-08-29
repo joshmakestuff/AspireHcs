@@ -1,59 +1,55 @@
 using System.Runtime.Versioning;
-using AspireHcs.Cli;
 using AspireHcs.Hosting;
 using Xunit;
 
 namespace AspireHcs.Tests;
 
-// Pause is gated on the workload process being visible in `container ps`: the resource reports
-// Running before the detached HcsCreateProcess lands, and pausing inside that window freezes the
-// guest first (AspireHcs#74). These pin the gate: what satisfies it, what it filters, and what
-// its failure says. The fake reads stand in for `container ps --json`.
+// Pause is gated on hcsctl's exec started record: the resource reports Running before the
+// detached HcsCreateProcess lands, and pausing inside that window freezes the guest first
+// (AspireHcs#74). The record latches a per-boot TaskCompletionSource; these pin what the wait
+// does with each way that latch can end.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsContainerInstanceTests
 {
-    private static HcsCtlProcessListDocument Listing(IReadOnlyList<HcsCtlGuestProcess> processes) =>
-        new() { Ok = true, Processes = processes };
+    private static Task WaitAsync(Task<bool> workloadStarted, TimeSpan? timeout = null) =>
+        HcsContainerInstance.WaitForWorkloadStartAsync(
+            workloadStarted, "hcsworker", timeout ?? TimeSpan.FromSeconds(5), CancellationToken.None);
 
-    private static HcsCtlGuestProcess Process(int pid, string image) =>
-        new() { ProcessId = pid, ImageName = image };
-
-    private static Task WaitAsync(
-        Func<CancellationToken, Task<HcsCtlProcessListDocument>> readProcesses,
-        string expectedImageName,
-        TimeSpan? timeout = null) =>
-        HcsContainerInstance.WaitForWorkloadProcessAsync(
-            readProcesses, expectedImageName, "hcsworker",
-            timeout ?? TimeSpan.FromSeconds(5), TimeSpan.Zero, CancellationToken.None);
-
-    // The guest runs several system processes before the workload is created. None of them may
-    // satisfy the gate, and the match must not care how HCS reported the image name's case.
     [Fact]
-    public async Task The_wait_ignores_boot_processes_and_matches_the_workload_case_insensitively()
+    public async Task The_wait_completes_when_the_started_record_lands()
     {
-        int reads = 0;
-        Task wait = WaitAsync(
-            _ => Task.FromResult(
-            ++reads == 1
-                ? Listing([Process(4, "smss.exe"), Process(12, "csrss.exe"), Process(56, "wininit.exe")])
-                : Listing([Process(4, "smss.exe"), Process(340, "CMD.EXE")])),
-            "cmd.exe");
+        TaskCompletionSource<bool> latch = new();
+        Task wait = WaitAsync(latch.Task);
+
+        Assert.False(wait.IsCompleted);
+        latch.SetResult(true);
 
         await wait;
-
-        Assert.Equal(2, reads);
     }
 
-    // A workload that never appears must fail the pause, naming the resource, the expected image
-    // and the reason, rather than either pausing early or waiting forever.
+    // A started record that never arrives must fail the pause, naming the resource and the
+    // refusal, rather than either pausing early or waiting forever.
     [Fact]
-    public async Task Expiry_names_the_resource_image_and_the_refusal()
+    public async Task Expiry_names_the_resource_and_the_refusal()
     {
+        TaskCompletionSource<bool> latch = new();
+
         InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => WaitAsync(_ => Task.FromResult(Listing([])), "cmd.exe", timeout: TimeSpan.Zero));
+            () => WaitAsync(latch.Task, timeout: TimeSpan.Zero));
 
         Assert.Contains("'hcsworker'", ex.Message);
-        Assert.Contains("'cmd.exe'", ex.Message);
         Assert.Contains("refusing to pause before the workload starts", ex.Message);
+    }
+
+    // A workload that ends without ever creating its process completes the latch false. The wait
+    // must fail immediately — not hold the pause for the full timeout.
+    [Fact]
+    public async Task A_workload_that_ended_without_starting_fails_the_wait_at_once()
+    {
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => WaitAsync(Task.FromResult(false), timeout: TimeSpan.FromDays(1)));
+
+        Assert.Contains("'hcsworker'", ex.Message);
+        Assert.Contains("nothing to pause", ex.Message);
     }
 }

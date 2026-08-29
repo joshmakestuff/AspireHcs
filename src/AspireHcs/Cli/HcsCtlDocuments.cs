@@ -737,7 +737,9 @@ internal static class HcsCtlVmState
 
 /// <summary>
 /// One framed line of <c>hcsctl --stream-json</c> stderr. Progress is
-/// <c>{"stream":"progress","msg":…}</c>; guest output is <c>{"stream":"stdout"|"stderr","data":…}</c>.
+/// <c>{"stream":"progress","msg":…}</c>; guest output is <c>{"stream":"stdout"|"stderr","data":…}</c>;
+/// <c>{"stream":"exec","event":"started","pid":N}</c> marks the guest process existing, before
+/// any of its output.
 /// </summary>
 internal sealed record HcsCtlStreamRecord
 {
@@ -749,6 +751,17 @@ internal sealed record HcsCtlStreamRecord
 
     [JsonPropertyName("data")]
     public string? Data { get; init; }
+
+    [JsonPropertyName("event")]
+    public string? Event { get; init; }
+
+    [JsonPropertyName("pid")]
+    public long? Pid { get; init; }
+
+    /// <summary>The exec's guest process now exists. This is what the pause gate latches.</summary>
+    public bool IsExecStarted =>
+        string.Equals(Stream, "exec", StringComparison.Ordinal)
+        && string.Equals(Event, "started", StringComparison.Ordinal);
 }
 
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = false)]

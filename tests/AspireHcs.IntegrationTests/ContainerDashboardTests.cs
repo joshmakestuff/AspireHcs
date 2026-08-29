@@ -96,8 +96,8 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
 
             ResourceCommandService commands = app.Services.GetRequiredService<ResourceCommandService>();
 
-            // Pause must wait in the new `container ps` gate until the workload is visible, not
-            // report success while the guest is frozen mid-create.
+            // Pause must wait on the exec started record, which the held exec has not emitted,
+            // not report success while the guest is frozen mid-create.
             Task<ExecuteCommandResult> pauseTask = commands.ExecuteCommandAsync("worker", "container-pause", cts.Token);
             await Task.Delay(TimeSpan.FromSeconds(1), cts.Token);
             Assert.False(pauseTask.IsCompleted, "container-pause reported success before the workload was created.");
