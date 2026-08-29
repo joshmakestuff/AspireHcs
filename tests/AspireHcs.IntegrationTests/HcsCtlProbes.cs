@@ -75,8 +75,11 @@ internal static class HcsCtlProbes
         {
             startInfo.ArgumentList.Add(argument);
         }
-        // `network` rejects --store; every other group takes it.
-        if (!string.IsNullOrEmpty(storePath) && arguments[0] != "network")
+        // `network` and `guest` reject --store, and so does `vm stop` (it drives HCS by id
+        // alone); every other command takes it.
+        bool rejectsStore = arguments[0] is "network" or "guest"
+            || (arguments.Length > 1 && arguments[0] == "vm" && arguments[1] == "stop");
+        if (!string.IsNullOrEmpty(storePath) && !rejectsStore)
         {
             startInfo.ArgumentList.Add("--store");
             startInfo.ArgumentList.Add(storePath);
