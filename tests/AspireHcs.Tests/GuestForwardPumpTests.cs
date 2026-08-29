@@ -141,34 +141,49 @@ public class GuestForwardPumpTests : IDisposable
     [Fact]
     public async Task A_forward_that_exits_on_its_own_mid_session_un_publishes_its_address()
     {
-        // The forward keeps the listener alive only briefly, then exits on its own — the same
-        // observable shape as the guest agent crashing or the relay being killed externally.
+        // The forward holds its listener until this test releases it, then exits on its own —
+        // the same observable shape as the guest agent crashing or the relay being killed
+        // externally. A marker file, not a fixed delay: a delay races the first assertion on a
+        // slow runner (#90), where the exit and un-publish can land before the address is read.
+        string release = Path.Combine(_directory, "release");
         HcsCtl fake = FakeCtl(
-            """
+            $$"""
             if "%2"=="info" (
               echo {"ok":true,"reachable":true,"state":"ready"}
               exit /b 0
             )
-            if "%2"=="forward" (
-              echo {"ok":true,"command":"guest forward","listen":"127.0.0.1:54322","guestPort":22}
-              ping -n 2 127.0.0.1 >nul
-              exit /b 0
-            )
+            if "%2"=="forward" goto hold
             exit /b 99
+            :hold
+            echo {"ok":true,"command":"guest forward","listen":"127.0.0.1:54322","guestPort":22}
+            :wait
+            if exist "{{release}}" exit /b 0
+            ping -n 2 127.0.0.1 >nul
+            goto wait
             """);
         HcsVirtualMachineResource resource = Vm();
         resource.HvsocketForwardTargets["ssh"] = 22;
         BootLedger ledger = new(NullLogger.Instance);
 
-        await GuestForwardPump.StartAsync(resource, fake, ledger, NullLogger.Instance, CancellationToken.None);
-        Assert.Equal("127.0.0.1:54322", resource.ForwardedConnectAddresses["ssh"]);
-
-        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
-        while (resource.ForwardedConnectAddresses.ContainsKey("ssh") && !timeout.IsCancellationRequested)
+        try
         {
-            await Task.Delay(50, CancellationToken.None);
-        }
+            await GuestForwardPump.StartAsync(resource, fake, ledger, NullLogger.Instance, CancellationToken.None);
+            Assert.Equal("127.0.0.1:54322", resource.ForwardedConnectAddresses["ssh"]);
 
-        Assert.Empty(resource.ForwardedConnectAddresses);
+            File.WriteAllText(release, "released");
+
+            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(30));
+            while (resource.ForwardedConnectAddresses.ContainsKey("ssh") && !timeout.IsCancellationRequested)
+            {
+                await Task.Delay(50, CancellationToken.None);
+            }
+
+            Assert.Empty(resource.ForwardedConnectAddresses);
+        }
+        finally
+        {
+            // Kills a still-held fake if an assertion failed before the release.
+            ledger.Drain();
+        }
     }
 }
