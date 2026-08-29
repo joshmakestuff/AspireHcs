@@ -30,6 +30,13 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
     private static readonly string[] GroupsWithoutStore = ["network", "guest"];
 
     /// <summary>
+    /// The one verb inside a store-accepting group that rejects <c>--store</c>: <c>vm stop</c>
+    /// drives HCS by id alone, deliberately, so it can act on a system whose store record is
+    /// gone. Passing it is exit 64. Pinned by <c>HcsCtlStoreTests</c>.
+    /// </summary>
+    private static readonly string[][] VerbsWithoutStore = [["vm", "stop"]];
+
+    /// <summary>
     /// How long <see cref="StartLongRunningAsync{TResult}"/> waits, after reading the result
     /// document, to see whether the process exits on its own before treating it as genuinely
     /// long-running. Stdout completing and the OS signalling process exit are not the same
@@ -444,7 +451,10 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
     }
 
     private static bool RejectsStore(IReadOnlyList<string> arguments)
-        => arguments.Count > 0 && GroupsWithoutStore.Contains(arguments[0], StringComparer.Ordinal);
+        => (arguments.Count > 0 && GroupsWithoutStore.Contains(arguments[0], StringComparer.Ordinal))
+        || (arguments.Count > 1 && VerbsWithoutStore.Any(v =>
+                string.Equals(v[0], arguments[0], StringComparison.Ordinal)
+                && string.Equals(v[1], arguments[1], StringComparison.Ordinal)));
 
     private static async Task PumpStandardErrorAsync(
         Process process,

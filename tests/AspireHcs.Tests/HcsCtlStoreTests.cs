@@ -109,6 +109,37 @@ public class HcsCtlStoreTests
         Assert.Contains("--store", thrown.Message);
     }
 
+    // `vm stop` is the one verb inside a store-accepting group that rejects --store: it drives
+    // HCS by id alone so it can stop a system whose store record is gone. With a store
+    // configured, HcsCtl must strip the flag; a random id then reports "already stopped" rather
+    // than exit 64. This is the defect that wedged every teardown in the integration suite.
+    [SkippableFact]
+    public async Task Vm_stop_runs_even_when_a_store_is_configured()
+    {
+        HcsCtl hcsctl = new(RequireBinary(), CorruptStore());
+
+        HcsCtlResultDocument result = await hcsctl.InvokeAsync(
+            ["vm", "stop", "--id", Guid.NewGuid().ToString()],
+            HcsCtlJsonContext.Default.HcsCtlResultDocument);
+
+        Assert.True(result.Ok);
+    }
+
+    // The other side of the same pin: hcsctl really does reject it. If `vm stop` starts
+    // accepting --store, this fails and the verb exclusion can go.
+    [SkippableFact]
+    public async Task Vm_stop_still_rejects_an_explicit_store()
+    {
+        HcsCtl hcsctl = new(RequireBinary());
+
+        HcsCtlUsageException thrown = await Assert.ThrowsAsync<HcsCtlUsageException>(
+            () => hcsctl.InvokeAsync(
+                ["vm", "stop", "--id", Guid.NewGuid().ToString(), "--store", CorruptStore()],
+                HcsCtlJsonContext.Default.HcsCtlResultDocument));
+
+        Assert.Contains("--store", thrown.Message);
+    }
+
     // Reading a prepared store needs no elevation; only the import did, out of band.
     [SkippableFact]
     public async Task A_prepared_store_is_readable_unelevated_and_its_images_pass_preflight()
