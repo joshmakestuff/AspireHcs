@@ -72,6 +72,29 @@ public class HcsCtlStreamingContractTests : IDisposable
         Assert.Equal("step", collector.Records[2].Msg);
     }
 
+    // The exec started record is what the pause gate latches (hcsctl#98): stream "exec",
+    // event "started", the guest pid. Nothing else may satisfy IsExecStarted.
+    [Fact]
+    public async Task The_exec_started_record_parses_and_only_it_is_the_start_signal()
+    {
+        HcsCtl fake = FakeCtl(
+            "echo {\"ok\":true}" + Environment.NewLine +
+            "echo {\"stream\":\"progress\",\"msg\":\"creating\"} 1>&2" + Environment.NewLine +
+            "echo {\"stream\":\"exec\",\"event\":\"started\",\"pid\":4242} 1>&2" + Environment.NewLine +
+            "echo {\"stream\":\"stdout\",\"data\":\"started\"} 1>&2");
+
+        Collector collector = new();
+        await fake.InvokeStreamingAsync(
+            ["container", "exec"], HcsCtlJsonContext.Default.HcsCtlExecDocument, collector);
+
+        Assert.Equal(3, collector.Records.Count);
+
+        HcsCtlStreamRecord started = Assert.Single(collector.Records, r => r.IsExecStarted);
+        Assert.Equal("exec", started.Stream);
+        Assert.Equal("started", started.Event);
+        Assert.Equal(4242, started.Pid);
+    }
+
     [Fact]
     public async Task Bare_text_under_stream_json_is_a_contract_violation()
     {

@@ -119,15 +119,15 @@ internal sealed class HcsContainerInstance(
             // Running is the resource's state, not the workload's: the guest process is created
             // asynchronously after it, and pausing inside that window freezes the guest first —
             // the workload's HcsCreateProcess then fails and the workload is marked exited.
-            // Wait for the workload to be visible before pausing.
-            if (resource.Command is { Length: > 0 } command)
+            // Wait for hcsctl's exec started record before pausing: it identifies the workload's
+            // own process by pid, where a `container ps` name match would accept any same-named
+            // guest process.
+            if (resource.Command is { Length: > 0 })
             {
-                await WaitForWorkloadProcessAsync(
-                    token => hcsctl.ProcessListAsync(resource.ContainerId, token),
-                    WorkloadImageName(command),
+                await WaitForWorkloadStartAsync(
+                    boot.WorkloadStarted.Task,
                     resource.Name,
                     WorkloadStartTimeout,
-                    WorkloadStartPollInterval,
                     _appStopping).ConfigureAwait(false);
 
                 // A short-lived workload may finish while the command waits.
@@ -341,7 +341,7 @@ internal sealed class HcsContainerInstance(
             if (resource.Command is { Length: > 0 } command)
             {
                 _ = Task.Run(
-                    () => RunWorkloadAsync(hcsctl, boot, command, environment, new StreamProgress(logger), workloadCts.Token),
+                    () => RunWorkloadAsync(hcsctl, boot, command, environment, new StreamProgress(logger, boot), workloadCts.Token),
                     CancellationToken.None);
             }
 
@@ -404,13 +404,10 @@ internal sealed class HcsContainerInstance(
     private static readonly TimeSpan AddressPollInterval = TimeSpan.FromSeconds(1);
 
     /// <summary>
-    /// How long to wait for the workload process to appear in <c>container ps</c> before pause.
-    /// A pause command must fail rather than wait forever for a workload that cannot start.
+    /// How long to wait for the exec started record before pause. A pause command must fail
+    /// rather than wait forever for a workload that cannot start.
     /// </summary>
     private static readonly TimeSpan WorkloadStartTimeout = TimeSpan.FromSeconds(90);
-
-    /// <summary>How often the workload process list is re-read while waiting.</summary>
-    private static readonly TimeSpan WorkloadStartPollInterval = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     /// Resolves the resource's declared endpoints against the container's own address.
@@ -535,71 +532,34 @@ internal sealed class HcsContainerInstance(
     }
 
     /// <summary>
-    /// Polls <c>container ps</c> until a guest process with the expected image name exists, then
-    /// returns. A pause command must fail rather than wait forever if the workload cannot start.
+    /// Waits on the boot's workload-started latch: completed <see langword="true"/> by hcsctl's
+    /// exec started record, <see langword="false"/> by the workload ending without one. A pause
+    /// command must fail rather than wait forever if the workload cannot start.
     /// </summary>
-    /// <remarks>
-    /// A failed read is not caught: before pause, that is an operation failure that must reach the
-    /// command caller, not a false signal that it is safe to pause.
-    /// </remarks>
-    internal static async Task WaitForWorkloadProcessAsync(
-        Func<CancellationToken, Task<HcsCtlProcessListDocument>> readProcesses,
-        string expectedImageName,
+    internal static async Task WaitForWorkloadStartAsync(
+        Task<bool> workloadStarted,
         string resourceName,
         TimeSpan timeout,
-        TimeSpan pollInterval,
         CancellationToken cancellationToken)
     {
-        long started = Stopwatch.GetTimestamp();
-
-        while (true)
+        bool started;
+        try
         {
-            HcsCtlProcessListDocument listing = await readProcesses(cancellationToken).ConfigureAwait(false);
-
-            // Case-insensitive: HCS reports the image name with the casing it found in the command.
-            if (listing.Processes.Any(p =>
-                    string.Equals(p.ImageName, expectedImageName, StringComparison.OrdinalIgnoreCase)))
-            {
-                return;
-            }
-
-            TimeSpan elapsed = Stopwatch.GetElapsedTime(started);
-            if (elapsed >= timeout)
-            {
-                throw new InvalidOperationException(
-                    $"Resource '{resourceName}' workload process '{expectedImageName}' did not appear " +
-                    $"after waiting {elapsed.TotalSeconds:0.#} s; refusing to pause before the workload starts.");
-            }
-
-            await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
+            started = await workloadStarted.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
         }
-    }
-
-    /// <summary>Separators that end the first token of a command line.</summary>
-    private static readonly char[] CommandTokenDelimiters = [' ', '\t'];
-
-    /// <summary>
-    /// The guest process image a command line will create: the first token names the executable,
-    /// quoted or whitespace-delimited. Bare names get the extension the guest process table shows.
-    /// </summary>
-    private static string WorkloadImageName(string commandLine)
-    {
-        string trimmed = commandLine.TrimStart();
-
-        string token;
-        if (trimmed.StartsWith('"'))
+        catch (TimeoutException)
         {
-            int closing = trimmed.IndexOf('"', 1);
-            token = closing < 0 ? trimmed[1..] : trimmed[1..closing];
-        }
-        else
-        {
-            int separator = trimmed.IndexOfAny(CommandTokenDelimiters);
-            token = separator < 0 ? trimmed : trimmed[..separator];
+            throw new InvalidOperationException(
+                $"Resource '{resourceName}' did not report its workload process started after waiting " +
+                $"{timeout.TotalSeconds:0.#} s; refusing to pause before the workload starts.");
         }
 
-        string fileName = Path.GetFileName(token);
-        return Path.HasExtension(fileName) ? fileName : fileName + ".exe";
+        if (!started)
+        {
+            throw new InvalidOperationException(
+                $"Resource '{resourceName}' workload ended before its process was created; " +
+                "there is nothing to pause.");
+        }
     }
 
     /// <summary>How often live statistics are refreshed into the dashboard.</summary>
@@ -776,6 +736,10 @@ internal sealed class HcsContainerInstance(
 
     private async Task OnWorkloadExitedAsync(BootRecord boot, int? exitCode)
     {
+        // A no-op after the started record; before it, this wakes a pause waiting on a workload
+        // that ended without ever creating its process.
+        boot.WorkloadStarted.TrySetResult(false);
+
         // A workload that exits after its boot was retired must not publish over the next one.
         if (Volatile.Read(ref _epoch) != boot.Epoch)
         {
@@ -873,12 +837,20 @@ internal sealed class HcsContainerInstance(
 
     /// <summary>
     /// Routes a parsed <see cref="HcsCtlStreamRecord"/>: guest stdout/stderr to the resource log,
-    /// distinguishable by stream; everything else — hcsctl's own progress — to debug.
+    /// distinguishable by stream; the exec started record into the boot's workload-started latch;
+    /// everything else — hcsctl's own progress — to debug.
     /// </summary>
-    private sealed class StreamProgress(ILogger logger) : IProgress<HcsCtlStreamRecord>
+    private sealed class StreamProgress(ILogger logger, BootRecord boot) : IProgress<HcsCtlStreamRecord>
     {
         public void Report(HcsCtlStreamRecord record)
         {
+            if (record.IsExecStarted)
+            {
+                boot.WorkloadStarted.TrySetResult(true);
+                logger.LogDebug("Workload process created (guest pid {Pid}).", record.Pid);
+                return;
+            }
+
             switch (record.Stream)
             {
                 case "stdout":
@@ -908,5 +880,14 @@ internal sealed class HcsContainerInstance(
         public BootLedger Ledger { get; } = ledger;
 
         public volatile bool Exited;
+
+        /// <summary>
+        /// The workload-started latch: <see langword="true"/> when hcsctl's exec started record
+        /// arrives (the guest process exists), <see langword="false"/> when the workload ends
+        /// without one. Pause waits on this instead of polling the guest process list, where a
+        /// same-named process is a false match.
+        /// </summary>
+        public TaskCompletionSource<bool> WorkloadStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
