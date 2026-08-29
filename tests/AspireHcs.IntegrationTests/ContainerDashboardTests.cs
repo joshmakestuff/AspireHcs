@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.Versioning;
 using Aspire.Hosting;
 using Aspire.Hosting.ApplicationModel;
@@ -72,23 +73,37 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
     {
         (string hcsctl, string store, _) = ContainerFixture.Require();
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
+        using HcsCtlProxy proxy = await HcsCtlProxy.CompileAsync(hcsctl, cts.Token);
 
         IDistributedApplicationTestingBuilder appHost =
             await ContainerFixture.SampleAppHostAsync("cmd /c ping -t 127.0.0.1", cts.Token);
+
+        // Point the sample's container at the proxy, which forwards everything except the
+        // workload exec: it holds that until the test releases it, so the real HcsCreateProcess
+        // has not occurred when pause is requested. The pre-pause gate is then the only way
+        // pause can proceed.
+        HcsContainerResource workerResource = appHost.Resources.OfType<HcsContainerResource>().Single();
+        appHost.CreateResourceBuilder(workerResource).WithHcsCtl(proxy.Path);
 
         await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
         {
             await app.StartAsync(cts.Token);
             await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
 
-            // Running is the resource's state, not the workload's: the guest process is created
-            // asynchronously after it, and pausing inside that window kills the workload create
-            // (AspireHcs#74). The premise here is a RUNNING ping accruing CPU, so wait for it.
-            await ContainerFixture.WaitForGuestProcessAsync(hcsctl, store, app, "ping.exe", cts.Token);
+            // Running is the resource's state, not the workload's. The started marker proves the
+            // product has dispatched the workload exec but the real HcsCreateProcess has not run.
+            await proxy.WaitForStartedAsync(cts.Token);
 
             ResourceCommandService commands = app.Services.GetRequiredService<ResourceCommandService>();
 
-            ExecuteCommandResult paused = await commands.ExecuteCommandAsync("worker", "container-pause", cts.Token);
+            // Pause must wait in the new `container ps` gate until the workload is visible, not
+            // report success while the guest is frozen mid-create.
+            Task<ExecuteCommandResult> pauseTask = commands.ExecuteCommandAsync("worker", "container-pause", cts.Token);
+            await Task.Delay(TimeSpan.FromSeconds(1), cts.Token);
+            Assert.False(pauseTask.IsCompleted, "container-pause reported success before the workload was created.");
+
+            proxy.Release();
+            ExecuteCommandResult paused = await pauseTask;
             Assert.True(paused.Success, paused.Message);
             await app.ResourceNotifications.WaitForResourceAsync("worker", "Paused", cts.Token);
 
@@ -104,7 +119,9 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
             Assert.True(resumed.Success, resumed.Message);
             await app.ResourceNotifications.WaitForResourceAsync("worker", KnownResourceStates.Running, cts.Token);
 
-            // Running again, by the same measure.
+            // Running again, by the same measure. The proxy now forwards exec, so the released
+            // workload created its guest process: wait for it, then require CPU to advance.
+            await ContainerFixture.WaitForGuestProcessAsync(hcsctl, store, app, "ping.exe", cts.Token);
             await Task.Delay(TimeSpan.FromSeconds(4), cts.Token);
             long afterResume = await CpuTicksAsync(hcsctl, store, app, cts.Token);
             output.WriteLine($"cpu ticks after resume: {afterResume}");
@@ -162,5 +179,140 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
             .GetProperty("Processor")
             .GetProperty("TotalRuntime100ns")
             .GetInt64();
+    }
+
+    /// <summary>
+    /// Stands in for hcsctl and forwards every invocation except <c>container exec</c>, which it
+    /// holds until <see cref="Release"/> is called. This lets a test prove the product dispatched
+    /// the workload before its real <c>HcsCreateProcess</c> occurred.
+    /// </summary>
+    /// <remarks>
+    /// Compiled from a single C# file. A batch shim cannot do this job: cmd.exe re-parses every
+    /// forwarded argument, and its only wait primitive (<c>timeout</c>) writes bare text to
+    /// stderr when stdin is not a console — which the exec's <c>--stream-json</c> stderr
+    /// contract rejects. The shim must stay silent on both streams while blocked and forward
+    /// argv verbatim, so it is a compiled process, not a script.
+    /// </remarks>
+    private sealed class HcsCtlProxy : IDisposable
+    {
+        private readonly string _directory;
+
+        private HcsCtlProxy(string directory)
+        {
+            _directory = directory;
+            Path = System.IO.Path.Combine(directory, "out", "hcsctl-proxy.exe");
+            StartedMarker = System.IO.Path.Combine(directory, "started");
+            ReleaseMarker = System.IO.Path.Combine(directory, "release");
+        }
+
+        public string Path { get; }
+
+        public string StartedMarker { get; }
+
+        public string ReleaseMarker { get; }
+
+        public static async Task<HcsCtlProxy> CompileAsync(string realHcsCtl, CancellationToken cancellationToken)
+        {
+            HcsCtlProxy proxy = new(Directory.CreateTempSubdirectory("aspirehcs-proxy").FullName);
+
+            string source = System.IO.Path.Combine(proxy._directory, "hcsctl-proxy.cs");
+            await File.WriteAllTextAsync(source, $$"""
+                #:property PublishAot=false
+                using System.Diagnostics;
+
+                const string RealHcsCtl = @"{{realHcsCtl}}";
+                const string StartedMarker = @"{{proxy.StartedMarker}}";
+                const string ReleaseMarker = @"{{proxy.ReleaseMarker}}";
+
+                if (args is [var group, var verb, ..]
+                    && string.Equals(group, "container", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(verb, "exec", StringComparison.OrdinalIgnoreCase))
+                {
+                    File.WriteAllText(StartedMarker, "started");
+                    while (!File.Exists(ReleaseMarker))
+                    {
+                        // A vanished started marker is Dispose tearing the test down: die
+                        // without running the exec, so no real workload starts mid-teardown.
+                        if (!File.Exists(StartedMarker))
+                        {
+                            return 1;
+                        }
+
+                        Thread.Sleep(TimeSpan.FromMilliseconds(100));
+                    }
+                }
+
+                // No redirection: the child inherits this process's stdout/stderr pipes, so
+                // hcsctl's streams reach the product untouched.
+                ProcessStartInfo startInfo = new(RealHcsCtl) { UseShellExecute = false };
+                foreach (string argument in args)
+                {
+                    startInfo.ArgumentList.Add(argument);
+                }
+
+                using Process child = Process.Start(startInfo)
+                    ?? throw new InvalidOperationException($"Failed to start '{RealHcsCtl}'.");
+                child.WaitForExit();
+                return child.ExitCode;
+                """, cancellationToken);
+
+            ProcessStartInfo publish = new("dotnet")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            publish.ArgumentList.Add("publish");
+            publish.ArgumentList.Add(source);
+            publish.ArgumentList.Add("-o");
+            publish.ArgumentList.Add(System.IO.Path.Combine(proxy._directory, "out"));
+
+            using Process process = Process.Start(publish)
+                ?? throw new InvalidOperationException("Failed to start 'dotnet publish'.");
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            Task<string> stderr = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Publishing the hcsctl proxy failed with exit code {process.ExitCode}:" +
+                    $"{Environment.NewLine}{await stdout}{Environment.NewLine}{await stderr}");
+            }
+
+            return proxy;
+        }
+
+        public async Task WaitForStartedAsync(CancellationToken cancellationToken)
+        {
+            while (!File.Exists(StartedMarker))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
+            }
+        }
+
+        public void Release() => File.WriteAllText(ReleaseMarker, "release");
+
+        public void Dispose()
+        {
+            // Deleting the started marker makes a still-blocked shim exit within one poll,
+            // without running the exec it was holding — no orphan process, no workload started
+            // against a container mid-teardown.
+            File.Delete(StartedMarker);
+
+            try
+            {
+                Directory.Delete(_directory, recursive: true);
+            }
+            catch (IOException)
+            {
+                // Best effort: a still-running shim's exe is locked until its forward completes.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Best effort: same as above.
+            }
+        }
     }
 }
