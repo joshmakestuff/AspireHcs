@@ -62,8 +62,25 @@ internal static class ContainerFixture
     public static async Task<IDistributedApplicationTestingBuilder> SampleAppHostAsync(
         string command, CancellationToken cancellationToken)
     {
-        Environment.SetEnvironmentVariable("ASPIREHCS_TEST_COMMAND", command);
-        return await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cancellationToken);
+        IDistributedApplicationTestingBuilder appHost =
+            await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cancellationToken);
+
+        // The tests exercise the sample's container alone. Everything else the showcase adds
+        // (frontend, Postgres, opt-in VMs) drags its own dependencies into every container
+        // test, and web's WaitFor(worker) runs inside app.StartAsync — with a test workload
+        // that never opens the health endpoint, that wait never ends. Keep-list, not
+        // denylist: a resource the sample grows later must not silently re-enter the tests.
+        foreach (IResource extra in appHost.Resources
+            .Where(r => r is not HcsContainerResource)
+            .ToList())
+        {
+            appHost.Resources.Remove(extra);
+        }
+
+        HcsContainerResource worker = appHost.Resources.OfType<HcsContainerResource>().Single();
+        appHost.CreateResourceBuilder(worker).WithCommand(command);
+
+        return appHost;
     }
 
     /// <summary>Reads the id the resource generated, so absence can be asserted against it.</summary>

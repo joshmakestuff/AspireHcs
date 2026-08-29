@@ -110,9 +110,31 @@ internal sealed class HcsContainerInstance(
         await _gate.WaitAsync(_appStopping).ConfigureAwait(false);
         try
         {
-            if (_current is not { Exited: false } || _hcsctl is not { } hcsctl)
+            BootRecord? boot = _current;
+            if (boot is not { Exited: false } || _hcsctl is not { } hcsctl)
             {
                 throw new InvalidOperationException("The container is not running.");
+            }
+
+            // Running is the resource's state, not the workload's: the guest process is created
+            // asynchronously after it, and pausing inside that window freezes the guest first —
+            // the workload's HcsCreateProcess then fails and the workload is marked exited.
+            // Wait for the workload to be visible before pausing.
+            if (resource.Command is { Length: > 0 } command)
+            {
+                await WaitForWorkloadProcessAsync(
+                    token => hcsctl.ProcessListAsync(resource.ContainerId, token),
+                    WorkloadImageName(command),
+                    resource.Name,
+                    WorkloadStartTimeout,
+                    WorkloadStartPollInterval,
+                    _appStopping).ConfigureAwait(false);
+
+                // A short-lived workload may finish while the command waits.
+                if (!ReferenceEquals(_current, boot) || boot.Exited)
+                {
+                    throw new InvalidOperationException("The container is not running.");
+                }
             }
 
             await hcsctl.PauseAsync(resource.ContainerId, _appStopping).ConfigureAwait(false);
@@ -382,6 +404,15 @@ internal sealed class HcsContainerInstance(
     private static readonly TimeSpan AddressPollInterval = TimeSpan.FromSeconds(1);
 
     /// <summary>
+    /// How long to wait for the workload process to appear in <c>container ps</c> before pause.
+    /// A pause command must fail rather than wait forever for a workload that cannot start.
+    /// </summary>
+    private static readonly TimeSpan WorkloadStartTimeout = TimeSpan.FromSeconds(90);
+
+    /// <summary>How often the workload process list is re-read while waiting.</summary>
+    private static readonly TimeSpan WorkloadStartPollInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
     /// Resolves the resource's declared endpoints against the container's own address.
     /// </summary>
     /// <remarks>
@@ -501,6 +532,74 @@ internal sealed class HcsContainerInstance(
 
             await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Polls <c>container ps</c> until a guest process with the expected image name exists, then
+    /// returns. A pause command must fail rather than wait forever if the workload cannot start.
+    /// </summary>
+    /// <remarks>
+    /// A failed read is not caught: before pause, that is an operation failure that must reach the
+    /// command caller, not a false signal that it is safe to pause.
+    /// </remarks>
+    internal static async Task WaitForWorkloadProcessAsync(
+        Func<CancellationToken, Task<HcsCtlProcessListDocument>> readProcesses,
+        string expectedImageName,
+        string resourceName,
+        TimeSpan timeout,
+        TimeSpan pollInterval,
+        CancellationToken cancellationToken)
+    {
+        long started = Stopwatch.GetTimestamp();
+
+        while (true)
+        {
+            HcsCtlProcessListDocument listing = await readProcesses(cancellationToken).ConfigureAwait(false);
+
+            // Case-insensitive: HCS reports the image name with the casing it found in the command.
+            if (listing.Processes.Any(p =>
+                    string.Equals(p.ImageName, expectedImageName, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            TimeSpan elapsed = Stopwatch.GetElapsedTime(started);
+            if (elapsed >= timeout)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resourceName}' workload process '{expectedImageName}' did not appear " +
+                    $"after waiting {elapsed.TotalSeconds:0.#} s; refusing to pause before the workload starts.");
+            }
+
+            await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Separators that end the first token of a command line.</summary>
+    private static readonly char[] CommandTokenDelimiters = [' ', '\t'];
+
+    /// <summary>
+    /// The guest process image a command line will create: the first token names the executable,
+    /// quoted or whitespace-delimited. Bare names get the extension the guest process table shows.
+    /// </summary>
+    private static string WorkloadImageName(string commandLine)
+    {
+        string trimmed = commandLine.TrimStart();
+
+        string token;
+        if (trimmed.StartsWith('"'))
+        {
+            int closing = trimmed.IndexOf('"', 1);
+            token = closing < 0 ? trimmed[1..] : trimmed[1..closing];
+        }
+        else
+        {
+            int separator = trimmed.IndexOfAny(CommandTokenDelimiters);
+            token = separator < 0 ? trimmed : trimmed[..separator];
+        }
+
+        string fileName = Path.GetFileName(token);
+        return Path.HasExtension(fileName) ? fileName : fileName + ".exe";
     }
 
     /// <summary>How often live statistics are refreshed into the dashboard.</summary>
