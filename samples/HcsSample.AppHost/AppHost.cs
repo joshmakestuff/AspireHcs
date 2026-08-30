@@ -162,4 +162,43 @@ if (Setting("WindowsVhdx", "HCS_SAMPLE_WINDOWS_VHDX") is { } windowsVhdx)
     web.WithReference(winserver.GetEndpoint("rdp")).WaitFor(winserver);
 }
 
+// ---- Agentless appliance VM (opt-in) --------------------------------------------------------
+// Fixture: a vendor appliance's existing disks — no hcsguest agent, no DHCP, a fixed in-guest
+// address the guest configures itself. Booted as copy-on-write children, so the vendor's
+// originals are never written. WithGuestAddress is the agentless switch: no lease wait, no
+// environment delivery; readiness is the fixed address answering TCP on the first endpoint.
+if (Setting("ApplianceVhdx", "HCS_TEST_APPLIANCE_VHDX") is { } applianceVhdx
+    && Setting("ApplianceAddress", "HCS_TEST_APPLIANCE_ADDRESS") is { } applianceAddress)
+{
+    var vendor = builder.AddHcsVm("vendor")
+        .WithVhdx(applianceVhdx)
+        .WithMemory(gigabytes: int.Parse(Setting("ApplianceMemoryGb", "HCS_TEST_APPLIANCE_MEMORY_GB") ?? "6"))
+        .WithProcessorCount(int.Parse(Setting("ApplianceCpus", "HCS_TEST_APPLIANCE_CPUS") ?? "4"))
+        .WithNetwork(Setting("ApplianceNetwork", "HCS_TEST_APPLIANCE_NETWORK") ?? "Default Switch")
+        .WithGuestAddress(applianceAddress)
+        .WithEndpoint("https", targetPort: 443, scheme: "https")
+        .WithEndpoint("ssh", targetPort: 22)
+        // The appliance's certificate is self-signed; the check proves the service answers.
+        .WithInsecureHttpsHealthCheck("https",
+            path: Setting("ApplianceHealthPath", "HCS_TEST_APPLIANCE_HEALTH_PATH") ?? "/")
+        .WithSshCommand(userName: Setting("ApplianceSshUser", "HCS_TEST_APPLIANCE_SSH_USER") ?? "root");
+
+    // The appliance's static network config typically depends on all three: an extra data
+    // disk, the original MAC (RHEL HWADDR pinning), and the switch port's access VLAN.
+    if (Setting("ApplianceDataVhdx", "HCS_TEST_APPLIANCE_DATA_VHDX") is { } applianceDataVhdx)
+    {
+        vendor.WithDisk(applianceDataVhdx);
+    }
+    if (Setting("ApplianceMac", "HCS_TEST_APPLIANCE_MAC") is { } applianceMac)
+    {
+        vendor.WithMacAddress(applianceMac);
+    }
+    if (Setting("ApplianceVlan", "HCS_TEST_APPLIANCE_VLAN") is { } applianceVlan)
+    {
+        vendor.WithVlan(int.Parse(applianceVlan));
+    }
+
+    vendor.WithHcsCtl(repoHcsCtl, storePath: store);
+}
+
 builder.Build().Run();

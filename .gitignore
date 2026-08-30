@@ -490,3 +490,6 @@ $RECYCLE.BIN/
 tools/hcsctl/
 .playwright/
 samples/.store/
+
+# hcsctl image store materialized by the samples (samples\.store by default)
+.store/

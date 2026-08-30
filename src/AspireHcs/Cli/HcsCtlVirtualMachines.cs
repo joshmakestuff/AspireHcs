@@ -17,58 +17,69 @@ namespace AspireHcs.Cli;
 internal static class HcsCtlVirtualMachines
 {
     /// <summary>
-    /// Creates the compute system and its differencing disk, attaches a DHCP endpoint, and does
-    /// not start it. A null <paramref name="network"/> means no NIC at all. Networks are named
-    /// literally; hcsctl's <c>--network default</c> sentinel is not used. The shared default is
-    /// <see cref="HcsNetwork"/>.
+    /// Creates the compute system and its differencing disks, attaches an endpoint, and does
+    /// not start it. See <see cref="HcsCtlVmCreateOptions"/> for what each option means.
     /// </summary>
-    /// <param name="labels">
-    /// Opaque key/value pairs recorded in hcsctl's store and never interpreted by it. A run stamps
-    /// its identity onto a VM with these, so a later run can prove the owner is dead before it
-    /// reclaims anything.
-    /// </param>
     public static Task<HcsCtlVmCreateDocument> CreateVmAsync(
         this HcsCtl hcsctl,
-        string id,
-        string vhdxPath,
-        int processorCount,
-        int memoryMb,
-        string? network = null,
-        string? serialPipe = null,
-        IReadOnlyDictionary<string, string>? labels = null,
+        HcsCtlVmCreateOptions options,
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(hcsctl);
+        ArgumentNullException.ThrowIfNull(options);
+        return hcsctl.InvokeAsync(BuildCreateArguments(options), HcsCtlJsonContext.Default.HcsCtlVmCreateDocument, progress, cancellationToken);
+    }
 
+    /// <summary>The <c>vm create</c> argv for <paramref name="options"/>. Pure; pinned by tests.</summary>
+    internal static List<string> BuildCreateArguments(HcsCtlVmCreateOptions options)
+    {
         List<string> arguments =
         [
             "vm", "create",
-            "--id", id,
-            "--vhdx", vhdxPath,
-            "--cpus", processorCount.ToString(CultureInfo.InvariantCulture),
-            "--memory-mb", memoryMb.ToString(CultureInfo.InvariantCulture),
+            "--id", options.Id,
+            "--vhdx", options.VhdxPath,
+            "--cpus", options.ProcessorCount.ToString(CultureInfo.InvariantCulture),
+            "--memory-mb", options.MemoryMb.ToString(CultureInfo.InvariantCulture),
         ];
 
-        if (!string.IsNullOrEmpty(network))
+        foreach (string disk in options.DataDisks)
+        {
+            arguments.Add("--disk");
+            arguments.Add(disk);
+        }
+
+        if (!string.IsNullOrEmpty(options.Network))
         {
             arguments.Add("--network");
-            arguments.Add(network);
+            arguments.Add(options.Network);
         }
 
-        if (!string.IsNullOrEmpty(serialPipe))
+        if (!string.IsNullOrEmpty(options.MacAddress))
+        {
+            arguments.Add("--mac");
+            arguments.Add(options.MacAddress);
+        }
+
+        if (options.VlanId is { } vlan)
+        {
+            arguments.Add("--vlan");
+            arguments.Add(vlan.ToString(CultureInfo.InvariantCulture));
+        }
+
+        if (!string.IsNullOrEmpty(options.SerialPipe))
         {
             arguments.Add("--serial-pipe");
-            arguments.Add(serialPipe);
+            arguments.Add(options.SerialPipe);
         }
 
-        foreach ((string key, string value) in labels ?? new Dictionary<string, string>())
+        foreach ((string key, string value) in options.Labels ?? new Dictionary<string, string>())
         {
             arguments.Add("--label");
             arguments.Add($"{key}={value}");
         }
 
-        return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlVmCreateDocument, progress, cancellationToken);
+        return arguments;
     }
 
     /// <summary>
@@ -154,4 +165,50 @@ internal static class HcsCtlVirtualMachines
     /// </summary>
     internal static string FormatDuration(TimeSpan timeout)
         => $"{Math.Max(1, (long)Math.Ceiling(timeout.TotalSeconds)).ToString(CultureInfo.InvariantCulture)}s";
+}
+
+/// <summary>
+/// Everything <c>vm create</c> takes. Values pass through to hcsctl verbatim; validation belongs
+/// to the caller (the builder methods normalize, the orchestrator checks shape).
+/// </summary>
+internal sealed record HcsCtlVmCreateOptions
+{
+    public required string Id { get; init; }
+
+    /// <summary>The boot disk, attached at SCSI LUN 0.</summary>
+    public required string VhdxPath { get; init; }
+
+    /// <summary>
+    /// Extra VHDXs attached at SCSI LUN 1..n in order. They share the boot disk's copy-on-write
+    /// policy: hcsctl boots differencing children and never writes the bases.
+    /// </summary>
+    public IReadOnlyList<string> DataDisks { get; init; } = [];
+
+    public int ProcessorCount { get; init; } = 2;
+
+    public int MemoryMb { get; init; } = 2048;
+
+    /// <summary>
+    /// Null means no NIC at all. Networks are named literally; hcsctl's <c>--network default</c>
+    /// sentinel is not used. The shared default is <see cref="HcsNetwork"/>.
+    /// </summary>
+    public string? Network { get; init; }
+
+    /// <summary>
+    /// NIC MAC, normalized <c>XX-XX-XX-XX-XX-XX</c>; null lets hcsctl generate one. For guests
+    /// whose network config is pinned to a specific address.
+    /// </summary>
+    public string? MacAddress { get; init; }
+
+    /// <summary>Access VLAN for the NIC's switch port, 1..4094; null means untagged.</summary>
+    public int? VlanId { get; init; }
+
+    public string? SerialPipe { get; init; }
+
+    /// <summary>
+    /// Opaque key/value pairs recorded in hcsctl's store and never interpreted by it. A run stamps
+    /// its identity onto a VM with these, so a later run can prove the owner is dead before it
+    /// reclaims anything.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? Labels { get; init; }
 }
