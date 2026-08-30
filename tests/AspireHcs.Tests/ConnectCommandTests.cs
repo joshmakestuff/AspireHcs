@@ -11,6 +11,11 @@ namespace AspireHcs.Tests;
 // The connect commands launch a client on the host; these pin what is spawned and when the
 // button is live. Process.Start itself is not covered: seeing a client window appear needs a
 // human.
+//
+// Serialized: RdpFilePath reads ASPIREHCS_TEMP on every access, and AspireHcsEnvironmentTests
+// sets that process-wide variable; run in parallel, the .rdp files here would land in the
+// other test's directory.
+[Collection(HcsCtlEnvironmentCollection.Name)]
 [SupportedOSPlatform("windows10.0.17763")]
 public class ConnectCommandTests
 {
@@ -161,10 +166,33 @@ public class ConnectCommandTests
     }
 
     [Fact]
-    public void Rdp_file_is_utf16le_with_a_bom_like_mstsc_writes()
+    public void Rdp_file_written_for_mstsc_is_utf16le_with_a_bom()
     {
-        Assert.Equal([0xFF, 0xFE], RdpFile.FileEncoding.GetPreamble());
-        Assert.Equal("A\0", Encoding.Latin1.GetString(RdpFile.FileEncoding.GetBytes("A")));
+        // Exercise the production writer so the bytes mstsc receives prove the emitted encoding.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
+        const string address = "192.168.1.20";
+        const int port = 3389;
+        const string userName = "Administrator";
+        string path = ConnectCommands.RdpFilePath(vm.Resource, "rdp");
+
+        try
+        {
+            ProcessStartInfo startInfo = ConnectCommands.BuildRdpStartInfo(
+                vm.Resource, "rdp", address, port, userName);
+            path = Assert.Single(startInfo.ArgumentList);
+            byte[] bytes = File.ReadAllBytes(path);
+
+            Assert.True(bytes.Length >= 2);
+            Assert.Equal(0xFF, bytes[0]);
+            Assert.Equal(0xFE, bytes[1]);
+            Assert.Equal(
+                RdpFile.Build(address, port, userName),
+                Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]

@@ -31,6 +31,18 @@ public sealed class ShutdownDuringStartupTests(ITestOutputHelper output)
 
         IDistributedApplicationTestingBuilder appHost =
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
+
+        // The appliance boot alone. With the container variables also set, the sample carries
+        // worker and web too; web's WaitFor runs inside app.StartAsync, which then returns only
+        // after the appliance is long past Starting — the wait below would watch for a
+        // transient state that has already gone by. Keep-list, as in ContainerFixture.
+        foreach (IResource extra in appHost.Resources
+            .Where(r => r is not HcsVirtualMachineResource || r.Name != "appliance")
+            .ToList())
+        {
+            appHost.Resources.Remove(extra);
+        }
+
         HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
         string workDir = Path.Combine(Path.GetTempPath(), "AspireHcs", vm.VmId);
 

@@ -14,29 +14,9 @@ namespace AspireHcs.Tests;
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlLongRunningInvocationTests : IDisposable
 {
-    private readonly string _directory = Directory.CreateTempSubdirectory("aspirehcs-fake-ctl").FullName;
+    private readonly FakeHcsCtlDirectory _fakes = new();
 
-    public void Dispose()
-    {
-        try
-        {
-            Directory.Delete(_directory, recursive: true);
-        }
-        catch (IOException)
-        {
-            // A leftover temp directory does not fail the test.
-        }
-
-        GC.SuppressFinalize(this);
-    }
-
-    /// <summary>A stand-in for hcsctl that emits the given batch body (stdout and stderr).</summary>
-    private HcsCtl FakeCtl(string batchBody)
-    {
-        string path = Path.Combine(_directory, $"fake-{Guid.NewGuid():N}.cmd");
-        File.WriteAllText(path, $"@echo off{Environment.NewLine}{batchBody}{Environment.NewLine}");
-        return new HcsCtl(path);
-    }
+    public void Dispose() => _fakes.Dispose();
 
     // ---- ReadOneJsonObjectAsync: the pure framing logic, no process involved ----
 
@@ -135,7 +115,7 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
     [Fact]
     public async Task A_command_that_emits_its_document_and_keeps_running_is_returned_live()
     {
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             """
             echo {
             echo   "ok": true,
@@ -167,7 +147,7 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
     [Fact]
     public async Task A_nonzero_exit_is_reported_the_same_way_a_one_shot_failure_is()
     {
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             """
             echo {"ok":false,"stage":"run","error":"guest 11111111-1111-1111-1111-111111111111: unreachable"}
             exit /b 1
@@ -184,7 +164,7 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
     public async Task A_clean_exit_right_after_the_document_is_a_contract_violation()
     {
         // A long-running command that exits 0 on its own is not the contract this API is for.
-        HcsCtl fake = FakeCtl("""echo {"ok":true,"command":"guest forward","listen":"127.0.0.1:1","guestPort":22}""");
+        HcsCtl fake = _fakes.Create("""echo {"ok":true,"command":"guest forward","listen":"127.0.0.1:1","guestPort":22}""");
 
         HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(
             () => fake.StartLongRunningAsync(["guest", "forward"], HcsCtlJsonContext.Default.HcsCtlGuestForwardDocument));
@@ -195,7 +175,7 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
     [Fact]
     public async Task A_failure_with_no_document_at_all_says_the_document_was_missing()
     {
-        HcsCtl fake = FakeCtl("exit /b 1");
+        HcsCtl fake = _fakes.Create("exit /b 1");
 
         HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(
             () => fake.StartLongRunningAsync(["guest", "forward"], HcsCtlJsonContext.Default.HcsCtlGuestForwardDocument));

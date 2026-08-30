@@ -18,28 +18,9 @@ namespace AspireHcs.Tests;
 [SupportedOSPlatform("windows10.0.17763")]
 public class GuestForwardPumpTests : IDisposable
 {
-    private readonly string _directory = Directory.CreateTempSubdirectory("aspirehcs-fake-ctl").FullName;
+    private readonly FakeHcsCtlDirectory _fakes = new();
 
-    public void Dispose()
-    {
-        try
-        {
-            Directory.Delete(_directory, recursive: true);
-        }
-        catch (IOException)
-        {
-            // A leftover temp directory does not fail the test.
-        }
-
-        GC.SuppressFinalize(this);
-    }
-
-    private HcsCtl FakeCtl(string batchBody)
-    {
-        string path = Path.Combine(_directory, $"fake-{Guid.NewGuid():N}.cmd");
-        File.WriteAllText(path, $"@echo off{Environment.NewLine}{batchBody}{Environment.NewLine}");
-        return new HcsCtl(path);
-    }
+    public void Dispose() => _fakes.Dispose();
 
     private static HcsVirtualMachineResource Vm()
         => DistributedApplication.CreateBuilder([]).AddHcsVm("vm").WithNetwork().Resource;
@@ -49,7 +30,7 @@ public class GuestForwardPumpTests : IDisposable
     {
         // No WithSshCommand: HvsocketForwardTargets is empty, so nothing here should even start
         // a `guest info` probe. A fake that fails any invocation proves it was never called.
-        HcsCtl fake = FakeCtl("exit /b 99");
+        HcsCtl fake = _fakes.Create("exit /b 99");
         HcsVirtualMachineResource resource = Vm();
         BootLedger ledger = new(NullLogger.Instance);
 
@@ -61,7 +42,7 @@ public class GuestForwardPumpTests : IDisposable
     [Fact]
     public async Task An_unreachable_agent_leaves_the_leased_address_as_the_only_option()
     {
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             """
             if "%2"=="info" (
               echo {"ok":false,"reachable":false,"state":"absent"}
@@ -81,7 +62,7 @@ public class GuestForwardPumpTests : IDisposable
     [Fact]
     public async Task A_reachable_agent_starts_the_forward_and_publishes_its_address()
     {
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             """
             if "%2"=="info" (
               echo {"ok":true,"reachable":true,"state":"ready"}
@@ -117,7 +98,7 @@ public class GuestForwardPumpTests : IDisposable
     [Fact]
     public async Task A_forward_that_starts_but_cannot_bind_leaves_the_leased_address_as_the_only_option()
     {
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             """
             if "%2"=="info" (
               echo {"ok":true,"reachable":true,"state":"ready"}
@@ -145,8 +126,8 @@ public class GuestForwardPumpTests : IDisposable
         // the same observable shape as the guest agent crashing or the relay being killed
         // externally. A marker file, not a fixed delay: a delay races the first assertion on a
         // slow runner (#90), where the exit and un-publish can land before the address is read.
-        string release = Path.Combine(_directory, "release");
-        HcsCtl fake = FakeCtl(
+        string release = Path.Combine(_fakes.Directory, "release");
+        HcsCtl fake = _fakes.Create(
             $$"""
             if "%2"=="info" (
               echo {"ok":true,"reachable":true,"state":"ready"}

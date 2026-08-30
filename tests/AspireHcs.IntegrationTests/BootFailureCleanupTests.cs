@@ -69,7 +69,12 @@ public sealed class BootFailureCleanupTests(ITestOutputHelper output)
         {
             // On the success path the retry already owns this id; on any failure path the
             // arranged conflict must not outlive the test.
-            _ = HcsCtlProbes.TryRun(["vm", "rm", "--id", vm.VmId, "--force"], out _, vm.StorePath);
+            bool cleaned = HcsCtlProbes.TryRun(
+                ["vm", "rm", "--id", vm.VmId, "--force"], out string cleanupDiagnostic, vm.StorePath);
+            if (!cleaned)
+            {
+                output.WriteLine($"Best-effort VM cleanup failed: {cleanupDiagnostic}");
+            }
         }
     }
 }

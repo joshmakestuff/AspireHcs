@@ -21,6 +21,64 @@ internal sealed class ContainerStartFailedException(string logs)
 }
 
 /// <summary>
+/// Thread-safe view over the log lines collected so far by
+/// <see cref="ContainerFixture.ObserveResourceLogsAsync"/>.
+/// </summary>
+internal sealed class ResourceLogBuffer
+{
+    private readonly List<string> _lines = [];
+
+    internal void Add(IReadOnlyList<LogLine> batch)
+    {
+        lock (_lines)
+        {
+            _lines.AddRange(batch.Select(l => l.Content));
+        }
+    }
+
+    public int Count
+    {
+        get
+        {
+            lock (_lines)
+            {
+                return _lines.Count;
+            }
+        }
+    }
+
+    public bool Any(Func<string, bool> predicate)
+    {
+        lock (_lines)
+        {
+            return _lines.Any(predicate);
+        }
+    }
+
+    /// <summary>
+    /// Polls for a matching line. The resource state stream and the log stream are separate
+    /// async channels: a line the product wrote can arrive here after the state change that
+    /// prompted the assertion, so an instant read can miss it.
+    /// </summary>
+    public async Task<bool> WaitForLineAsync(
+        Func<string, bool> predicate, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        while (!Any(predicate))
+        {
+            if (Environment.TickCount64 >= deadline)
+            {
+                return false;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+        }
+
+        return true;
+    }
+}
+
+/// <summary>
 /// Shared plumbing for the live container tests: locating the fixture, building the sample
 /// AppHost, running a workload to completion, and asking hcsctl what actually exists.
 /// </summary>
@@ -144,6 +202,64 @@ internal static class ContainerFixture
         return captured.ToString();
     }
 
+    /// <summary>
+    /// Collects a resource's log lines for the duration of <paramref name="observation"/>: the
+    /// watch starts before the observation so early lines are not missed, and is cancelled and
+    /// drained in every outcome. A watcher fault fails a green observation; after a failed
+    /// observation it is reported without replacing the original failure.
+    /// </summary>
+    public static async Task ObserveResourceLogsAsync(
+        DistributedApplication app,
+        string resourceName,
+        Xunit.Abstractions.ITestOutputHelper output,
+        CancellationToken cancellationToken,
+        Func<ResourceLogBuffer, Task> observation)
+    {
+        ResourceLogBuffer logs = new();
+        ResourceLoggerService loggerService = app.Services.GetRequiredService<ResourceLoggerService>();
+        using CancellationTokenSource watching = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task logWatch = WatchLogsAsync();
+        bool observationFailed = false;
+
+        try
+        {
+            await observation(logs);
+        }
+        catch
+        {
+            observationFailed = true;
+            throw;
+        }
+        finally
+        {
+            await watching.CancelAsync();
+
+            try
+            {
+                await logWatch;
+            }
+            catch (Exception watcherFailure) when (observationFailed)
+            {
+                // The observation already failed; report the pump fault without replacing it.
+                output.WriteLine($"resource log watcher also failed: {watcherFailure}");
+            }
+        }
+
+        async Task WatchLogsAsync()
+        {
+            try
+            {
+                await foreach (IReadOnlyList<LogLine> batch in loggerService.WatchAsync(resourceName).WithCancellation(watching.Token))
+                {
+                    logs.Add(batch);
+                }
+            }
+            catch (OperationCanceledException) when (watching.IsCancellationRequested)
+            {
+            }
+        }
+    }
+
     private static async Task PumpLogsAsync(DistributedApplication app, StringBuilder into, CancellationToken cancellationToken)
     {
         ResourceLoggerService logs = app.Services.GetRequiredService<ResourceLoggerService>();
@@ -187,9 +303,13 @@ internal static class ContainerFixture
         startInfo.ArgumentList.Add("--json");
 
         using Process process = Process.Start(startInfo)!;
-        string stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken);
+        // Both pipes are drained concurrently: a child that fills the stderr pipe while stdout
+        // is read to end blocks writing and never exits.
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        Task<string> stderr = process.StandardError.ReadToEndAsync(cancellationToken);
         await process.WaitForExitAsync(cancellationToken);
-        return stdout;
+        await stderr;
+        return await stdout;
     }
 
     /// <summary>
@@ -203,10 +323,19 @@ internal static class ContainerFixture
         string hcsctl, string store, DistributedApplication app, string imageName, CancellationToken cancellationToken)
     {
         string id = ContainerIdOf(app);
+        TimeSpan timeout = TimeSpan.FromMinutes(2);
+        // Monotonic: the lab hosts resync their clocks after checkpoint restores, and a wall
+        // clock step would shrink or stretch the bound.
+        long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        string lastPsOutput;
+
+        // Bound this wait at two minutes: the sole pause/resume caller has a five-minute
+        // end-to-end budget, leaving time to diagnose.
         while (true)
         {
-            string json = await RunHcsCtlJsonAsync(hcsctl, cancellationToken, "container", "ps", "--id", id, "--store", store);
-            using (JsonDocument document = JsonDocument.Parse(json))
+            lastPsOutput = await RunHcsCtlJsonAsync(
+                hcsctl, cancellationToken, "container", "ps", "--id", id, "--store", store);
+            using (JsonDocument document = JsonDocument.Parse(lastPsOutput))
             {
                 if (document.RootElement.TryGetProperty("processes", out JsonElement processes)
                     && processes.ValueKind == JsonValueKind.Array
@@ -218,8 +347,26 @@ internal static class ContainerFixture
                 }
             }
 
-            await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+            TimeSpan remaining = TimeSpan.FromMilliseconds(deadline - Environment.TickCount64);
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            await Task.Delay(
+                remaining < TimeSpan.FromMilliseconds(500)
+                    ? remaining
+                    : TimeSpan.FromMilliseconds(500),
+                cancellationToken);
         }
+
+        // A token cancelled while the last reply was being inspected is cancellation, not a
+        // timeout.
+        cancellationToken.ThrowIfCancellationRequested();
+
+        throw new InvalidOperationException(
+            $"Timed out after {timeout.TotalMinutes:0} minutes waiting for guest image/process '{imageName}' " +
+            $"in container '{id}'. Final container ps output: {lastPsOutput}");
     }
 
     /// <summary>Asks hcsctl directly what containers exist.</summary>

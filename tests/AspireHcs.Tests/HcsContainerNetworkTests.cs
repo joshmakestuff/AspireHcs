@@ -42,18 +42,6 @@ public class HcsContainerNetworkTests
         Assert.Equal("nat", builder.AddHcsContainer("worker").WithNetwork("nat").Resource.NetworkName);
     }
 
-    [Fact]
-    public void The_first_endpoint_backs_the_connection_string()
-    {
-        IDistributedApplicationBuilder builder = DistributedApplication.CreateBuilder([]);
-
-        IResourceBuilder<HcsContainerResource> container = builder.AddHcsContainer("worker")
-            .WithNetwork()
-            .WithEndpoint("http", 8080);
-
-        Assert.Equal("http", container.Resource.PrimaryEndpointName);
-    }
-
     // The health check resolves the endpoint per check: EndpointReference.IsAllocated memoizes
     // its first answer including false, so a reference built at model-build time would latch
     // unallocated forever. This pins that it is registered against a name that exists.

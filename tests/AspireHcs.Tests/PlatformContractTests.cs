@@ -3,8 +3,8 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// The package advertises "Windows-only, fails fast elsewhere". These tests pin that claim to
-// the shipped assembly.
+// The shipped assembly advertises the literal public platform contract "windows10.0.17763",
+// and that advertisement must agree with the runtime guard's minimum.
 [SupportedOSPlatform("windows10.0.17763")]
 public class PlatformContractTests
 {
@@ -17,6 +17,10 @@ public class PlatformContractTests
             .SingleOrDefault();
 
         Assert.NotNull(attribute);
+        Assert.Equal("windows10.0.17763", attribute.PlatformName);
+        // Ties the advertisement to the runtime guard's constant: raising the minimum in
+        // HcsPlatform without updating the assembly attribute would ship a package whose
+        // analyzer contract promises less than the guard enforces.
         Assert.Equal("windows" + HcsPlatform.MinimumWindowsVersion, attribute.PlatformName);
     }
 

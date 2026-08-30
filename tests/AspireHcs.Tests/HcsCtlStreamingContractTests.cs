@@ -13,29 +13,9 @@ namespace AspireHcs.Tests;
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsCtlStreamingContractTests : IDisposable
 {
-    private readonly string _directory = Directory.CreateTempSubdirectory("aspirehcs-fake-ctl").FullName;
+    private readonly FakeHcsCtlDirectory _fakes = new();
 
-    public void Dispose()
-    {
-        try
-        {
-            Directory.Delete(_directory, recursive: true);
-        }
-        catch (IOException)
-        {
-            // A leftover temp directory does not fail the test.
-        }
-
-        GC.SuppressFinalize(this);
-    }
-
-    /// <summary>A stand-in for hcsctl that emits the given batch body (stdout and stderr).</summary>
-    private HcsCtl FakeCtl(string batchBody)
-    {
-        string path = Path.Combine(_directory, $"fake-{Guid.NewGuid():N}.cmd");
-        File.WriteAllText(path, $"@echo off{Environment.NewLine}{batchBody}{Environment.NewLine}");
-        return new HcsCtl(path);
-    }
+    public void Dispose() => _fakes.Dispose();
 
     /// <summary>Captures every parsed record so the routing can be asserted.</summary>
     private sealed class Collector : IProgress<HcsCtlStreamRecord>
@@ -48,7 +28,7 @@ public class HcsCtlStreamingContractTests : IDisposable
     [Fact]
     public async Task Stream_records_route_by_their_stream_tag()
     {
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             "echo {\"ok\":true}" + Environment.NewLine +
             "echo {\"stream\":\"stdout\",\"data\":\"hello\"} 1>&2" + Environment.NewLine +
             "echo {\"stream\":\"stderr\",\"data\":\"oops\"} 1>&2" + Environment.NewLine +
@@ -77,7 +57,7 @@ public class HcsCtlStreamingContractTests : IDisposable
     [Fact]
     public async Task The_exec_started_record_parses_and_only_it_is_the_start_signal()
     {
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             "echo {\"ok\":true}" + Environment.NewLine +
             "echo {\"stream\":\"progress\",\"msg\":\"creating\"} 1>&2" + Environment.NewLine +
             "echo {\"stream\":\"exec\",\"event\":\"started\",\"pid\":4242} 1>&2" + Environment.NewLine +
@@ -98,7 +78,7 @@ public class HcsCtlStreamingContractTests : IDisposable
     [Fact]
     public async Task Bare_text_under_stream_json_is_a_contract_violation()
     {
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             "echo {\"ok\":true}" + Environment.NewLine +
             "echo this is not ndjson 1>&2");
 
@@ -118,7 +98,7 @@ public class HcsCtlStreamingContractTests : IDisposable
         // Non_ascii_survives_the_process_boundary (real binary). Here the fake emits the JSON
         // \u escape (ASCII on the wire, so cmd.exe's code page cannot mangle it) and the
         // assertion checks the record round-trips to the non-ASCII string.
-        HcsCtl fake = FakeCtl(
+        HcsCtl fake = _fakes.Create(
             "echo {\"ok\":true}" + Environment.NewLine +
             "echo {\"stream\":\"stdout\",\"data\":\"caf\\u00e9\"} 1>&2");
 

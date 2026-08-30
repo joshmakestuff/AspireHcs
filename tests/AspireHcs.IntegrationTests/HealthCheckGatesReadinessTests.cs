@@ -38,6 +38,17 @@ public sealed class HealthCheckGatesReadinessTests(ITestOutputHelper output)
         IDistributedApplicationTestingBuilder appHost =
             await DistributedApplicationTestingBuilder.CreateAsync<Projects.HcsSample_AppHost>(cts.Token);
 
+        // The appliance alone. With the container variables also set, the sample carries web,
+        // whose WaitFor(appliance) inside app.StartAsync waits for a ready this test exists to
+        // withhold — StartAsync would deadlock until the token cancels it. Keep-list, as in
+        // ContainerFixture.
+        foreach (IResource extra in appHost.Resources
+            .Where(r => r is not HcsVirtualMachineResource || r.Name != "appliance")
+            .ToList())
+        {
+            appHost.Resources.Remove(extra);
+        }
+
         HcsVirtualMachineResource vm = Assert.Single(appHost.Resources.OfType<HcsVirtualMachineResource>());
         appHost.CreateResourceBuilder(vm)
             .WithEndpoint("dead", targetPort: DeadPort)

@@ -55,9 +55,17 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
             output.WriteLine($"{property.Name} = {property.Value}");
         }
 
-        Assert.Contains(properties, p => p.Name == "hcs.container.uptime");
-        Assert.Contains(properties, p => p.Name == "hcs.memory.commit");
-        Assert.Contains(properties, p => p.Name == "hcs.cpu.total");
+        // The same message on all three: commit/cpu are the likeliest to be missing on a racing
+        // snapshot (the retry above polls only until uptime appears), and the hcs.*-filtered
+        // dump above prints nothing when no hcs property arrived at all.
+        static void AssertHasProperty(IReadOnlyList<ResourcePropertySnapshot> properties, string name)
+            => Assert.True(
+                properties.Any(p => p.Name == name),
+                $"Snapshot did not contain '{name}'. Observed properties: {string.Join(", ", properties.Select(p => p.Name))}");
+
+        AssertHasProperty(properties, "hcs.container.uptime");
+        AssertHasProperty(properties, "hcs.memory.commit");
+        AssertHasProperty(properties, "hcs.cpu.total");
 
         // Formatted with a unit, not a raw byte count.
         string commit = (string)properties.Single(p => p.Name == "hcs.memory.commit").Value!;
