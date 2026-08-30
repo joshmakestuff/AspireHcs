@@ -55,52 +55,84 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
             // the whole boot.
             List<string> logLines = [];
             ResourceLoggerService loggerService = app.Services.GetRequiredService<ResourceLoggerService>();
-            Task logWatch = Task.Run(async () =>
+            using CancellationTokenSource watching = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+            Task logWatch = WatchLogsAsync();
+            bool observationFailed = false;
+
+            try
             {
-                await foreach (IReadOnlyList<LogLine> batch in loggerService.WatchAsync("appliance").WithCancellation(cts.Token))
+                await app.StartAsync(cts.Token);
+
+                await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
+
+                // Pins that the check goes Healthy against a real guest listener and that ready
+                // fires. It does not observe the release-by-health ordering directly: the snapshot
+                // and eventing streams are separate async channels, and the snapshot at the instant
+                // ready fires can hold the report entry with no status yet. Ready firing at Running
+                // before any health evaluation is caught by HealthCheckGatesReadinessTests.
+                ResourceEvent healthy = await app.ResourceNotifications.WaitForResourceAsync(
+                    "appliance",
+                    e => e.Snapshot.HealthReports.Any(h => h.Name == "appliance_ssh_tcp_check" && h.Status == HealthStatus.Healthy),
+                    cts.Token);
+                HealthReportSnapshot report = healthy.Snapshot.HealthReports.Single(h => h.Name == "appliance_ssh_tcp_check");
+                output.WriteLine($"health report: {report.Status} — {report.Description}");
+
+                await ready.Task.WaitAsync(cts.Token);
+
+                // Hard accept: the refused branch the round-trip test tolerates is a failure here.
+                Uri endpoint = app.GetEndpoint("appliance", "ssh");
+                using TcpClient client = new();
+                await client.ConnectAsync(endpoint.Host, endpoint.Port).WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+                output.WriteLine($"TCP {endpoint.Host}:{endpoint.Port} -> connected");
+
+                // EMS through the product pump: the SAC banner ("Computer is booting, SAC started
+                // and initialized.") lands in the resource logs.
+                bool sawSerial;
+                lock (logLines)
                 {
-                    lock (logLines)
+                    sawSerial = logLines.Any(l => l.Contains("SAC", StringComparison.Ordinal));
+                    output.WriteLine($"log lines observed: {logLines.Count}; serial (SAC) seen: {sawSerial}");
+                }
+                Assert.True(sawSerial, "no SAC/EMS serial output appeared in the resource logs — the EMS channel is not reaching the pump.");
+
+                await app.StopAsync(cts.Token);
+            }
+            catch
+            {
+                observationFailed = true;
+                throw;
+            }
+            finally
+            {
+                await watching.CancelAsync();
+
+                try
+                {
+                    await logWatch;
+                }
+                catch (Exception watcherFailure) when (observationFailed)
+                {
+                    // The observation already failed; report the pump fault without replacing it.
+                    output.WriteLine($"resource log watcher also failed: {watcherFailure}");
+                }
+            }
+
+            async Task WatchLogsAsync()
+            {
+                try
+                {
+                    await foreach (IReadOnlyList<LogLine> batch in loggerService.WatchAsync("appliance").WithCancellation(watching.Token))
                     {
-                        logLines.AddRange(batch.Select(l => l.Content));
+                        lock (logLines)
+                        {
+                            logLines.AddRange(batch.Select(l => l.Content));
+                        }
                     }
                 }
-            }, cts.Token);
-
-            await app.StartAsync(cts.Token);
-
-            await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Running, cts.Token);
-
-            // Pins that the check goes Healthy against a real guest listener and that ready
-            // fires. It does not observe the release-by-health ordering directly: the snapshot
-            // and eventing streams are separate async channels, and the snapshot at the instant
-            // ready fires can hold the report entry with no status yet. Ready firing at Running
-            // before any health evaluation is caught by HealthCheckGatesReadinessTests.
-            ResourceEvent healthy = await app.ResourceNotifications.WaitForResourceAsync(
-                "appliance",
-                e => e.Snapshot.HealthReports.Any(h => h.Name == "appliance_ssh_tcp_check" && h.Status == HealthStatus.Healthy),
-                cts.Token);
-            HealthReportSnapshot report = healthy.Snapshot.HealthReports.Single(h => h.Name == "appliance_ssh_tcp_check");
-            output.WriteLine($"health report: {report.Status} — {report.Description}");
-
-            await ready.Task.WaitAsync(cts.Token);
-
-            // Hard accept: the refused branch the round-trip test tolerates is a failure here.
-            Uri endpoint = app.GetEndpoint("appliance", "ssh");
-            using TcpClient client = new();
-            await client.ConnectAsync(endpoint.Host, endpoint.Port).WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
-            output.WriteLine($"TCP {endpoint.Host}:{endpoint.Port} -> connected");
-
-            // EMS through the product pump: the SAC banner ("Computer is booting, SAC started
-            // and initialized.") lands in the resource logs.
-            bool sawSerial;
-            lock (logLines)
-            {
-                sawSerial = logLines.Any(l => l.Contains("SAC", StringComparison.Ordinal));
-                output.WriteLine($"log lines observed: {logLines.Count}; serial (SAC) seen: {sawSerial}");
+                catch (OperationCanceledException) when (watching.IsCancellationRequested)
+                {
+                }
             }
-            Assert.True(sawSerial, "no SAC/EMS serial output appeared in the resource logs — the EMS channel is not reaching the pump.");
-
-            await app.StopAsync(cts.Token);
         }
         finally
         {

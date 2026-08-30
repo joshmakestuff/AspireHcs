@@ -203,10 +203,19 @@ internal static class ContainerFixture
         string hcsctl, string store, DistributedApplication app, string imageName, CancellationToken cancellationToken)
     {
         string id = ContainerIdOf(app);
-        while (true)
+        TimeSpan timeout = TimeSpan.FromMinutes(2);
+        DateTime deadline = DateTime.UtcNow + timeout;
+        string lastPsOutput = string.Empty;
+        bool firstAttempt = true;
+
+        // Bound this wait at two minutes: the sole pause/resume caller has a five-minute
+        // end-to-end budget, leaving time to diagnose.
+        while (firstAttempt || DateTime.UtcNow < deadline)
         {
-            string json = await RunHcsCtlJsonAsync(hcsctl, cancellationToken, "container", "ps", "--id", id, "--store", store);
-            using (JsonDocument document = JsonDocument.Parse(json))
+            firstAttempt = false;
+            lastPsOutput = await RunHcsCtlJsonAsync(
+                hcsctl, cancellationToken, "container", "ps", "--id", id, "--store", store);
+            using (JsonDocument document = JsonDocument.Parse(lastPsOutput))
             {
                 if (document.RootElement.TryGetProperty("processes", out JsonElement processes)
                     && processes.ValueKind == JsonValueKind.Array
@@ -218,8 +227,26 @@ internal static class ContainerFixture
                 }
             }
 
-            await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+            TimeSpan remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+
+            await Task.Delay(
+                remaining < TimeSpan.FromMilliseconds(500)
+                    ? remaining
+                    : TimeSpan.FromMilliseconds(500),
+                cancellationToken);
         }
+
+        // A token cancelled while the last reply was being inspected is cancellation, not a
+        // timeout.
+        cancellationToken.ThrowIfCancellationRequested();
+
+        throw new InvalidOperationException(
+            $"Timed out after {timeout.TotalMinutes:0} minutes waiting for guest image/process '{imageName}' " +
+            $"in container '{id}'. Final container ps output: {lastPsOutput}");
     }
 
     /// <summary>Asks hcsctl directly what containers exist.</summary>

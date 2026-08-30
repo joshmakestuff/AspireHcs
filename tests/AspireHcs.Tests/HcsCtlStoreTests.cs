@@ -44,16 +44,35 @@ public class HcsCtlStoreTests
         Assert.Equal(HcsCtlExitCode.Failed, thrown.ExitCode);
     }
 
-    [SkippableFact]
+    // With no store configured, hcsctl must be launched with no --store at all so it stays on
+    // its per-user default. A stand-in binary records the argv it received: the real hcsctl
+    // cannot report which flags it was not given. Needs no hcsctl, so it never skips.
+    [Fact]
     public async Task No_configured_store_leaves_hcsctl_on_its_default()
     {
-        HcsCtl hcsctl = new(RequireBinary());
+        DirectoryInfo directory = Directory.CreateTempSubdirectory("aspirehcs-fake-ctl");
+        string argvPath = Path.Combine(directory.FullName, "argv.txt");
+        string fakePath = Path.Combine(directory.FullName, "fake-hcsctl.cmd");
+        File.WriteAllText(fakePath, $$"""
+            @echo off
+            >"{{argvPath}}" echo %*
+            echo {"ok":true}
+            """);
 
-        // The corrupt store exists but was never named, so this must not fail on it.
-        _ = CorruptStore();
-        HcsCtlInfoDocument info = await hcsctl.GetInfoAsync();
+        try
+        {
+            HcsCtl hcsctl = new(fakePath);
 
-        Assert.True(info.Ok);
+            HcsCtlInfoDocument info = await hcsctl.GetInfoAsync();
+
+            Assert.True(info.Ok);
+            // The whole argv, so an appended --store fails here rather than passing unnoticed.
+            Assert.Equal("info --json", File.ReadAllText(argvPath).Trim());
+        }
+        finally
+        {
+            Directory.Delete(directory.FullName, recursive: true);
+        }
     }
 
     // The network group rejects --store. If the exclusion list were wrong, this would be exit 64.

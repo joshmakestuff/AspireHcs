@@ -7,10 +7,8 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// The shell connect command launches hcsctl on the host; these pin what is spawned and when the
-// button is live. Process.Start itself is not covered: seeing a console window appear needs a
-// human. BuildShellStartInfo's own tests need a real hcsctl.exe to resolve against and are
-// skippable; the Execute orchestration tests inject a stub build delegate and need nothing.
+// BuildShellStartInfo tests pin the hcsctl argv handed to the shell, while Execute tests use
+// injected build and launch boundaries to verify state and error orchestration.
 [SupportedOSPlatform("windows10.0.17763")]
 public class ContainerConnectCommandTests
 {
@@ -168,18 +166,28 @@ public class ContainerConnectCommandTests
     }
 
     [Fact]
-    public void A_successful_click_launches_the_built_argv()
+    public void A_successful_click_launches_the_process_start_info_from_the_builder()
     {
         IResourceBuilder<HcsContainerResource> container = Container().WithShellCommand();
         List<ProcessStartInfo> launched = [];
+        HcsContainerResource? observedResource = null;
+        string? observedShell = null;
+        ProcessStartInfo built = new("test-hcsctl.exe");
 
         ExecuteCommandResult result = ContainerConnectCommands.Execute(
             container.Resource, "cmd.exe", userInteractive: true, currentState: "Running",
-            Stub, launched.Add);
+            (resource, shell) =>
+            {
+                observedResource = resource;
+                observedShell = shell;
+                return built;
+            },
+            launched.Add);
 
         Assert.True(result.Success);
-        ProcessStartInfo startInfo = Assert.Single(launched);
-        Assert.Equal("hcsctl.exe", startInfo.FileName);
+        Assert.Same(container.Resource, observedResource);
+        Assert.Equal("cmd.exe", observedShell);
+        Assert.Same(built, Assert.Single(launched));
     }
 
     [Fact]

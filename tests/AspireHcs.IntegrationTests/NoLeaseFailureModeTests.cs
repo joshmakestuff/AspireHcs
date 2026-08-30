@@ -37,35 +37,67 @@ public sealed class NoLeaseFailureModeTests(ITestOutputHelper output)
 
             List<string> logLines = [];
             ResourceLoggerService loggerService = app.Services.GetRequiredService<ResourceLoggerService>();
-            Task logWatch = Task.Run(async () =>
+            using CancellationTokenSource watching = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+            Task logWatch = WatchLogsAsync();
+            bool observationFailed = false;
+
+            try
             {
-                await foreach (IReadOnlyList<LogLine> batch in loggerService.WatchAsync("appliance").WithCancellation(cts.Token))
+                await app.StartAsync(cts.Token);
+
+                // Terminal FailedToStart, not a hang and not Running.
+                await app.ResourceNotifications.WaitForResourceAsync(
+                    "appliance", KnownResourceStates.FailedToStart, cts.Token);
+                output.WriteLine("resource reached FailedToStart");
+
+                // The cause is named where the user looks. Asserted on the lease-timeout wording,
+                // not on exact text.
+                bool causeNamed;
+                lock (logLines)
                 {
-                    lock (logLines)
+                    causeNamed = logLines.Any(l => l.Contains("did not obtain a DHCP lease", StringComparison.Ordinal));
+                    output.WriteLine($"log lines observed: {logLines.Count}; DHCP cause named: {causeNamed}");
+                }
+                Assert.True(causeNamed, "FailedToStart was reached but no log line names the DHCP lease timeout as the cause.");
+
+                await app.StopAsync(cts.Token);
+            }
+            catch
+            {
+                observationFailed = true;
+                throw;
+            }
+            finally
+            {
+                await watching.CancelAsync();
+
+                try
+                {
+                    await logWatch;
+                }
+                catch (Exception watcherFailure) when (observationFailed)
+                {
+                    // The observation already failed; report the pump fault without replacing it.
+                    output.WriteLine($"resource log watcher also failed: {watcherFailure}");
+                }
+            }
+
+            async Task WatchLogsAsync()
+            {
+                try
+                {
+                    await foreach (IReadOnlyList<LogLine> batch in loggerService.WatchAsync("appliance").WithCancellation(watching.Token))
                     {
-                        logLines.AddRange(batch.Select(l => l.Content));
+                        lock (logLines)
+                        {
+                            logLines.AddRange(batch.Select(l => l.Content));
+                        }
                     }
                 }
-            }, cts.Token);
-
-            await app.StartAsync(cts.Token);
-
-            // Terminal FailedToStart, not a hang and not Running.
-            await app.ResourceNotifications.WaitForResourceAsync(
-                "appliance", KnownResourceStates.FailedToStart, cts.Token);
-            output.WriteLine("resource reached FailedToStart");
-
-            // The cause is named where the user looks. Asserted on the lease-timeout wording,
-            // not on exact text.
-            bool causeNamed;
-            lock (logLines)
-            {
-                causeNamed = logLines.Any(l => l.Contains("did not obtain a DHCP lease", StringComparison.Ordinal));
-                output.WriteLine($"log lines observed: {logLines.Count}; DHCP cause named: {causeNamed}");
+                catch (OperationCanceledException) when (watching.IsCancellationRequested)
+                {
+                }
             }
-            Assert.True(causeNamed, "FailedToStart was reached but no log line names the DHCP lease timeout as the cause.");
-
-            await app.StopAsync(cts.Token);
         }
         finally
         {

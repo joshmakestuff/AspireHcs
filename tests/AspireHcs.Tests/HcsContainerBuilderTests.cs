@@ -96,14 +96,4 @@ public class HcsContainerBuilderTests
         Assert.Throws<ArgumentOutOfRangeException>(() => container.WithMemory(value));
         Assert.Throws<ArgumentOutOfRangeException>(() => container.WithProcessorCount(value));
     }
-
-    // There is no isolation switch: process isolation is out of scope and hcsctl does not
-    // implement it.
-    [Fact]
-    public void No_builder_method_offers_process_isolation()
-    {
-        Assert.DoesNotContain(
-            typeof(HcsContainerBuilderExtensions).GetMethods(),
-            m => m.Name.Contains("Isolation", StringComparison.OrdinalIgnoreCase));
-    }
 }

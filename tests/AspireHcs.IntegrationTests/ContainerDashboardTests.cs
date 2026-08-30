@@ -55,7 +55,9 @@ public sealed class ContainerDashboardTests(ITestOutputHelper output)
             output.WriteLine($"{property.Name} = {property.Value}");
         }
 
-        Assert.Contains(properties, p => p.Name == "hcs.container.uptime");
+        Assert.True(
+            properties.Any(p => p.Name == "hcs.container.uptime"),
+            $"Snapshot did not contain 'hcs.container.uptime'. Observed properties: {string.Join(", ", properties.Select(p => p.Name))}");
         Assert.Contains(properties, p => p.Name == "hcs.memory.commit");
         Assert.Contains(properties, p => p.Name == "hcs.cpu.total");
 
