@@ -35,13 +35,7 @@ public sealed class NoLeaseFailureModeTests(ITestOutputHelper output)
 
             await using DistributedApplication app = await appHost.BuildAsync(cts.Token);
 
-            List<string> logLines = [];
-            ResourceLoggerService loggerService = app.Services.GetRequiredService<ResourceLoggerService>();
-            using CancellationTokenSource watching = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-            Task logWatch = WatchLogsAsync();
-            bool observationFailed = false;
-
-            try
+            await ContainerFixture.ObserveResourceLogsAsync(app, "appliance", output, cts.Token, async logs =>
             {
                 await app.StartAsync(cts.Token);
 
@@ -50,54 +44,18 @@ public sealed class NoLeaseFailureModeTests(ITestOutputHelper output)
                     "appliance", KnownResourceStates.FailedToStart, cts.Token);
                 output.WriteLine("resource reached FailedToStart");
 
-                // The cause is named where the user looks. Asserted on the lease-timeout wording,
-                // not on exact text.
-                bool causeNamed;
-                lock (logLines)
-                {
-                    causeNamed = logLines.Any(l => l.Contains("did not obtain a DHCP lease", StringComparison.Ordinal));
-                    output.WriteLine($"log lines observed: {logLines.Count}; DHCP cause named: {causeNamed}");
-                }
+                // The cause is named where the user looks. Asserted on hcsctl's lease-timeout
+                // wording ("the guest has not taken a DHCP lease", hcsctl internal/vm/vm.go),
+                // not on exact text. The line is awaited rather than read instantly: the log
+                // stream can trail the state stream.
+                bool causeNamed = await logs.WaitForLineAsync(
+                    l => l.Contains("has not taken a DHCP lease", StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(15), cts.Token);
+                output.WriteLine($"log lines observed: {logs.Count}; DHCP cause named: {causeNamed}");
                 Assert.True(causeNamed, "FailedToStart was reached but no log line names the DHCP lease timeout as the cause.");
 
                 await app.StopAsync(cts.Token);
-            }
-            catch
-            {
-                observationFailed = true;
-                throw;
-            }
-            finally
-            {
-                await watching.CancelAsync();
-
-                try
-                {
-                    await logWatch;
-                }
-                catch (Exception watcherFailure) when (observationFailed)
-                {
-                    // The observation already failed; report the pump fault without replacing it.
-                    output.WriteLine($"resource log watcher also failed: {watcherFailure}");
-                }
-            }
-
-            async Task WatchLogsAsync()
-            {
-                try
-                {
-                    await foreach (IReadOnlyList<LogLine> batch in loggerService.WatchAsync("appliance").WithCancellation(watching.Token))
-                    {
-                        lock (logLines)
-                        {
-                            logLines.AddRange(batch.Select(l => l.Content));
-                        }
-                    }
-                }
-                catch (OperationCanceledException) when (watching.IsCancellationRequested)
-                {
-                }
-            }
+            });
         }
         finally
         {

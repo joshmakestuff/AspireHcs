@@ -11,6 +11,11 @@ namespace AspireHcs.Tests;
 // The connect commands launch a client on the host; these pin what is spawned and when the
 // button is live. Process.Start itself is not covered: seeing a client window appear needs a
 // human.
+//
+// Serialized: RdpFilePath reads ASPIREHCS_TEMP on every access, and AspireHcsEnvironmentTests
+// sets that process-wide variable; run in parallel, the .rdp files here would land in the
+// other test's directory.
+[Collection(HcsCtlEnvironmentCollection.Name)]
 [SupportedOSPlatform("windows10.0.17763")]
 public class ConnectCommandTests
 {

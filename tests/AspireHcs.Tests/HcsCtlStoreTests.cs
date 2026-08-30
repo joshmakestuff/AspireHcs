@@ -50,29 +50,18 @@ public class HcsCtlStoreTests
     [Fact]
     public async Task No_configured_store_leaves_hcsctl_on_its_default()
     {
-        DirectoryInfo directory = Directory.CreateTempSubdirectory("aspirehcs-fake-ctl");
-        string argvPath = Path.Combine(directory.FullName, "argv.txt");
-        string fakePath = Path.Combine(directory.FullName, "fake-hcsctl.cmd");
-        File.WriteAllText(fakePath, $$"""
-            @echo off
+        using FakeHcsCtlDirectory fakes = new();
+        string argvPath = Path.Combine(fakes.Directory, "argv.txt");
+        HcsCtl hcsctl = fakes.Create($$"""
             >"{{argvPath}}" echo %*
             echo {"ok":true}
             """);
 
-        try
-        {
-            HcsCtl hcsctl = new(fakePath);
+        HcsCtlInfoDocument info = await hcsctl.GetInfoAsync();
 
-            HcsCtlInfoDocument info = await hcsctl.GetInfoAsync();
-
-            Assert.True(info.Ok);
-            // The whole argv, so an appended --store fails here rather than passing unnoticed.
-            Assert.Equal("info --json", File.ReadAllText(argvPath).Trim());
-        }
-        finally
-        {
-            Directory.Delete(directory.FullName, recursive: true);
-        }
+        Assert.True(info.Ok);
+        // The whole argv, so an appended --store fails here rather than passing unnoticed.
+        Assert.Equal("info --json", File.ReadAllText(argvPath).Trim());
     }
 
     // The network group rejects --store. If the exclusion list were wrong, this would be exit 64.

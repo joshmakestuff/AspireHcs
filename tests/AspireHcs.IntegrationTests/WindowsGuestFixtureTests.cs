@@ -53,13 +53,7 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
 
             // Collect resource logs from the start so the serial-console assertion below sees
             // the whole boot.
-            List<string> logLines = [];
-            ResourceLoggerService loggerService = app.Services.GetRequiredService<ResourceLoggerService>();
-            using CancellationTokenSource watching = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-            Task logWatch = WatchLogsAsync();
-            bool observationFailed = false;
-
-            try
+            await ContainerFixture.ObserveResourceLogsAsync(app, "appliance", output, cts.Token, async logs =>
             {
                 await app.StartAsync(cts.Token);
 
@@ -86,53 +80,16 @@ public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
                 output.WriteLine($"TCP {endpoint.Host}:{endpoint.Port} -> connected");
 
                 // EMS through the product pump: the SAC banner ("Computer is booting, SAC started
-                // and initialized.") lands in the resource logs.
-                bool sawSerial;
-                lock (logLines)
-                {
-                    sawSerial = logLines.Any(l => l.Contains("SAC", StringComparison.Ordinal));
-                    output.WriteLine($"log lines observed: {logLines.Count}; serial (SAC) seen: {sawSerial}");
-                }
+                // and initialized.") lands in the resource logs. Awaited, not read instantly:
+                // the log stream can trail the events observed above.
+                bool sawSerial = await logs.WaitForLineAsync(
+                    l => l.Contains("SAC", StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(15), cts.Token);
+                output.WriteLine($"log lines observed: {logs.Count}; serial (SAC) seen: {sawSerial}");
                 Assert.True(sawSerial, "no SAC/EMS serial output appeared in the resource logs — the EMS channel is not reaching the pump.");
 
                 await app.StopAsync(cts.Token);
-            }
-            catch
-            {
-                observationFailed = true;
-                throw;
-            }
-            finally
-            {
-                await watching.CancelAsync();
-
-                try
-                {
-                    await logWatch;
-                }
-                catch (Exception watcherFailure) when (observationFailed)
-                {
-                    // The observation already failed; report the pump fault without replacing it.
-                    output.WriteLine($"resource log watcher also failed: {watcherFailure}");
-                }
-            }
-
-            async Task WatchLogsAsync()
-            {
-                try
-                {
-                    await foreach (IReadOnlyList<LogLine> batch in loggerService.WatchAsync("appliance").WithCancellation(watching.Token))
-                    {
-                        lock (logLines)
-                        {
-                            logLines.AddRange(batch.Select(l => l.Content));
-                        }
-                    }
-                }
-                catch (OperationCanceledException) when (watching.IsCancellationRequested)
-                {
-                }
-            }
+            });
         }
         finally
         {
