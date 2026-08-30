@@ -19,7 +19,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task Stdout_that_is_not_json_is_a_contract_violation_not_a_success()
     {
-        HcsCtl fake = _fakes.Create("echo this is not a document");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "this is not a document: café" } });
 
         HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(
             () => fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument));
@@ -27,12 +27,13 @@ public class HcsCtlOutputContractTests : IDisposable
         Assert.Contains("not one JSON document", thrown.Message);
         // The offending stdout is quoted.
         Assert.Contains("this is not a document", thrown.Message);
+        Assert.Contains("café", thrown.Message);
     }
 
     [Fact]
     public async Task Exit_zero_with_no_document_is_a_contract_violation()
     {
-        HcsCtl fake = _fakes.Create("exit /b 0");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() });
 
         HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(
             () => fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument));
@@ -44,10 +45,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task A_second_document_on_stdout_is_rejected_rather_than_ignored()
     {
-        HcsCtl fake = _fakes.Create("""
-            echo {"ok":true}
-            echo {"ok":true}
-            """);
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true}\n{\"ok\":true}\n" } });
 
         HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(
             () => fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument));
@@ -58,7 +56,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task One_document_binds()
     {
-        HcsCtl fake = _fakes.Create("""echo {"ok":true,"version":"10.0.26200.8894","build":26200}""");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true,\"version\":\"10.0.26200.8894\",\"build\":26200}" } });
 
         HcsCtlInfoDocument info = await fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument);
 
@@ -72,7 +70,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task A_failure_without_a_document_still_fails_and_says_so()
     {
-        HcsCtl fake = _fakes.Create("exit /b 1");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { ExitCode = HcsCtlExitCode.Failed } });
 
         HcsCtlCommandException thrown = await Assert.ThrowsAsync<HcsCtlCommandException>(
             () => fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument));
@@ -87,7 +85,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task A_null_collection_binds_to_empty_rather_than_null()
     {
-        HcsCtl fake = _fakes.Create("""echo {"ok":true,"containers":null}""");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true,\"containers\":null}" } });
 
         HcsCtlContainerListDocument listing = await fake.InvokeAsync(
             ["container", "ls"], HcsCtlJsonContext.Default.HcsCtlContainerListDocument);
@@ -98,7 +96,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task Every_nullable_collection_on_the_create_document_binds_to_empty()
     {
-        HcsCtl fake = _fakes.Create("""echo {"ok":true,"id":"c1","chain":null,"addresses":null}""");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true,\"id\":\"c1\",\"chain\":null,\"addresses\":null}" } });
 
         HcsCtlContainerCreateDocument created = await fake.InvokeAsync(
             ["container", "create"], HcsCtlJsonContext.Default.HcsCtlContainerCreateDocument);
@@ -111,7 +109,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task Every_nullable_collection_on_the_info_document_binds_to_empty()
     {
-        HcsCtl fake = _fakes.Create("""echo {"ok":true,"privilegesHeld":null,"services":null,"images":null}""");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true,\"privilegesHeld\":null,\"services\":null,\"images\":null}" } });
 
         HcsCtlInfoDocument info = await fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument);
 
@@ -125,7 +123,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task A_null_services_map_still_blocks_the_preflight()
     {
-        HcsCtl fake = _fakes.Create("""echo {"ok":true,"services":null,"hyperVAdministrators":true}""");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true,\"services\":null,\"hyperVAdministrators\":true}" } });
 
         HcsCtlInfoDocument info = await fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument);
 
@@ -136,7 +134,7 @@ public class HcsCtlOutputContractTests : IDisposable
     [Fact]
     public async Task An_undocumented_exit_code_is_a_failure_and_keeps_its_code()
     {
-        HcsCtl fake = _fakes.Create("exit /b 3");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { ExitCode = 3 } });
 
         HcsCtlCommandException thrown = await Assert.ThrowsAsync<HcsCtlCommandException>(
             () => fake.InvokeAsync(["info"], HcsCtlJsonContext.Default.HcsCtlInfoDocument));

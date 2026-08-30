@@ -13,6 +13,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\AspireHcs\AspireHcs.csproj" />
+    <Compile Remove="FakeHcsCtl.cs" />
   </ItemGroup>
+
+  <Target Name="PublishFakeHcsCtl" AfterTargets="Build">
+    <Exec Command='dotnet publish "$(MSBuildProjectDirectory)\FakeHcsCtl.cs" --configuration "$(Configuration)" --output "$(OutDir)fake-hcsctl"' />
+  </Target>
 
 </Project>

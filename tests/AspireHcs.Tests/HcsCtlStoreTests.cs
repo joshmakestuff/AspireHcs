@@ -1,4 +1,5 @@
 using System.Runtime.Versioning;
+using System.Text.Json;
 using AspireHcs.Cli;
 using Xunit;
 
@@ -51,17 +52,32 @@ public class HcsCtlStoreTests
     public async Task No_configured_store_leaves_hcsctl_on_its_default()
     {
         using FakeHcsCtlDirectory fakes = new();
-        string argvPath = Path.Combine(fakes.Directory, "argv.txt");
-        HcsCtl hcsctl = fakes.Create($$"""
-            >"{{argvPath}}" echo %*
-            echo {"ok":true}
-            """);
+        string argvPath = Path.Combine(fakes.Directory, "argv.json");
+        HcsCtl hcsctl = fakes.Create(new() { ArgumentsPath = argvPath, DefaultResponse = new() { Stdout = "{\"ok\":true}" } });
 
         HcsCtlInfoDocument info = await hcsctl.GetInfoAsync();
 
         Assert.True(info.Ok);
-        // The whole argv, so an appended --store fails here rather than passing unnoticed.
-        Assert.Equal("info --json", File.ReadAllText(argvPath).Trim());
+        string[] arguments = JsonSerializer.Deserialize<string[]>(File.ReadAllText(argvPath))
+            ?? throw new InvalidOperationException("The fake hcsctl did not record an argument array.");
+        Assert.Equal(["info", "--json"], arguments);
+    }
+
+    [Fact]
+    public async Task Arguments_with_spaces_quotes_and_non_ascii_reach_hcsctl_as_distinct_values()
+    {
+        using FakeHcsCtlDirectory fakes = new();
+        string argvPath = Path.Combine(fakes.Directory, "argv.json");
+        string store = Path.Combine(fakes.Directory, "store with ünicode");
+        HcsCtl hcsctl = fakes.Create(new() { ArgumentsPath = argvPath, DefaultResponse = new() { Stdout = "{\"ok\":true}" } }, store);
+
+        const string command = "say \"hello world\" to café";
+        await hcsctl.InvokeAsync(
+            ["container", "exec", "--cmd", command], HcsCtlJsonContext.Default.HcsCtlResultDocument);
+
+        string[] arguments = JsonSerializer.Deserialize<string[]>(File.ReadAllText(argvPath))
+            ?? throw new InvalidOperationException("The fake hcsctl did not record an argument array.");
+        Assert.Equal(["container", "exec", "--cmd", command, "--store", store, "--json"], arguments);
     }
 
     // The network group rejects --store. If the exclusion list were wrong, this would be exit 64.

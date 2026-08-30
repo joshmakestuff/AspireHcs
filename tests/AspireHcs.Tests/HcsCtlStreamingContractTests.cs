@@ -28,11 +28,7 @@ public class HcsCtlStreamingContractTests : IDisposable
     [Fact]
     public async Task Stream_records_route_by_their_stream_tag()
     {
-        HcsCtl fake = _fakes.Create(
-            "echo {\"ok\":true}" + Environment.NewLine +
-            "echo {\"stream\":\"stdout\",\"data\":\"hello\"} 1>&2" + Environment.NewLine +
-            "echo {\"stream\":\"stderr\",\"data\":\"oops\"} 1>&2" + Environment.NewLine +
-            "echo {\"stream\":\"progress\",\"msg\":\"step\"} 1>&2");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true}", Stderr = "{\"stream\":\"stdout\",\"data\":\"hello\"}\n{\"stream\":\"stderr\",\"data\":\"oops\"}\n{\"stream\":\"progress\",\"msg\":\"step\"}\n" } });
 
         Collector collector = new();
         await fake.InvokeStreamingAsync(
@@ -57,11 +53,7 @@ public class HcsCtlStreamingContractTests : IDisposable
     [Fact]
     public async Task The_exec_started_record_parses_and_only_it_is_the_start_signal()
     {
-        HcsCtl fake = _fakes.Create(
-            "echo {\"ok\":true}" + Environment.NewLine +
-            "echo {\"stream\":\"progress\",\"msg\":\"creating\"} 1>&2" + Environment.NewLine +
-            "echo {\"stream\":\"exec\",\"event\":\"started\",\"pid\":4242} 1>&2" + Environment.NewLine +
-            "echo {\"stream\":\"stdout\",\"data\":\"started\"} 1>&2");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true}", Stderr = "{\"stream\":\"progress\",\"msg\":\"creating\"}\n{\"stream\":\"exec\",\"event\":\"started\",\"pid\":4242}\n{\"stream\":\"stdout\",\"data\":\"started\"}\n" } });
 
         Collector collector = new();
         await fake.InvokeStreamingAsync(
@@ -76,36 +68,55 @@ public class HcsCtlStreamingContractTests : IDisposable
     }
 
     [Fact]
-    public async Task Bare_text_under_stream_json_is_a_contract_violation()
+    public async Task Bare_text_from_a_still_running_child_is_a_contract_violation()
     {
-        HcsCtl fake = _fakes.Create(
-            "echo {\"ok\":true}" + Environment.NewLine +
-            "echo this is not ndjson 1>&2");
+        string ready = Path.Combine(_fakes.Directory, "malformed-ready");
+        string release = Path.Combine(_fakes.Directory, "malformed-release");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true}", Stderr = "this is not ndjson\n", ReadyPath = ready, ReleasePath = release } });
 
-        HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(
-            () => fake.InvokeStreamingAsync(
-                ["container", "exec"], HcsCtlJsonContext.Default.HcsCtlExecDocument));
+        Task invocation = fake.InvokeStreamingAsync(
+            ["container", "exec"], HcsCtlJsonContext.Default.HcsCtlExecDocument);
+        try
+        {
+            await WaitForFileAsync(ready);
+            Assert.False(invocation.IsCompleted);
+            File.WriteAllText(release, "release");
 
-        Assert.Contains("not NDJSON", thrown.Message);
-        // The offending line is quoted.
-        Assert.Contains("this is not ndjson", thrown.Message);
+            HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(() => invocation);
+            Assert.Contains("not NDJSON", thrown.Message);
+            Assert.Contains("this is not ndjson", thrown.Message);
+        }
+        finally
+        {
+            File.WriteAllText(release, "release");
+            try
+            {
+                await invocation;
+            }
+            catch (HcsCtlContractException)
+            {
+            }
+        }
     }
 
     [Fact]
     public async Task Non_ascii_data_survives_the_stream()
     {
-        // The raw UTF-8 byte path over the process boundary is pinned by HcsCtlContractTests'
-        // Non_ascii_survives_the_process_boundary (real binary). Here the fake emits the JSON
-        // \u escape (ASCII on the wire, so cmd.exe's code page cannot mangle it) and the
-        // assertion checks the record round-trips to the non-ASCII string.
-        HcsCtl fake = _fakes.Create(
-            "echo {\"ok\":true}" + Environment.NewLine +
-            "echo {\"stream\":\"stdout\",\"data\":\"caf\\u00e9\"} 1>&2");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true}", Stderr = "{\"stream\":\"stdout\",\"data\":\"café\"}\n" } });
 
         Collector collector = new();
         await fake.InvokeStreamingAsync(
             ["container", "exec"], HcsCtlJsonContext.Default.HcsCtlExecDocument, collector);
 
         Assert.Equal("café", Assert.Single(collector.Records).Data);
+    }
+
+    private static async Task WaitForFileAsync(string path)
+    {
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
+        while (!File.Exists(path))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(10), timeout.Token);
+        }
     }
 }
