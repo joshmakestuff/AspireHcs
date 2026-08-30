@@ -30,7 +30,7 @@ public class GuestForwardPumpTests : IDisposable
     {
         // No WithSshCommand: HvsocketForwardTargets is empty, so nothing here should even start
         // a `guest info` probe. A fake that fails any invocation proves it was never called.
-        HcsCtl fake = _fakes.Create("exit /b 99");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { ExitCode = 99 } });
         HcsVirtualMachineResource resource = Vm();
         BootLedger ledger = new(NullLogger.Instance);
 
@@ -42,14 +42,11 @@ public class GuestForwardPumpTests : IDisposable
     [Fact]
     public async Task An_unreachable_agent_leaves_the_leased_address_as_the_only_option()
     {
-        HcsCtl fake = _fakes.Create(
-            """
-            if "%2"=="info" (
-              echo {"ok":false,"reachable":false,"state":"absent"}
-              exit /b 1
-            )
-            exit /b 99
-            """);
+        HcsCtl fake = _fakes.Create(new()
+        {
+            Responses = [new() { ArgumentPrefix = ["guest", "info"], Stdout = "{\"ok\":false,\"reachable\":false,\"state\":\"absent\"}", ExitCode = HcsCtlExitCode.Failed }],
+            DefaultResponse = new() { ExitCode = 99 },
+        });
         HcsVirtualMachineResource resource = Vm();
         resource.HvsocketForwardTargets["ssh"] = 22;
         BootLedger ledger = new(NullLogger.Instance);
@@ -62,19 +59,16 @@ public class GuestForwardPumpTests : IDisposable
     [Fact]
     public async Task A_reachable_agent_starts_the_forward_and_publishes_its_address()
     {
-        HcsCtl fake = _fakes.Create(
-            """
-            if "%2"=="info" (
-              echo {"ok":true,"reachable":true,"state":"ready"}
-              exit /b 0
-            )
-            if "%2"=="forward" (
-              echo {"ok":true,"command":"guest forward","listen":"127.0.0.1:54321","guestPort":22}
-              ping -n 50 127.0.0.1 >nul
-              exit /b 0
-            )
-            exit /b 99
-            """);
+        string release = Path.Combine(_fakes.Directory, "reachable-release");
+        HcsCtl fake = _fakes.Create(new()
+        {
+            Responses =
+            [
+                new() { ArgumentPrefix = ["guest", "info"], Stdout = "{\"ok\":true,\"reachable\":true,\"state\":\"ready\"}" },
+                new() { ArgumentPrefix = ["guest", "forward"], Stdout = "{\"ok\":true,\"command\":\"guest forward\",\"listen\":\"127.0.0.1:54321\",\"guestPort\":22}", ReleasePath = release },
+            ],
+            DefaultResponse = new() { ExitCode = 99 },
+        });
         HcsVirtualMachineResource resource = Vm();
         resource.HvsocketForwardTargets["ssh"] = 22;
         BootLedger ledger = new(NullLogger.Instance);
@@ -89,6 +83,7 @@ public class GuestForwardPumpTests : IDisposable
         {
             // Draining is the normal teardown path (mirrors the boot ledger on VM stop); it must
             // both kill the process and un-publish the address so a stale one is never dialled.
+            File.WriteAllText(release, "release");
             ledger.Drain();
         }
 
@@ -98,18 +93,15 @@ public class GuestForwardPumpTests : IDisposable
     [Fact]
     public async Task A_forward_that_starts_but_cannot_bind_leaves_the_leased_address_as_the_only_option()
     {
-        HcsCtl fake = _fakes.Create(
-            """
-            if "%2"=="info" (
-              echo {"ok":true,"reachable":true,"state":"ready"}
-              exit /b 0
-            )
-            if "%2"=="forward" (
-              echo {"ok":false,"stage":"run","error":"listen 127.0.0.1:0: address already in use"}
-              exit /b 1
-            )
-            exit /b 99
-            """);
+        HcsCtl fake = _fakes.Create(new()
+        {
+            Responses =
+            [
+                new() { ArgumentPrefix = ["guest", "info"], Stdout = "{\"ok\":true,\"reachable\":true,\"state\":\"ready\"}" },
+                new() { ArgumentPrefix = ["guest", "forward"], Stdout = "{\"ok\":false,\"stage\":\"run\",\"error\":\"listen 127.0.0.1:0: address already in use\"}", ExitCode = HcsCtlExitCode.Failed },
+            ],
+            DefaultResponse = new() { ExitCode = 99 },
+        });
         HcsVirtualMachineResource resource = Vm();
         resource.HvsocketForwardTargets["ssh"] = 22;
         BootLedger ledger = new(NullLogger.Instance);
@@ -127,21 +119,15 @@ public class GuestForwardPumpTests : IDisposable
         // externally. A marker file, not a fixed delay: a delay races the first assertion on a
         // slow runner (#90), where the exit and un-publish can land before the address is read.
         string release = Path.Combine(_fakes.Directory, "release");
-        HcsCtl fake = _fakes.Create(
-            $$"""
-            if "%2"=="info" (
-              echo {"ok":true,"reachable":true,"state":"ready"}
-              exit /b 0
-            )
-            if "%2"=="forward" goto hold
-            exit /b 99
-            :hold
-            echo {"ok":true,"command":"guest forward","listen":"127.0.0.1:54322","guestPort":22}
-            :wait
-            if exist "{{release}}" exit /b 0
-            ping -n 2 127.0.0.1 >nul
-            goto wait
-            """);
+        HcsCtl fake = _fakes.Create(new()
+        {
+            Responses =
+            [
+                new() { ArgumentPrefix = ["guest", "info"], Stdout = "{\"ok\":true,\"reachable\":true,\"state\":\"ready\"}" },
+                new() { ArgumentPrefix = ["guest", "forward"], Stdout = "{\"ok\":true,\"command\":\"guest forward\",\"listen\":\"127.0.0.1:54322\",\"guestPort\":22}", ReleasePath = release },
+            ],
+            DefaultResponse = new() { ExitCode = 99 },
+        });
         HcsVirtualMachineResource resource = Vm();
         resource.HvsocketForwardTargets["ssh"] = 22;
         BootLedger ledger = new(NullLogger.Instance);

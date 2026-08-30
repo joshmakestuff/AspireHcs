@@ -115,17 +115,15 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
     [Fact]
     public async Task A_command_that_emits_its_document_and_keeps_running_is_returned_live()
     {
-        HcsCtl fake = _fakes.Create(
-            """
-            echo {
-            echo   "ok": true,
-            echo   "command": "guest forward",
-            echo   "vmId": "11111111-1111-1111-1111-111111111111",
-            echo   "listen": "127.0.0.1:54321",
-            echo   "guestPort": 22
-            echo }
-            ping -n 50 127.0.0.1 >nul
-            """);
+        string release = Path.Combine(_fakes.Directory, "long-running-release");
+        HcsCtl fake = _fakes.Create(new()
+        {
+            DefaultResponse = new()
+            {
+                Stdout = "{\"ok\":true,\"command\":\"guest forward\",\"vmId\":\"11111111-1111-1111-1111-111111111111\",\"listen\":\"127.0.0.1:54321\",\"guestPort\":22}",
+                ReleasePath = release,
+            },
+        });
 
         HcsCtlLongRunningInvocation<HcsCtlGuestForwardDocument> invocation = await fake.StartLongRunningAsync(
             ["guest", "forward"], HcsCtlJsonContext.Default.HcsCtlGuestForwardDocument);
@@ -139,6 +137,7 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
         }
         finally
         {
+            File.WriteAllText(release, "release");
             HcsCtl.KillQuietly(invocation.Process);
             invocation.Process.Dispose();
         }
@@ -147,11 +146,7 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
     [Fact]
     public async Task A_nonzero_exit_is_reported_the_same_way_a_one_shot_failure_is()
     {
-        HcsCtl fake = _fakes.Create(
-            """
-            echo {"ok":false,"stage":"run","error":"guest 11111111-1111-1111-1111-111111111111: unreachable"}
-            exit /b 1
-            """);
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":false,\"stage\":\"run\",\"error\":\"guest 11111111-1111-1111-1111-111111111111: unreachable\"}", ExitCode = HcsCtlExitCode.Failed } });
 
         HcsCtlCommandException thrown = await Assert.ThrowsAsync<HcsCtlCommandException>(
             () => fake.StartLongRunningAsync(["guest", "forward"], HcsCtlJsonContext.Default.HcsCtlGuestForwardDocument));
@@ -164,7 +159,7 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
     public async Task A_clean_exit_right_after_the_document_is_a_contract_violation()
     {
         // A long-running command that exits 0 on its own is not the contract this API is for.
-        HcsCtl fake = _fakes.Create("""echo {"ok":true,"command":"guest forward","listen":"127.0.0.1:1","guestPort":22}""");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { Stdout = "{\"ok\":true,\"command\":\"guest forward\",\"listen\":\"127.0.0.1:1\",\"guestPort\":22}" } });
 
         HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(
             () => fake.StartLongRunningAsync(["guest", "forward"], HcsCtlJsonContext.Default.HcsCtlGuestForwardDocument));
@@ -175,7 +170,7 @@ public class HcsCtlLongRunningInvocationTests : IDisposable
     [Fact]
     public async Task A_failure_with_no_document_at_all_says_the_document_was_missing()
     {
-        HcsCtl fake = _fakes.Create("exit /b 1");
+        HcsCtl fake = _fakes.Create(new() { DefaultResponse = new() { ExitCode = HcsCtlExitCode.Failed } });
 
         HcsCtlContractException thrown = await Assert.ThrowsAsync<HcsCtlContractException>(
             () => fake.StartLongRunningAsync(["guest", "forward"], HcsCtlJsonContext.Default.HcsCtlGuestForwardDocument));
