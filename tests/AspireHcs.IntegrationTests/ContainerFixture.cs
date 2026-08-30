@@ -369,6 +369,32 @@ internal static class ContainerFixture
             $"in container '{id}'. Final container ps output: {lastPsOutput}");
     }
 
+    /// <summary>
+    /// Skips unless <paramref name="imageReference"/> is materialized in the store. For tests
+    /// whose workload needs a tool the default nanoserver image does not carry; the skip message
+    /// names the commands that provision it, so an absent image reads as setup, not product
+    /// failure.
+    /// </summary>
+    public static async Task RequireMaterializedImageAsync(
+        string hcsctl, string store, string imageReference, CancellationToken cancellationToken)
+    {
+        string stdout = await RunHcsCtlJsonAsync(hcsctl, cancellationToken, "image", "ls", "--store", store);
+
+        using JsonDocument document = JsonDocument.Parse(stdout);
+        bool materialized = document.RootElement.TryGetProperty("images", out JsonElement images)
+            && images.ValueKind == JsonValueKind.Array
+            && images.EnumerateArray().Any(i =>
+                i.TryGetProperty("ref", out JsonElement reference)
+                && string.Equals(reference.GetString(), imageReference, StringComparison.OrdinalIgnoreCase)
+                && i.TryGetProperty("materialized", out JsonElement m)
+                && m.ValueKind == JsonValueKind.True);
+
+        Skip.IfNot(materialized,
+            $"{imageReference} is not materialized in {store}. Provision it once with: " +
+            $"hcsctl image pull --ref {imageReference} --store {store} && " +
+            $"hcsctl image import --ref {imageReference} --store {store} (import needs elevation).");
+    }
+
     /// <summary>Asks hcsctl directly what containers exist.</summary>
     public static async Task<string[]> ListContainerIdsAsync(string hcsctl, string store, CancellationToken cancellationToken)
     {

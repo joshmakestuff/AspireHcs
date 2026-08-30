@@ -364,10 +364,13 @@ internal sealed class HcsContainerInstance(
             // Running is published last. Aspire's health monitor starts when a resource reports
             // Running, and a resource with no health check annotations is declared ready at that
             // moment; WaitFor dependents would be released against a container that is not up.
-            await notifications.PublishUpdateAsync(resource, s => s with
-            {
-                State = KnownResourceStates.Running,
-            }).ConfigureAwait(false);
+            // Decided inside the update, where the snapshot is current: a one-shot workload that
+            // finished cleanly during boot has already published Finished, and Running must not
+            // overwrite it.
+            await notifications.PublishUpdateAsync(resource, s =>
+                s.State?.Text == KnownResourceStates.Finished
+                    ? s
+                    : s with { State = KnownResourceStates.Running }).ConfigureAwait(false);
         }
         catch (Exception) when (stopping.IsCancellationRequested)
         {
@@ -746,6 +749,8 @@ internal sealed class HcsContainerInstance(
             return;
         }
 
+        // Written before Exited: a boot that observes Exited must also see how it ended.
+        boot.ExitedCleanly = exitCode == 0;
         boot.Exited = true;
 
         await notifications.PublishUpdateAsync(resource, s => s with
@@ -819,7 +824,10 @@ internal sealed class HcsContainerInstance(
 
     private static void ThrowIfExitedMidBoot(BootRecord boot)
     {
-        if (boot.Exited)
+        // A clean exit is not a boot failure: a fast one-shot workload can finish before
+        // endpoint allocation does, and its exit already published Finished. Only a workload
+        // that died mid-boot fails the resource.
+        if (boot.Exited && !boot.ExitedCleanly)
         {
             throw new InvalidOperationException("The container's workload exited while it was still starting.");
         }
@@ -880,6 +888,9 @@ internal sealed class HcsContainerInstance(
         public BootLedger Ledger { get; } = ledger;
 
         public volatile bool Exited;
+
+        /// <summary>Whether that exit reported code 0. Meaningful only once <see cref="Exited"/> is set.</summary>
+        public volatile bool ExitedCleanly;
 
         /// <summary>
         /// The workload-started latch: <see langword="true"/> when hcsctl's exec started record

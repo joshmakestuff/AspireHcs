@@ -114,6 +114,12 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
         Directory.Delete(shared, recursive: true);
     }
 
+    // The image this one test pins, in place of the suite's ASPIREHCS_TEST_IMAGE default: the
+    // workload is fsutil, and nanoserver ltsc2025 does not carry it (measured 2026-08-30 — the
+    // workload exits 1 and no disk-free table exists to parse). 2025 nanoserver can gain
+    // features via FoD, but only through an image build; servercore has fsutil in-box.
+    private const string FsutilImage = "mcr.microsoft.com/windows/servercore:ltsc2025";
+
     // fsutil volume diskfree c: inside the guest reports the requested size (± the measured
     // overhead). The default is 20 GB, so a 40 GB request that did nothing shows ~19.9 and fails.
     //
@@ -127,17 +133,18 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
     [SkippableFact]
     public async Task The_requested_scratch_size_is_what_the_guest_sees()
     {
-        ContainerFixture.Require();
+        (string hcsctl, string store, _) = ContainerFixture.Require();
         Skip.IfNot(ContainerFixture.IsElevated,
             "Sizing the scratch needs elevation: ExpandScratchSize returns E_ACCESSDENIED from a filtered token " +
             "(measured 2026-08-07, hcsctl#36). Re-run elevated to exercise this.");
 
         using CancellationTokenSource cts = new(TimeSpan.FromMinutes(5));
+        await ContainerFixture.RequireMaterializedImageAsync(hcsctl, store, FsutilImage, cts.Token);
 
         const int requestedGb = 40;
         string logs = await ContainerFixture.RunAndCaptureAsync(
             "cmd /c fsutil volume diskfree c:",
-            container => container.WithScratchSize(requestedGb),
+            container => container.WithImage(FsutilImage).WithScratchSize(requestedGb),
             cts.Token);
 
         output.WriteLine(logs);
@@ -152,37 +159,23 @@ public sealed class ContainerConfigurationTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// Pulls the "total bytes" figure out of <c>fsutil volume diskfree</c>. Its output carries
-    /// several byte counts with localized labels; total is the largest of them. Newer builds
-    /// (ltsc2025) append a humanized figure — "42,814,382,080 (39.9 GB)" — so the value ends at
-    /// the opening parenthesis; folding its digits in would inflate the count a thousandfold.
+    /// Pulls the "Total bytes" figure out of <c>fsutil volume diskfree</c>. The match is exact
+    /// on the English label ("Total # of bytes" on older builds) — the test pins the MCR image,
+    /// so the locale is known. The capture stops before the humanized suffix newer builds
+    /// append ("42,814,382,080 ( 39.9 GB)"). Deliberately narrow: a looser scan of the resource
+    /// log once parsed a boot-log timestamp into a 4.6-billion-GB "volume" when fsutil was
+    /// absent, and that failure blamed scratch sizing instead of the missing tool.
     /// </summary>
     private static long ParseTotalBytes(string logs)
     {
-        long largest = 0;
-        foreach (string line in logs.Split('\n'))
-        {
-            int colon = line.LastIndexOf(':');
-            if (colon < 0)
-            {
-                continue;
-            }
+        // Unanchored: captured lines carry the pump's "timestamp stdout: " prefix. "Total free
+        // bytes" and "Total quota free bytes" don't match — the label must run straight into
+        // "bytes".
+        System.Text.RegularExpressions.Match match = System.Text.RegularExpressions.Regex.Match(
+            logs, @"Total (?:# of )?bytes\s*:\s*([\d,]+)");
 
-            string value = line[(colon + 1)..];
-            int parenthesis = value.IndexOf('(');
-            if (parenthesis >= 0)
-            {
-                value = value[..parenthesis];
-            }
-
-            string digits = new([.. value.Where(char.IsAsciiDigit)]);
-            if (digits.Length > 0 && long.TryParse(digits, out long parsed))
-            {
-                largest = Math.Max(largest, parsed);
-            }
-        }
-
-        Assert.True(largest > 0, $"No byte count found in fsutil output:\n{logs}");
-        return largest;
+        Assert.True(match.Success,
+            $"fsutil produced no 'Total bytes' line — did the workload run, and does the image carry fsutil?\n{logs}");
+        return long.Parse(match.Groups[1].Value.Replace(",", ""));
     }
 }
