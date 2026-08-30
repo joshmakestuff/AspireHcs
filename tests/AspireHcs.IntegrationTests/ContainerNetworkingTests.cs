@@ -151,6 +151,11 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
 
     // Endpoints without a network can never resolve. Caught before anything is created, so no
     // compute system is left behind.
+    //
+    // The network is stripped explicitly: the sample's worker calls WithNetwork(), and with it
+    // in place the no-network guard cannot fire — this test then passed only by riding the
+    // boot's reaction to its fast workload, not the guard it names (found 2026-08-30 when that
+    // reaction changed).
     [SkippableFact]
     public async Task An_endpoint_without_a_network_fails_before_anything_is_created()
     {
@@ -162,6 +167,7 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
         IDistributedApplicationTestingBuilder appHost =
             await ContainerFixture.SampleAppHostAsync("cmd /c ver", cts.Token);
         HcsContainerResource resource = appHost.Resources.OfType<HcsContainerResource>().Single();
+        resource.NetworkName = null;
         appHost.CreateResourceBuilder(resource).WithEndpoint("orphan", 9999);
 
         await using (DistributedApplication app = await appHost.BuildAsync(cts.Token))
