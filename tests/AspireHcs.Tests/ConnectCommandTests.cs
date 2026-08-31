@@ -494,26 +494,44 @@ public class ConnectCommandTests
     {
         // `..\..\evil` lands on connect\evil.rdp, still inside. The guard asserts containment,
         // not the absence of `..`, so this passes. Pins the file-name shape.
-        IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
+        string? originalTemp = Environment.GetEnvironmentVariable("ASPIREHCS_TEMP");
+        Environment.SetEnvironmentVariable("ASPIREHCS_TEMP", null);
+        try
+        {
+            IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
 
-        string path = ConnectCommands.RdpFilePath(vm.Resource, @"..\..\evil");
+            string path = ConnectCommands.RdpFilePath(vm.Resource, @"..\..\evil");
 
-        Assert.Equal(
-            Path.Combine(Path.GetTempPath(), "AspireHcs", "connect", "evil.rdp"),
-            path);
+            Assert.Equal(
+                Path.Combine(Path.GetTempPath(), "AspireHcs", "connect", "evil.rdp"),
+                path);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ASPIREHCS_TEMP", originalTemp);
+        }
     }
 
     [Fact]
     public void A_normal_endpoint_name_stays_inside_the_connect_directory()
     {
         // The negative above is only meaningful if the positive passes.
-        IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
+        string? originalTemp = Environment.GetEnvironmentVariable("ASPIREHCS_TEMP");
+        Environment.SetEnvironmentVariable("ASPIREHCS_TEMP", null);
+        try
+        {
+            IResourceBuilder<HcsVirtualMachineResource> vm = Vm();
 
-        string path = ConnectCommands.RdpFilePath(vm.Resource, "rdp");
+            string path = ConnectCommands.RdpFilePath(vm.Resource, "rdp");
 
-        Assert.StartsWith(
-            Path.Combine(Path.GetTempPath(), "AspireHcs", "connect"), path, StringComparison.OrdinalIgnoreCase);
-        Assert.EndsWith("-rdp.rdp", path, StringComparison.Ordinal);
+            Assert.StartsWith(
+                Path.Combine(Path.GetTempPath(), "AspireHcs", "connect"), path, StringComparison.OrdinalIgnoreCase);
+            Assert.EndsWith("-rdp.rdp", path, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ASPIREHCS_TEMP", originalTemp);
+        }
     }
 
     private static void Allocate(

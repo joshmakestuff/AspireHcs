@@ -9,6 +9,10 @@ namespace AspireHcs.Tests;
 
 // BuildShellStartInfo tests pin the hcsctl argv handed to the shell, while Execute tests use
 // injected build and launch boundaries to verify state and error orchestration.
+//
+// Serialized: BuildShellStartInfo falls back to ASPIREHCS_STORE, which tests here clear and
+// restore; run in parallel with AspireHcsEnvironmentTests the fallback would be nondeterministic.
+[Collection(HcsCtlEnvironmentCollection.Name)]
 [SupportedOSPlatform("windows10.0.17763")]
 public class ContainerConnectCommandTests
 {
@@ -56,15 +60,24 @@ public class ContainerConnectCommandTests
     {
         Skip.IfNot(RepositoryTools.TryFindHcsCtl(out string? hcsctlPath, out string? failure), failure);
 
-        IResourceBuilder<HcsContainerResource> container = Container().WithHcsCtl(hcsctlPath);
+        string? originalStore = Environment.GetEnvironmentVariable("ASPIREHCS_STORE");
+        Environment.SetEnvironmentVariable("ASPIREHCS_STORE", null);
+        try
+        {
+            IResourceBuilder<HcsContainerResource> container = Container().WithHcsCtl(hcsctlPath);
 
-        ProcessStartInfo startInfo = ContainerConnectCommands.BuildShellStartInfo(container.Resource, "cmd.exe");
+            ProcessStartInfo startInfo = ContainerConnectCommands.BuildShellStartInfo(container.Resource, "cmd.exe");
 
-        Assert.Equal(hcsctlPath, startInfo.FileName);
-        Assert.True(startInfo.UseShellExecute);
-        Assert.Equal(
-            ["container", "exec", "--id", container.Resource.ContainerId, "--cmd", "cmd.exe", "--interactive", "--tty"],
-            startInfo.ArgumentList);
+            Assert.Equal(hcsctlPath, startInfo.FileName);
+            Assert.True(startInfo.UseShellExecute);
+            Assert.Equal(
+                ["container", "exec", "--id", container.Resource.ContainerId, "--cmd", "cmd.exe", "--interactive", "--tty"],
+                startInfo.ArgumentList);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ASPIREHCS_STORE", originalStore);
+        }
     }
 
     [SkippableFact]
