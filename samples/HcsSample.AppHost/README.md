@@ -63,6 +63,7 @@ variable fallbacks:
 | `ApplianceMemoryGb` | `HCS_TEST_APPLIANCE_MEMORY_GB` | Memory (default 6) |
 | `ApplianceCpus` | `HCS_TEST_APPLIANCE_CPUS` | vCPUs (default 4) |
 | `ApplianceSshUser` | `HCS_TEST_APPLIANCE_SSH_USER` | SSH account for the Connect button (default `root`) |
+| `ConsumeWeb` | `HCS_SAMPLE_CONSUME_WEB` | Any non-empty value enables the consumer-direction demo: worker and the Linux VM consume web's endpoint. Requires Docker for the host-loopback relay |
 
 ## Preparing a VM image
 
