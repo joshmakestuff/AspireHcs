@@ -104,4 +104,91 @@ internal static class HcsCtlGuests
 
         return hcsctl.StartLongRunningAsync(arguments, HcsCtlJsonContext.Default.HcsCtlGuestForwardDocument, progress, cancellationToken);
     }
+
+    /// <summary>
+    /// Runs <c>guest mount</c>: attaches a host SMB share at a guest path, over the guest's own
+    /// SMB client. The agent authenticates with a Windows Credential Manager entry named by
+    /// <paramref name="credentialTarget"/> — hcsctl reads it itself, so the password never appears
+    /// in argv and never reaches AspireHcs.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="uid"/>/<paramref name="gid"/> map ownership for a Linux cifs mount; 0 (the
+    /// default) leaves the cifs default, and both are ignored by a Windows guest.
+    /// </remarks>
+    public static Task<HcsCtlGuestMountDocument> GuestMountAsync(
+        this HcsCtl hcsctl,
+        string vmId,
+        string unc,
+        string path,
+        string credentialTarget,
+        bool readOnly = false,
+        int uid = 0,
+        int gid = 0,
+        TimeSpan? timeout = null,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        return hcsctl.InvokeAsync(
+            BuildMountArguments(vmId, unc, path, credentialTarget, readOnly, uid, gid, timeout),
+            HcsCtlJsonContext.Default.HcsCtlGuestMountDocument, progress, cancellationToken);
+    }
+
+    /// <summary>The <c>guest mount</c> argv. Pure; pinned by tests.</summary>
+    internal static List<string> BuildMountArguments(
+        string vmId, string unc, string path, string credentialTarget,
+        bool readOnly, int uid, int gid, TimeSpan? timeout)
+    {
+        List<string> arguments =
+        [
+            "guest", "mount",
+            "--vmid", vmId,
+            "--unc", unc,
+            "--path", path,
+            "--credential", credentialTarget,
+        ];
+
+        if (readOnly)
+        {
+            arguments.Add("--ro");
+        }
+        if (uid != 0)
+        {
+            arguments.Add("--uid");
+            arguments.Add(uid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        if (gid != 0)
+        {
+            arguments.Add("--gid");
+            arguments.Add(gid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        if (timeout is { } bound)
+        {
+            arguments.Add("--timeout");
+            arguments.Add(HcsCtlVirtualMachines.FormatDuration(bound));
+        }
+
+        return arguments;
+    }
+
+    /// <summary>Runs <c>guest unmount</c>: detaches the mount the agent placed at a guest path.</summary>
+    public static Task<HcsCtlGuestUnmountDocument> GuestUnmountAsync(
+        this HcsCtl hcsctl,
+        string vmId,
+        string path,
+        TimeSpan? timeout = null,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+
+        List<string> arguments = ["guest", "unmount", "--vmid", vmId, "--path", path];
+        if (timeout is { } bound)
+        {
+            arguments.Add("--timeout");
+            arguments.Add(HcsCtlVirtualMachines.FormatDuration(bound));
+        }
+
+        return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlGuestUnmountDocument, progress, cancellationToken);
+    }
 }
