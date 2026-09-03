@@ -124,6 +124,15 @@ if (Setting("LinuxVhdx", "HCS_TEST_VHDX") is { } linuxVhdx)
         // Dashboard "Connect (SSH)" button. The account must exist in the image.
         .WithSshCommand(userName: linuxUser);
 
+    // Bind mount (opt-in): a host directory delivered into the guest over SMB and mounted by the
+    // hcsguest agent after boot — the VM analogue of the container's WithBindMount above. Needs
+    // the host prepared once, elevated: samples\prepare.ps1 -Files. Read-only, and still live: a
+    // file edited on the host changes in the guest with no restart.
+    if (Setting("LinuxMount", "HCS_SAMPLE_LINUX_MOUNT") is not null)
+    {
+        appliance.WithBindMount("data", "/mnt/data", isReadOnly: true);
+    }
+
     appliance.WithHcsCtl(repoHcsCtl, storePath: store);
 
     // WaitFor as well as WithReference: the guest address exists only after the DHCP lease,
