@@ -96,4 +96,45 @@ internal static class HcsCtlPreflight
             $"  hcsctl image import --ref {imageReference}   (elevated)" + Environment.NewLine +
             "Only the import needs elevation, and only once per image — running the container afterwards does not.";
     }
+
+    /// <summary>
+    /// Returns why a VM's bind mounts cannot be applied yet — the host is not prepared for VM file
+    /// sharing, or the VM's network is not admitted by the SMB firewall rule — naming the exact
+    /// elevated command, or <see langword="null"/> when they can.
+    /// </summary>
+    /// <remarks>
+    /// Preparation is not automated here, for the same reason image import is not: it creates a
+    /// local user, two shares and a firewall rule, all of which need an elevated token a UAC-filtered
+    /// AppHost does not have. It can only say what to run. Network coverage is compared by name; a
+    /// <c>WithNetwork</c> that named a network by id would not match the rule's alias-derived names.
+    /// </remarks>
+    public static string? DescribeUnpreparedFiles(
+        HcsCtlFilesInspectDocument inspect, string networkName, string resourceName)
+    {
+        ArgumentNullException.ThrowIfNull(inspect);
+        ArgumentException.ThrowIfNullOrWhiteSpace(networkName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceName);
+
+        if (!inspect.Prepared)
+        {
+            string missing = inspect.Missing.Count > 0 ? $" (missing: {string.Join(", ", inspect.Missing)})" : "";
+            return $"Resource '{resourceName}' declares bind mounts, but the host is not prepared for VM " +
+                $"file sharing{missing}. Prepare it once, from an elevated prompt:" + Environment.NewLine +
+                $"  hcsctl files prepare --network {networkName}   (elevated)" + Environment.NewLine +
+                "Preparation is one-time per host; exposing and mounting per run are not elevated.";
+        }
+
+        bool covered = inspect.Networks.Any(n => string.Equals(n, networkName, StringComparison.OrdinalIgnoreCase));
+        if (!covered)
+        {
+            string admits = inspect.Networks.Count > 0 ? string.Join(", ", inspect.Networks) : "none";
+            return $"Resource '{resourceName}' declares bind mounts on network '{networkName}', but the SMB " +
+                $"firewall rule does not admit that network (it admits: {admits}). Add it, from an elevated prompt:" +
+                Environment.NewLine +
+                $"  hcsctl files prepare --network {networkName}   (elevated)" + Environment.NewLine +
+                "prepare is repeatable: it adds the network to the existing rule.";
+        }
+
+        return null;
+    }
 }

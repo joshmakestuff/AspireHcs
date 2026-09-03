@@ -129,4 +129,59 @@ public class HcsCtlPreflightTests
         Assert.NotNull(blocker);
         Assert.Contains("does not exist yet", blocker);
     }
+
+    private static HcsCtlFilesInspectDocument Prepared(params string[] networks) => new()
+    {
+        Ok = true,
+        Prepared = true,
+        Root = @"C:\ProgramData\hcsctl\files",
+        Networks = networks,
+        Missing = [],
+    };
+
+    [Fact]
+    public void A_prepared_host_whose_rule_admits_the_network_has_no_files_blocker()
+    {
+        Assert.Null(HcsCtlPreflight.DescribeUnpreparedFiles(Prepared("Default Switch"), "Default Switch", "vm"));
+    }
+
+    [Fact]
+    public void The_network_coverage_check_is_case_insensitive()
+    {
+        Assert.Null(HcsCtlPreflight.DescribeUnpreparedFiles(Prepared("nat"), "NAT", "vm"));
+    }
+
+    [Fact]
+    public void An_unprepared_host_names_the_prepare_command_and_what_is_missing()
+    {
+        HcsCtlFilesInspectDocument inspect = new()
+        {
+            Ok = true,
+            Prepared = false,
+            Root = @"C:\ProgramData\hcsctl\files",
+            Networks = [],
+            Missing = ["share hcsctl-files", "credential"],
+        };
+
+        string? blocker = HcsCtlPreflight.DescribeUnpreparedFiles(inspect, "nat", "vm");
+
+        Assert.NotNull(blocker);
+        Assert.Contains("'vm'", blocker);
+        Assert.Contains("hcsctl files prepare --network nat", blocker);
+        Assert.Contains("elevated", blocker);
+        Assert.Contains("credential", blocker);
+    }
+
+    [Fact]
+    public void A_prepared_host_whose_rule_omits_the_network_names_the_prepare_command()
+    {
+        // The share exists but the VM's network is not admitted by the 445 rule; prepare is
+        // repeatable and adds it.
+        string? blocker = HcsCtlPreflight.DescribeUnpreparedFiles(Prepared("Default Switch"), "nat", "vm");
+
+        Assert.NotNull(blocker);
+        Assert.Contains("does not admit", blocker);
+        Assert.Contains("Default Switch", blocker);
+        Assert.Contains("hcsctl files prepare --network nat", blocker);
+    }
 }

@@ -16,7 +16,10 @@ FakeHcsCtlScenario scenario = JsonSerializer.Deserialize<FakeHcsCtlScenario>(Fil
 
 if (scenario.ArgumentsPath is { Length: > 0 } argumentsPath)
 {
-    File.WriteAllText(argumentsPath, JsonSerializer.Serialize(args), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+    // Appended one JSON array per line (NDJSON), so a flow that invokes hcsctl several times
+    // through one HcsCtl records every call in order. A single-call reader deserializing the
+    // whole file as one array still succeeds: the lone trailing newline is whitespace.
+    File.AppendAllText(argumentsPath, JsonSerializer.Serialize(args) + "\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 }
 
 FakeHcsCtlResponse response = scenario.Responses.FirstOrDefault(r => Matches(args, r.ArgumentPrefix))
