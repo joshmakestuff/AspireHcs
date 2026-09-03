@@ -59,6 +59,45 @@ public class VmConfigurationValidationTests
     }
 
     [Fact]
+    public void A_bind_mount_without_a_network_is_rejected()
+    {
+        // A bind mount reaches the host share over the guest's NIC; without one there is nothing
+        // to mount through.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm().WithBindMount(@"C:\src", "/mnt/data");
+
+        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
+            () => HcsVmOrchestrator.ValidateConfiguration(vm.Resource));
+        Assert.Contains("bind mount", ex.Message);
+        Assert.Contains("WithNetwork", ex.Message);
+    }
+
+    [Fact]
+    public void An_agentless_vm_with_a_bind_mount_is_rejected()
+    {
+        // The mount is applied by the hcsguest agent after boot; an agentless VM has none. The
+        // failure must come here, not after a full boot at mount time.
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm()
+            .WithNetwork()
+            .WithGuestAddress("10.20.10.20")
+            .WithBindMount(@"C:\src", "/mnt/data");
+
+        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
+            () => HcsVmOrchestrator.ValidateConfiguration(vm.Resource));
+        Assert.Contains("agentless", ex.Message);
+        Assert.Contains("WithBindMount", ex.Message);
+    }
+
+    [Fact]
+    public void An_agent_path_vm_with_a_bind_mount_and_a_network_passes()
+    {
+        IResourceBuilder<HcsVirtualMachineResource> vm = Vm()
+            .WithNetwork()
+            .WithBindMount(@"C:\src", "/mnt/data");
+
+        HcsVmOrchestrator.ValidateConfiguration(vm.Resource);
+    }
+
+    [Fact]
     public void An_agentless_vm_with_environment_values_is_rejected()
     {
         // WithEnvironment as a consumer needs the hcsguest agent to land the values in the

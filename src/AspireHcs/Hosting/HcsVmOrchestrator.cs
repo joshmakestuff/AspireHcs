@@ -262,6 +262,23 @@ internal static class HcsVmOrchestrator
                 throw new InvalidOperationException(
                     $"Resource '{resource.Name}' declares a guest address but no network; add WithNetwork(name).");
             }
+            if (resource.Mounts.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares a bind mount but no network; a guest without a NIC " +
+                    "cannot reach the host share. Add WithNetwork().");
+            }
+        }
+
+        // A bind mount is applied by the hcsguest agent over hvsocket after boot; an agentless VM
+        // by definition has none. Caught here rather than mid-boot, for the same reason the
+        // environment check is: failing at mount time would burn a full boot and name the wrong cause.
+        if (resource.IsAgentless && resource.Mounts.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Resource '{resource.Name}' is agentless (WithGuestAddress) but declares bind mounts " +
+                "(WithBindMount). An agentless guest has no hcsguest agent to mount a host share. " +
+                "Remove the bind mounts or drop WithGuestAddress().");
         }
 
         // Caught here rather than mid-boot: environment delivery needs the hcsguest agent, and
