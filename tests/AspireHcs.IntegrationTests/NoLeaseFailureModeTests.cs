@@ -8,11 +8,8 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// A guest that boots healthy but never DHCPs (the StaticNoDhcp variant) must fail with the
-// cause named: not hang, not report Running, not point anywhere but DHCP.
-// WithGuestAddress() is the supported escape hatch for such a guest (the agentless path skips
-// the lease wait entirely); this test deliberately does not use it — the agent path's failure
-// mode is the subject.
+// StaticNoDhcp boots without taking a DHCP lease. The agent-based startup path must
+// time out and report the missing lease; WithGuestAddress would bypass this wait.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class NoLeaseFailureModeTests(ITestOutputHelper output)
 {

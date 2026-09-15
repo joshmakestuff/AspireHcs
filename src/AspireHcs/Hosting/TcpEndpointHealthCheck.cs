@@ -9,10 +9,8 @@ namespace AspireHcs.Hosting;
 /// something inside the guest is actually listening there.
 /// </summary>
 /// <remarks>
-/// The guest kernel comes up before its services do.
-/// <see cref="Hcs.HcsComputeSystem.WaitForGuestReadyAsync"/> attests only that the integration
-/// drivers and DHCP answered. This check closes that gap: <c>WaitFor(vm)</c> releases dependents
-/// when a workload listens.
+/// Guest address discovery can finish before services start. This check keeps
+/// <c>WaitFor(vm)</c> dependents waiting until the target port accepts connections.
 /// <para>
 /// A refused connection is unhealthy: the guest's network stack is up, but nothing serves yet.
 /// </para>

@@ -13,9 +13,8 @@ using Xunit;
 namespace AspireHcs.Tests;
 
 /// <summary>
-/// Drives <see cref="HttpsEndpointHealthCheck"/> against an in-process TLS listener with a
-/// self-signed certificate — the appliance shape: the service answers, the certificate can
-/// never validate.
+/// Exercises <see cref="HttpsEndpointHealthCheck"/> against an in-process TLS listener
+/// with a certificate that is not trusted by the host.
 /// </summary>
 [SupportedOSPlatform("windows10.0.17763")]
 public class HttpsEndpointHealthCheckTests
@@ -39,8 +38,7 @@ public class HttpsEndpointHealthCheckTests
         await using SelfSignedServer server = SelfSignedServer.Start("HTTP/1.1 200 OK");
         HcsVirtualMachineResource resource = Allocated(server.Port);
 
-        // acceptAnyServerCertificate: the point of the option — the same endpoint, same
-        // response, flips on trust alone.
+        // The same response becomes healthy when certificate validation is disabled.
         HealthCheckResult tolerant = await Check(resource, acceptAnyServerCertificate: true)
             .CheckHealthAsync(new HealthCheckContext());
         Assert.Equal(HealthStatus.Healthy, tolerant.Status);
@@ -80,7 +78,7 @@ public class HttpsEndpointHealthCheckTests
 
     /// <summary>
     /// A loopback TLS listener answering every request with one canned status line. The
-    /// certificate is generated per server and trusted by nobody, exactly like an appliance's.
+    /// certificate is generated per server and is not added to the host's trust store.
     /// </summary>
     private sealed class SelfSignedServer : IAsyncDisposable
     {
@@ -167,7 +165,7 @@ public class HttpsEndpointHealthCheckTests
             }
             catch (Exception)
             {
-                // Teardown; the loop's own error handling has already spoken.
+                // Request failures are handled inside the server loop.
             }
             _certificate.Dispose();
             _cts.Dispose();

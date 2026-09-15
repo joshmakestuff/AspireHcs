@@ -34,10 +34,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# The hash of hcsctl.exe ITSELF, not of the zip around it. The release's SHA256SUMS covers the
-# zip, so the two numbers differ; do not paste one where the other belongs.
-#
-# The binary also reports its own version; the install is checked both ways.
+# Hash of the extracted hcsctl.exe. The release's SHA256SUMS hashes the zip instead.
 $ExpectedSha256 = '14B098A05D5F192D702D6AB6D9EB31F6F0F119A36EDE048FCE77C3944BC10349'
 $Repository = 'joshmakestuff/hcsctl'
 
@@ -104,9 +101,7 @@ try {
               "  actual   $actual"
     }
 
-    # The hash proves this is the pinned artifact. The reported version proves the pin names the
-    # version it says it does: a mismatch means a release built from the wrong commit or an
-    # unstamped build.
+    # Check the embedded version as well as the artifact hash.
     $reported = (& $extracted version --json | ConvertFrom-Json).toolVersion
     if ($reported -ne $Version) {
         throw "hcsctl from $Version reports its version as '$reported'. Nothing was installed."

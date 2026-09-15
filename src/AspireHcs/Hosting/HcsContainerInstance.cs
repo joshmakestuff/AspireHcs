@@ -873,9 +873,8 @@ internal sealed class HcsContainerInstance(
     }
 
     /// <summary>
-    /// One boot's identity and holdings. The epoch stamps exits so a replaced container cannot
-    /// speak for its successor; <see cref="Exited"/> flips when the workload exits on its own,
-    /// which lets Start tell a live boot from one awaiting cleanup.
+    /// One boot's resources and epoch. The epoch prevents stale workload exits from
+    /// changing a replacement container's state; <see cref="Exited"/> marks a boot awaiting cleanup.
     /// </summary>
     /// <remarks>
     /// <see cref="Exited"/> is a volatile field: it is written from the workload's thread-pool

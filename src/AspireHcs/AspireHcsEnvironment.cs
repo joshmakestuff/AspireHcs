@@ -1,9 +1,8 @@
 namespace AspireHcs;
 
 /// <summary>
-/// Environment overrides for where AspireHcs reads and writes on disk, following the
-/// <c>ASPIREHCS_HCSCTL</c> precedent: an explicit builder value wins, then the environment
-/// variable, then the built-in default.
+/// Environment overrides for storage and temporary paths. Explicit builder values take
+/// precedence over environment variables, which take precedence over built-in defaults.
 /// </summary>
 internal static class AspireHcsEnvironment
 {

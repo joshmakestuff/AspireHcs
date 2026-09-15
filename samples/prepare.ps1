@@ -29,13 +29,13 @@ $ErrorActionPreference = 'Stop'
 $samples = $PSScriptRoot
 if (-not $Store) { $Store = Join-Path $samples '.store' }
 
-# ---- 1. Publish the guest app ----------------------------------------------------------------
+# Publish the guest app.
 $publishDir = Join-Path $samples 'HcsSample.GuestApi\bin\publish'
 Write-Host "Publishing HcsSample.GuestApi to $publishDir ..."
 dotnet publish (Join-Path $samples 'HcsSample.GuestApi') -c Release -o $publishDir --nologo -v q
 if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed.' }
 
-# ---- 2. Pull and import the image ------------------------------------------------------------
+# Pull and import the image.
 # Resolution mirrors the AppHost: ASPIREHCS_HCSCTL, then PATH, then the repo's pinned drop in
 # tools\hcsctl — fetched (hash-verified) on demand, so a fresh clone needs no setup.
 $hcsctl = if ($env:ASPIREHCS_HCSCTL) {

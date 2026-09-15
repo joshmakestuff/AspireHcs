@@ -225,8 +225,7 @@ public class GuestEnvironmentTests
         Assert.Empty(resolved.OpaqueNames);
     }
 
-    // A provider this walk cannot see through gets the honest middle ground: marked opaque, so
-    // the redirect falls back to matching its resolved text — for that variable only.
+    // Unknown providers are marked opaque; only their resolved values use text matching.
     [Fact]
     public async Task An_unclassifiable_provider_marks_its_variable_opaque()
     {

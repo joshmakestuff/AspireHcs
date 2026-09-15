@@ -8,10 +8,7 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// The no-network path: no scavenge, no HCN endpoint, no endpoint allocation, straight from
-// guest-ready to Running, and its shorter teardown. Every other orchestration test boots the
-// sample's networked configuration. copyOnWrite:false is untested: a non-CoW boot writes into
-// the base VHDX, and the only base image on the runner is shared by every other test.
+// A networkless VM must boot and tear down without creating an HCN endpoint.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class NoNetworkTeardownTests(ITestOutputHelper output)
 {

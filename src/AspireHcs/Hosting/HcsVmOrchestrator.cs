@@ -151,12 +151,7 @@ internal static class HcsVmOrchestrator
     /// Removes VMs left behind by AppHost processes that are gone.
     /// </summary>
     /// <remarks>
-    /// hcsctl reports facts and holds no opinion about what a dead run is: it is a CLI that
-    /// exits, so it has no long-lived process to test a pid against. The policy lives here.
-    ///
     /// Removing the VM removes its HCN endpoint with it, so there is no endpoint-level scavenging.
-    ///
-    /// Static so tests can drive it without booting anything.
     /// </remarks>
     internal static async Task ScavengeAbandonedVmsAsync(
         HcsCtl hcsctl, string ownVmId, ILogger logger, CancellationToken cancellationToken = default)
@@ -200,7 +195,7 @@ internal static class HcsVmOrchestrator
     }
 
     /// <summary>
-    /// Picks the VMs that belong to this integration and whose creating AppHost is gone. Pure.
+    /// Selects VMs labelled with an AppHost process id that is no longer running.
     /// </summary>
     internal static IEnumerable<string> StaleVmIds(
         HcsCtlVmListDocument listing, string ownVmId, Func<int, bool> isProcessAlive)
@@ -232,7 +227,7 @@ internal static class HcsVmOrchestrator
 
 
     /// <summary>
-    /// Model-shape rules that need the whole builder chain, checked once at boot start. Pure.
+    /// Validates rules that depend on the complete builder configuration at boot start.
     /// Builder methods cannot enforce ordering — <c>WithNetwork()</c> may legally come after
     /// <c>WithVlan()</c> — so cross-method rules land here, before anything is acquired.
     /// </summary>
@@ -264,9 +259,6 @@ internal static class HcsVmOrchestrator
             }
         }
 
-        // Caught here rather than mid-boot: environment delivery needs the hcsguest agent, and
-        // an agentless VM by definition has none. Failing at env-write time would burn a full
-        // boot first and name the wrong cause.
         if (resource.IsAgentless && resource.Annotations.OfType<EnvironmentCallbackAnnotation>().Any())
         {
             throw new InvalidOperationException(
@@ -512,9 +504,7 @@ internal sealed class HcsVmInstance(
                 string ip;
                 if (resource.GuestAddress is { } fixedAddress)
                 {
-                    // Started before the (possibly very long) reachability wait: a guest that
-                    // dies mid-boot must abort the wait, not let it probe a corpse for the full
-                    // timeout.
+                    // Stop the reachability wait promptly if the guest exits during boot.
                     StartExitWatch(boot, hcsctl, pumpCts.Token);
 
                     if (ProbePort(endpoints) is { } probePort)
@@ -639,7 +629,6 @@ internal sealed class HcsVmInstance(
         {
             State = KnownResourceStates.Exited,
             StopTimeStamp = DateTime.Now,
-            // The guest's address is gone.
             Urls = [.. s.Urls.Select(u => u with { IsInactive = true })],
         }).ConfigureAwait(false);
     }
@@ -692,8 +681,7 @@ internal sealed class HcsVmInstance(
             }
             catch (Exception ex)
             {
-                // Reported: this is the one path that deletes the HCN endpoint, and an endpoint
-                // that outlives its run is a leak that outlives the process too.
+                // Report removal failures because they can leave an HCN endpoint behind.
                 logger.LogWarning(ex, "Removing virtual machine {VmId} failed; the next run will scavenge it.", resource.VmId);
             }
         }
@@ -766,8 +754,8 @@ internal sealed class HcsVmInstance(
             return;
         }
 
-        // Marked before Exited is published: the moment the dashboard shows Exited it offers
-        // Start, and Start must be able to tell a live boot from a corpse awaiting cleanup.
+        // Set before publishing Exited, which enables Start in the dashboard.
+        // Start must recognize that this boot is awaiting cleanup.
         boot.Exited = true;
 
         logger.LogInformation("VM exited ({How}).", how);
@@ -935,9 +923,7 @@ internal sealed class HcsVmInstance(
     }
 
     /// <summary>
-    /// How long the guest shell gets to write <c>/etc/aspire.env</c>. The write is one pipe into
-    /// one file; anything slower than this is a wedged guest, and an unbounded exec would wedge
-    /// the boot with it.
+    /// Timeout for writing <c>/etc/aspire.env</c>, so an unresponsive guest cannot block boot indefinitely.
     /// </summary>
     private static readonly TimeSpan EnvironmentWriteTimeout = TimeSpan.FromSeconds(30);
 
@@ -948,11 +934,8 @@ internal sealed class HcsVmInstance(
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A VM has no create-time injection: nothing writes environment variables into a VHDX. So
-    /// the convention: once the guest is up, the values land in <c>/etc/aspire.env</c>, and a
-    /// workload reads the file when it starts. The stated caveat travels with it — a workload
-    /// that autostarts at boot may run before the file lands; one that reads the file when it
-    /// starts is correct today.
+    /// Values are written after the guest boots. A workload must wait for
+    /// <c>/etc/aspire.env</c> before reading it; an autostarted workload may run before delivery.
     /// </para>
     /// <para>
     /// The transport needs the <c>hcsguest</c> agent in the image (the same prerequisite as
@@ -996,8 +979,7 @@ internal sealed class HcsVmInstance(
 
         if (written.ExitCode != 0)
         {
-            // The values ARE the reference feature for a VM; a guest that did not take them has
-            // not honoured WithReference, and reporting Running anyway would hide that.
+            // Failed environment delivery must fail boot before dependents are released.
             throw new InvalidOperationException(
                 $"Writing /etc/aspire.env in '{resource.Name}' failed: the guest shell " +
                 $"{(written.TimedOut ? "timed out" : $"exited {written.ExitCode}")}." +
@@ -1044,9 +1026,8 @@ internal sealed class HcsVmInstance(
 
 
     /// <summary>
-    /// One boot's identity and holdings. The epoch stamps notifications so a replaced VM cannot
-    /// speak for its successor; <see cref="Exited"/> flips when the guest exits on its own,
-    /// which is what lets Start tell a live boot from one awaiting cleanup.
+    /// One boot's resources and epoch. The epoch prevents stale exit notifications from
+    /// changing a replacement VM's state; <see cref="Exited"/> marks a boot awaiting cleanup.
     /// </summary>
     private sealed class BootRecord(int epoch, BootLedger ledger)
     {

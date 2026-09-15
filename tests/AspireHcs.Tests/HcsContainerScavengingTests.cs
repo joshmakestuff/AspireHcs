@@ -6,12 +6,7 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// Containers outlive their AppHost: the compute system is host-global and hcsctl's state.json is
-// on disk, so nothing reclaims a crashed run's container but this sweep. A concurrent AppHost's
-// container must survive it.
-//
-// Deletion requires proof of abandonment: an id this integration wrote, whose recorded pid is
-// dead. These pin every way that proof can fail to arrive.
+// Scavenge only integration ids whose owner pid is no longer running.
 [SupportedOSPlatform("windows10.0.17763")]
 public class HcsContainerScavengingTests
 {
@@ -47,8 +42,7 @@ public class HcsContainerScavengingTests
         Assert.Empty(HcsContainerOrchestrator.SelectScavengeable(Listing(Dead), Dead, IsAlive));
     }
 
-    // The prefix is not a licence to delete. Something else may adopt a similar-looking id, and
-    // an id with no parseable pid carries no proof of anything.
+    // A matching prefix without a valid owner pid is insufficient for scavenging.
     [Theory]
     [InlineData("servercore-smoke-test")]                 // someone at a shell
     [InlineData("aspirehcs")]                             // prefix, nothing else

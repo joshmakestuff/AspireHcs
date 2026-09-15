@@ -126,7 +126,7 @@ internal static class HcsCtlContainers
         return hcsctl.InvokeAsync(arguments, HcsCtlJsonContext.Default.HcsCtlResultDocument, cancellationToken: cancellationToken);
     }
 
-    /// <summary>Uptime, memory, CPU, storage and per-endpoint network counters.</summary>
+    /// <summary>Uptime, memory, CPU and storage counters.</summary>
     public static Task<HcsCtlStatsDocument> StatsAsync(
         this HcsCtl hcsctl, string id, CancellationToken cancellationToken = default)
     {

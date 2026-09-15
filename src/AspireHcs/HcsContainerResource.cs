@@ -58,8 +58,8 @@ public sealed class HcsContainerResource([ResourceName] string name)
     internal string? ImageReference { get; set; }
 
     /// <summary>
-    /// What the container runs. hcsctl has no notion of a primary process, so this is executed as
-    /// a guest process that the AppHost stays attached to for its lifetime.
+    /// The command executed through <c>container exec</c>. The AppHost stays attached
+    /// for the guest process's lifetime.
     /// </summary>
     internal string? Command { get; set; }
 
@@ -80,8 +80,7 @@ public sealed class HcsContainerResource([ResourceName] string name)
     internal int ProcessorCount { get; set; } = 2;
 
     /// <summary>
-    /// Guest C: size. Null leaves hcsctl's default of <b>20 GB</b>. A full disk gives no error
-    /// that names the real cause.
+    /// Guest C: size. Null leaves hcsctl's default of <b>20 GB</b>.
     /// </summary>
     internal int? ScratchSizeGigabytes { get; set; }
 
@@ -92,8 +91,7 @@ public sealed class HcsContainerResource([ResourceName] string name)
     /// The host compute network to attach an endpoint on, by name or id. Null means no NIC.
     /// </summary>
     /// <remarks>
-    /// The network must already exist; hcsctl cannot create one
-    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>).
+    /// The network must already exist; AspireHcs does not create it.
     /// <c>WithNetwork()</c> defaults it to the Default Switch, the same network VMs default to,
     /// so the two resource kinds can reach each other.
     /// </remarks>

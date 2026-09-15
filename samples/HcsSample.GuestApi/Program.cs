@@ -1,6 +1,4 @@
-// A deliberately small API that runs INSIDE the Hyper-V-isolated container. It exists to prove
-// where it runs: /info reports the guest's own machine name and OS, and /files lists the
-// bind-mounted data directory, live from the host over VSMB.
+// Runs inside the container: /info reports guest details and /files reads the VSMB data mount.
 
 using System.Runtime.Versioning;
 
@@ -24,11 +22,8 @@ app.MapGet("/info", () => new
     greeting = app.Configuration["GREETING"] ?? "(GREETING was not set)",
 });
 
-// The consumer direction (opt-in in the AppHost): WithReference(web) injects the web project's
-// endpoint, rewritten so this guest can reach it — where a host process would read
-// localhost:<port>, this guest reads <gateway>:<relay port>. The literal BIND_DEMO must arrive
-// exactly as the AppHost wrote it, untouched by the rewrite. /consume proves both, and fetches
-// the referenced URL from inside the guest.
+// WEB_URL points through the relay to the web project. BIND_DEMO remains a literal.
+// /consume reports both values and fetches WEB_URL from inside the guest.
 app.MapGet("/consume", async () =>
 {
     string? referenced = app.Configuration["services:web:http:0"];

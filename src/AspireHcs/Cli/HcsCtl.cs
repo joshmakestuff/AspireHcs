@@ -6,8 +6,7 @@ using System.Text.Json.Serialization.Metadata;
 namespace AspireHcs.Cli;
 
 /// <summary>
-/// Runs <c>hcsctl</c> and binds its result document. This is the only place in AspireHcs that
-/// starts a process, and the only place that knows hcsctl's output contract:
+/// Runs structured <c>hcsctl</c> commands and binds their result documents:
 ///
 /// <list type="bullet">
 ///   <item>stdout carries <b>exactly one</b> JSON document, on every path including failure</item>
@@ -218,7 +217,7 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
     /// </summary>
     /// <remarks>
     /// <see cref="InvokeAsync"/> cannot run a command like this: it waits for process exit before
-    /// reading stdout, and this process is designed never to exit on its own. The document is
+    /// returning its result, and this process is designed never to exit on its own. The document is
     /// still exactly one JSON object under hcsctl's contract — this reads only that object,
     /// stopping the instant its closing brace arrives, and leaves everything after it (nothing,
     /// on the success path) alone.

@@ -14,8 +14,7 @@ public static class HcsVirtualMachineBuilderExtensions
     /// Adds a Hyper-V virtual machine as an Aspire resource, hosted via the Windows Host
     /// Compute System (HCS) API. The VM is created on AppHost start and destroyed on exit.
     /// Requires Windows 10 1809+ with the Hyper-V feature, running either elevated or as a
-    /// member of the Hyper-V Administrators group. Excluded from publish manifests: a local
-    /// VM has no deployment story.
+    /// member of the Hyper-V Administrators group. Excluded from publish manifests.
     /// </summary>
     public static IResourceBuilder<HcsVirtualMachineResource> AddHcsVm(
         this IDistributedApplicationBuilder builder, [ResourceName] string name)
@@ -24,13 +23,10 @@ public static class HcsVirtualMachineBuilderExtensions
 
         if (builder.ExecutionContext.IsRunMode)
         {
-            // The package contract: an unsupported host fails at model-build time.
             HcsPlatform.ThrowIfUnsupported();
         }
 
-        // One relay per AppHost session, shared by every HCS consumer — the multiplexing shape.
-        // Registered here so the instance can resolve it; it starts nothing until a reference
-        // actually needs forwarding.
+        // Shared by all HCS resources; starts only when a reference needs forwarding.
         builder.Services.TryAddSingleton<DockerRelay>();
 
         HcsVirtualMachineResource resource = new(name);
@@ -64,8 +60,7 @@ public static class HcsVirtualMachineBuilderExtensions
 
     /// <summary>
     /// Attaches an extra VHDX after the boot disk, at SCSI LUN 1..n in call order. Repeatable.
-    /// Shares the boot disk's copy-on-write policy: the VM boots a differencing child, so the
-    /// base is never written and a vendor's disks stay pristine.
+    /// Uses a differencing child, leaving the base disk unchanged.
     /// </summary>
     public static IResourceBuilder<HcsVirtualMachineResource> WithDisk(
         this IResourceBuilder<HcsVirtualMachineResource> builder, string path)
@@ -293,9 +288,7 @@ public static class HcsVirtualMachineBuilderExtensions
     /// Gates readiness on the guest serving HTTPS <em>without validating its certificate</em>:
     /// healthy once a GET to <paramref name="path"/> on <paramref name="endpointName"/>
     /// (default: the first endpoint declared) answers 2xx/3xx. For guests with self-signed
-    /// certificates — vendor appliances, typically — which Aspire's certificate-validating
-    /// <c>WithHttpsHealthCheck</c> can never pass. The check proves the service answers, not
-    /// the certificate's identity; the name says so, so it cannot be reached by accident.
+    /// certificates that are not trusted by the host. Certificate identity is not checked.
     /// </summary>
     public static IResourceBuilder<HcsVirtualMachineResource> WithInsecureHttpsHealthCheck(
         this IResourceBuilder<HcsVirtualMachineResource> builder,

@@ -17,13 +17,9 @@ namespace AspireHcs.Hosting;
 /// </summary>
 /// <remarks>
 /// <para>
-/// This is deliberately a docker-CLI-managed container, not a hidden Aspire container resource.
-/// Two facts force that. DCP publishes every port of a container it owns at
-/// <c>HostIp 127.0.0.1</c> — its request, not Docker's default, verified by <c>docker inspect</c>
-/// — so an Aspire-owned relay could never get the <c>0.0.0.0</c> bind that is its entire job.
-/// And the ports the relay must publish are the referenced endpoints' host ports, which exist
-/// only after DCP has started its proxies — long past the time a model-declared container has to
-/// fix its port list.
+/// Managed through the Docker CLI because the relay needs a <c>0.0.0.0</c> bind, while DCP
+/// publishes container ports on <c>127.0.0.1</c>. The target ports are also unavailable until
+/// DCP starts its proxies, after model-declared containers have fixed their port lists.
 /// </para>
 /// <para>
 /// One multiplexing container, mirroring Aspire's own tunnel shape (one <c>aspire</c> container
@@ -230,8 +226,7 @@ internal sealed class DockerRelay(IHostApplicationLifetime lifetime, ILogger<Doc
     }
 
     /// <summary>
-    /// Removes relay containers left behind by dead AppHost processes. Docker restarts do not
-    /// reclaim them — the relay runs detached — so nothing does but this.
+    /// Removes detached relay containers left behind by exited AppHost processes.
     /// </summary>
     private async Task ScavengeAbandonedRelaysAsync(CancellationToken cancellationToken)
     {
@@ -290,8 +285,7 @@ internal sealed class DockerRelay(IHostApplicationLifetime lifetime, ILogger<Doc
                 continue;
             }
 
-            // The docker filter is a substring match, so a foreign container whose name merely
-            // contains the prefix can be listed. The name is not a licence to delete; the pid is.
+            // Docker's substring filter can return unrelated names; validate the full name.
             if (OwnerProcessId(name) is not { } pid)
             {
                 continue;

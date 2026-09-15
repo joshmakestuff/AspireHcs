@@ -214,10 +214,8 @@ internal static class GuestEnvironment
     /// the format <c>/etc/aspire.env</c> promises a VM guest's workload.
     /// </summary>
     /// <remarks>
-    /// A line-oriented format cannot carry line breaks, and a name containing <c>=</c> would split
-    /// wrong on read. Both are rejected here, by name, rather than silently writing a file whose
-    /// reader would see different variables than the model set — the same honesty rule as the
-    /// empty-value check above.
+    /// Rejects line breaks and names containing <c>=</c>, which cannot be represented
+    /// in this line-oriented format.
     /// </remarks>
     public static string BuildEnvFile(string resourceName, IReadOnlyDictionary<string, string> environment)
     {

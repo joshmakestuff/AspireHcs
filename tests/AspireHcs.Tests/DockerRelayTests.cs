@@ -6,10 +6,7 @@ using Xunit;
 
 namespace AspireHcs.Tests;
 
-// The relay container is docker-CLI-managed, so the judgements that must never go wrong — what
-// gets scavenged, what the socat script says, what `docker port` answered, what a recreate must
-// preserve — are pure or driven through a fake docker CLI and pinned here without Docker. The
-// live half is proven by the running scenario, not by tests.
+// Uses a fake Docker CLI to check ownership, port parsing, and relay recreation.
 [SupportedOSPlatform("windows10.0.17763")]
 public class DockerRelayTests
 {
@@ -23,8 +20,7 @@ public class DockerRelayTests
         Assert.Equal(4242, DockerRelay.OwnerProcessId(name));
     }
 
-    // The docker name filter is a substring match, so foreign containers can be listed. A name
-    // that is not exactly prefix-plus-pid(-suffix) proves nothing and licenses nothing.
+    // Docker's substring filter can return unrelated names; require the complete id format.
     [Theory]
     [InlineData("aspirehcs-relay-")]                // no pid at all
     [InlineData("aspirehcs-relay-12x")]             // not a pid
@@ -233,9 +229,8 @@ public class DockerRelayTests
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => relay.EnsurePublishedAsync(6000, CancellationToken.None));
 
-        // A consumer retrying the FIRST target must not get the dead cache: the container was
-        // removed by the failed replacement, so answering from memory is a black hole. The
-        // retry recreates, pinning the issued number.
+        // The failed replacement removed the old container. Retrying the first target must
+        // recreate it with the previously issued port rather than return a stale cache entry.
         docker.OnRun = null;
         docker.Running = false;
         int retried = await relay.EnsurePublishedAsync(5000, CancellationToken.None);

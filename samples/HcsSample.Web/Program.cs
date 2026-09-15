@@ -51,8 +51,6 @@ app.MapGet("/api/worker/{endpoint}", async (string endpoint, IHttpClientFactory 
     }
 });
 
-// Serves the seed rows from Postgres. WithReference(db) injected ConnectionStrings:appdb; the
-// client integration registered the pooled NpgsqlDataSource this resolves from DI.
 app.MapGet("/api/notes", async (NpgsqlDataSource dataSource, CancellationToken ct) =>
 {
     try
@@ -74,8 +72,7 @@ app.MapGet("/api/notes", async (NpgsqlDataSource dataSource, CancellationToken c
     }
 });
 
-// TCP-probes every referenced VM endpoint (ssh/rdp). A VM guest runs no HTTP service for this
-// demo; accepting a TCP connection is the proof it is up and reachable.
+// Probe VM endpoints over TCP so this works for SSH and RDP as well as HTTP services.
 app.MapGet("/api/vms", async (CancellationToken ct) =>
 {
     var probes = new List<object>();

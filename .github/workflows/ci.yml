@@ -36,10 +36,7 @@ jobs:
           name: packages
           path: artifacts/packages
 
-  # Hosted runners are believed unable to run HCS (nested virtualization is not
-  # available on hosted Windows runners, and enabling the Hyper-V feature needs a
-  # reboot mid-job). This dispatch-only job records the actual state of a hosted
-  # runner so that claim stays empirically checkable instead of folklore.
+  # Manual diagnostic for HCS availability on hosted Windows runners.
   probe-hosted-hcs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
@@ -54,8 +51,7 @@ jobs:
           $hypervisor = (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
           Write-Host "HypervisorPresent=$hypervisor"
 
-  # VM-booting integration tests: gate on WaitForGuestReadyAsync succeeding against
-  # a real guest. Manual + self-hosted; requires a runner with Hyper-V.
+  # VM integration tests require a self-hosted runner with Hyper-V and guest images.
   hcs-integration:
     if: github.event_name == 'workflow_dispatch' && inputs.run-hcs-integration
     runs-on: [self-hosted, windows, hyperv]
