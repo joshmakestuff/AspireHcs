@@ -64,6 +64,7 @@ variable fallbacks:
 | `ApplianceCpus` | `HCS_TEST_APPLIANCE_CPUS` | vCPUs (default 4) |
 | `ApplianceSshUser` | `HCS_TEST_APPLIANCE_SSH_USER` | SSH account for the Connect button (default `root`) |
 | `ConsumeWeb` | `HCS_SAMPLE_CONSUME_WEB` | Any non-empty value enables the consumer-direction demo: worker and the Linux VM consume web's endpoint. Requires Docker for the host-loopback relay |
+| `LinuxMount` | `HCS_SAMPLE_LINUX_MOUNT` | Any non-empty value bind-mounts the sample's `data\` directory into the Linux VM at `/mnt/data` (read-only). Prepare the host first: `.\..\prepare.ps1 -Files` (elevated, once) |
 
 ## Preparing a VM image
 

@@ -238,6 +238,30 @@ internal static partial class GuestReferences
     }
 
     /// <summary>
+    /// Resolves the gateway a guest on <paramref name="networkName"/> routes host-bound traffic
+    /// through: the network is found in <c>network ls</c>, then its inspection yields the gateway
+    /// (<see cref="FindNetwork"/> + <see cref="GatewayAddress"/>). Both a loopback-reference relay
+    /// and a bind mount reach the host at this address.
+    /// </summary>
+    public static async Task<string> ResolveGatewayAsync(
+        string resourceName,
+        string networkName,
+        Func<CancellationToken, Task<HcsCtlNetworkListDocument>> readNetworks,
+        Func<string, CancellationToken, Task<HcsCtlNetworkInspectDocument>> inspectNetwork,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(readNetworks);
+        ArgumentNullException.ThrowIfNull(inspectNetwork);
+
+        HcsCtlNetworkRow network = FindNetwork(
+            await readNetworks(cancellationToken).ConfigureAwait(false), networkName, resourceName);
+
+        return GatewayAddress(
+            await inspectNetwork(network.Id ?? networkName, cancellationToken).ConfigureAwait(false),
+            networkName, resourceName);
+    }
+
+    /// <summary>
     /// Starts relay forwards before rewriting loopback references to their published ports.
     /// Environments without loopback references pass through without starting Docker.
     /// </summary>
@@ -274,12 +298,8 @@ internal static partial class GuestReferences
                 "cannot reach the relay that carries them. Add WithNetwork().");
         }
 
-        HcsCtlNetworkRow network = FindNetwork(
-            await readNetworks(cancellationToken).ConfigureAwait(false), networkName, resourceName);
-
-        string gateway = GatewayAddress(
-            await inspectNetwork(network.Id ?? networkName, cancellationToken).ConfigureAwait(false),
-            networkName, resourceName);
+        string gateway = await ResolveGatewayAsync(
+            resourceName, networkName, readNetworks, inspectNetwork, cancellationToken).ConfigureAwait(false);
 
         Dictionary<int, int> relayPorts = [];
         foreach (int target in targets)

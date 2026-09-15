@@ -121,6 +121,65 @@ public static class HcsVirtualMachineBuilderExtensions
     }
 
     /// <summary>
+    /// Maps a host directory into the guest as a bind mount, mirroring Aspire's container API
+    /// shape. A relative <paramref name="source"/> is resolved against the AppHost directory, the
+    /// way Aspire's Docker path does.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Carried over plain SMB, not VSMB: at boot the host exposes the directory under a share and
+    /// the guest agent mounts it. So unlike the container mount, this needs a running guest with
+    /// the <c>hcsguest</c> agent and a NIC to reach the host — it requires <see cref="WithNetwork"/>
+    /// and is rejected on an agentless VM (both checked at boot).
+    /// </para>
+    /// <para>
+    /// The host must be prepared once, elevated, with <c>hcsctl files prepare --network &lt;name&gt;</c>;
+    /// an unprepared host fails the boot with that exact command. The <paramref name="target"/> is
+    /// an absolute guest path — <c>/mnt/data</c> for a Linux guest, <c>D:\data</c> for a Windows
+    /// guest. A Windows guest mount is visible only to the agent and what AspireHcs drives through
+    /// it, not to an interactive RDP session.
+    /// </para>
+    /// </remarks>
+    public static IResourceBuilder<HcsVirtualMachineResource> WithBindMount(
+        this IResourceBuilder<HcsVirtualMachineResource> builder, string source, string target, bool isReadOnly = false)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+        ArgumentException.ThrowIfNullOrWhiteSpace(target);
+
+        string resolvedSource = Path.GetFullPath(source, builder.ApplicationBuilder.AppHostDirectory);
+
+        // The guest may be Linux or Windows, so the target is an absolute path in either shape: a
+        // POSIX root ("/mnt/data") or a drive-letter absolute ("D:\data" / "D:/data"). A relative
+        // target has no meaning — there is no guest working directory to resolve it against.
+        if (!IsAbsoluteGuestPath(target))
+        {
+            throw new ArgumentException(
+                $"The mount target '{target}' must be an absolute path in the guest: a POSIX path like " +
+                "/mnt/data for a Linux guest, or a drive-letter path like D:\\data for a Windows guest.",
+                nameof(target));
+        }
+
+        // hcsctl rejects a duplicate guest path; reject it at model-build time. Compared the way
+        // the container mount does, so the two behave alike.
+        if (builder.Resource.Mounts.Any(m => string.Equals(
+                m.Target.TrimEnd('\\', '/'), target.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                $"Resource '{builder.Resource.Name}' already has a mount at '{target}'. " +
+                "Each guest path can be mapped only once.");
+        }
+
+        builder.Resource.Mounts.Add(new HcsVmMount(resolvedSource, target, isReadOnly));
+        return builder;
+    }
+
+    /// <summary>An absolute POSIX path or a drive-letter absolute Windows path.</summary>
+    private static bool IsAbsoluteGuestPath(string target)
+        => target.StartsWith('/')
+        || (target.Length >= 3 && char.IsAsciiLetter(target[0]) && target[1] == ':' && (target[2] == '\\' || target[2] == '/'));
+
+    /// <summary>
     /// Declares the guest's fixed in-guest address — and with it, that the VM is agentless. No
     /// hcsguest agent is expected: the boot skips the DHCP-lease wait and environment delivery,
     /// and every endpoint resolves at this address once it accepts a TCP connection (on the

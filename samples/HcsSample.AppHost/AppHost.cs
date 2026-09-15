@@ -96,6 +96,12 @@ if (Setting("LinuxVhdx", "HCS_TEST_VHDX") is { } linuxVhdx)
         // The account must exist in the image.
         .WithSshCommand(userName: linuxUser);
 
+    // SMB mounts require one-time host preparation: samples\prepare.ps1 -Files.
+    if (Setting("LinuxMount", "HCS_SAMPLE_LINUX_MOUNT") is not null)
+    {
+        appliance.WithBindMount("data", "/mnt/data", isReadOnly: true);
+    }
+
     appliance.WithHcsCtl(repoHcsCtl, storePath: store);
 
     // WaitFor as well as WithReference: the guest address exists only after the DHCP lease,

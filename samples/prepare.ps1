@@ -18,11 +18,22 @@ Image reference to pull and import. Default: the sample's default image.
 .PARAMETER Store
 hcsctl store directory. Default: $env:ASPIREHCS_STORE if set, otherwise samples\.store —
 beside the sample, not in per-user AppData. The AppHost defaults to the same directory.
+
+.PARAMETER Files
+Also prepare the host for VM bind mounts (the Linux VM's WithBindMount, opt-in via
+HCS_SAMPLE_LINUX_MOUNT). Creates the SMB share, its user and credential, and a firewall rule on
+the named network. Elevated, once; relaunched elevated when this script runs unelevated.
+
+.PARAMETER Network
+The hcsctl network whose guests may reach the bind-mount share. Default: Default Switch, the
+network the sample's VMs attach to. Only used with -Files.
 #>
 [CmdletBinding()]
 param(
     [string]$Image = 'mcr.microsoft.com/windows/nanoserver:ltsc2025',
-    [string]$Store = $env:ASPIREHCS_STORE
+    [string]$Store = $env:ASPIREHCS_STORE,
+    [switch]$Files,
+    [string]$Network = 'Default Switch'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,6 +86,23 @@ if ($elevated) {
     $importArgs = @('image', 'import', '--ref', $Image) + $storeArgs
     $process = Start-Process -FilePath $hcsctl -ArgumentList $importArgs -Verb RunAs -Wait -PassThru
     if ($process.ExitCode -ne 0) { throw "hcsctl image import failed ($($process.ExitCode))." }
+}
+
+# Prepare the host for VM bind mounts (opt-in).
+# files prepare needs no store (it is host-side share administration), but it does need
+# elevation, so it is relaunched the same way the import is. Repeatable: it adds the network to
+# the rule and rotates the credential.
+if ($Files) {
+    Write-Host "Preparing the host for VM bind mounts on '$Network' (elevated) ..."
+    if ($elevated) {
+        & $hcsctl files prepare --network $Network
+        if ($LASTEXITCODE -ne 0) { throw "hcsctl files prepare failed ($LASTEXITCODE)." }
+    } else {
+        $prepareArgs = @('files', 'prepare', '--network', $Network)
+        $process = Start-Process -FilePath $hcsctl -ArgumentList $prepareArgs -Verb RunAs -Wait -PassThru
+        if ($process.ExitCode -ne 0) { throw "hcsctl files prepare failed ($($process.ExitCode))." }
+    }
+    Write-Host "Host prepared for bind mounts. Run the sample with HCS_SAMPLE_LINUX_MOUNT set."
 }
 
 Write-Host ''

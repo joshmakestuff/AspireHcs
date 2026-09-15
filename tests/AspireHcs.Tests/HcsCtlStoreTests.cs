@@ -133,6 +133,35 @@ public class HcsCtlStoreTests
         Assert.Contains("--store", thrown.Message);
     }
 
+    // The files group is excluded too: it is host-side share administration keyed off the share
+    // root, not an image store, and hcsctl declares no --store flag on it. HcsCtl must strip a
+    // configured store so the verb runs; `files inspect` always exits 0, so success proves the
+    // flag was stripped rather than rejected. No prepared host needed: inspect reports "not
+    // prepared" as a normal answer.
+    [SkippableFact]
+    public async Task The_files_group_runs_even_when_a_store_is_configured()
+    {
+        HcsCtl hcsctl = new(RequireBinary(), CorruptStore());
+
+        HcsCtlFilesInspectDocument result = await hcsctl.InspectFilesAsync();
+
+        Assert.True(result.Ok);
+    }
+
+    // The other side of the same pin: hcsctl really does reject --store on files, which is why
+    // the exclusion exists. If files starts accepting it, this fails and the exclusion can go.
+    [SkippableFact]
+    public async Task The_files_group_still_rejects_an_explicit_store()
+    {
+        HcsCtl hcsctl = new(RequireBinary());
+
+        HcsCtlUsageException thrown = await Assert.ThrowsAsync<HcsCtlUsageException>(
+            () => hcsctl.InvokeAsync(["files", "ls", "--store", CorruptStore()],
+                HcsCtlJsonContext.Default.HcsCtlFilesListDocument));
+
+        Assert.Contains("--store", thrown.Message);
+    }
+
     // `vm stop` is the one verb inside a store-accepting group that rejects --store: it drives
     // HCS by id alone so it can stop a system whose store record is gone. With a store
     // configured, HcsCtl must strip the flag; a random id then reports "already stopped" rather

@@ -227,6 +227,92 @@ internal static class HcsVmOrchestrator
 
 
     /// <summary>
+    /// Removes host file exposures left behind by AppHost processes that are gone.
+    /// </summary>
+    /// <remarks>
+    /// A VM's exposures — host junctions and source ACEs under the share root — outlive its
+    /// compute system: <c>vm rm</c> does not touch them. So they need their own scavenging, keyed
+    /// off the same owner-pid label as VM scavenging.
+    /// </remarks>
+    internal static async Task ScavengeAbandonedExposuresAsync(
+        HcsCtl hcsctl, string ownVmId, ILogger logger, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hcsctl);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        try
+        {
+            // Listed BEFORE the pid snapshot, for the same reason vm scavenging is: an exposure in
+            // this list was created by a process that existed before the snapshot; a recycled pid
+            // can only defer a removal, never make a live run look dead.
+            HcsCtlFilesListDocument listing = await hcsctl.ListFilesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (listing.Exposures.Count == 0)
+            {
+                return;
+            }
+
+            HashSet<int> livePids = [.. Process.GetProcesses().Select(static p => p.Id)];
+
+            foreach (string vmId in StaleExposureVmIds(listing, ownVmId, livePids.Contains))
+            {
+                try
+                {
+                    logger.LogInformation("Unexposing files for VM {VmId}, left by an AppHost that is gone.", vmId);
+                    await hcsctl.UnexposeFilesAsync(vmId, cancellationToken: cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Skipping file exposures for VM {VmId} during scavenging.", vmId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Scavenging abandoned file exposures failed; continuing.");
+        }
+    }
+
+    /// <summary>
+    /// The distinct VM ids whose exposures belong to this integration and whose exposing AppHost
+    /// is gone. One <c>files unexpose --vmid</c> removes all of a VM's exposures, so each id
+    /// is yielded once even when it has several rows.
+    /// </summary>
+    internal static IEnumerable<string> StaleExposureVmIds(
+        HcsCtlFilesListDocument listing, string ownVmId, Func<int, bool> isProcessAlive)
+    {
+        ArgumentNullException.ThrowIfNull(listing);
+        ArgumentNullException.ThrowIfNull(isProcessAlive);
+
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+        foreach (HcsCtlFilesExposureRow row in listing.Exposures)
+        {
+            if (row.VmId is not { } vmId || string.Equals(vmId, ownVmId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // A VM's rows all carry the record's labels, so testing it once per id is enough.
+            if (!seen.Add(vmId))
+            {
+                continue;
+            }
+
+            // Someone else's exposure with no label of ours: no claim over it.
+            if (!row.Labels.TryGetValue(OwnerPidLabel, out string? recorded))
+            {
+                continue;
+            }
+
+            if (int.TryParse(recorded, NumberStyles.None, CultureInfo.InvariantCulture, out int pid)
+                && !isProcessAlive(pid))
+            {
+                yield return vmId;
+            }
+        }
+    }
+
+
+    /// <summary>
     /// Validates rules that depend on the complete builder configuration at boot start.
     /// Builder methods cannot enforce ordering — <c>WithNetwork()</c> may legally come after
     /// <c>WithVlan()</c> — so cross-method rules land here, before anything is acquired.
@@ -257,6 +343,21 @@ internal static class HcsVmOrchestrator
                 throw new InvalidOperationException(
                     $"Resource '{resource.Name}' declares a guest address but no network; add WithNetwork(name).");
             }
+            if (resource.Mounts.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"Resource '{resource.Name}' declares a bind mount but no network; a guest without a NIC " +
+                    "cannot reach the host share. Add WithNetwork().");
+            }
+        }
+
+        // Reject agent-dependent configuration before starting an agentless VM.
+        if (resource.IsAgentless && resource.Mounts.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Resource '{resource.Name}' is agentless (WithGuestAddress) but declares bind mounts " +
+                "(WithBindMount). An agentless guest has no hcsguest agent to mount a host share. " +
+                "Remove the bind mounts or drop WithGuestAddress().");
         }
 
         if (resource.IsAgentless && resource.Annotations.OfType<EnvironmentCallbackAnnotation>().Any())
@@ -438,7 +539,20 @@ internal sealed class HcsVmInstance(
                 throw new InvalidOperationException(blocker);
             }
 
+            // Bind mounts need the host prepared for VM file sharing and this VM's network admitted
+            // by the SMB firewall rule. Checked before anything is created, so an unprepared host
+            // names the exact elevated command without burning a boot first.
+            if (resource.Mounts.Count > 0 && resource.NetworkName is { } filesNetwork)
+            {
+                HcsCtlFilesInspectDocument filesInfo = await hcsctl.InspectFilesAsync(cancellationToken: stopping).ConfigureAwait(false);
+                if (HcsCtlPreflight.DescribeUnpreparedFiles(filesInfo, filesNetwork, resource.Name) is { } filesBlocker)
+                {
+                    throw new InvalidOperationException(filesBlocker);
+                }
+            }
+
             await HcsVmOrchestrator.ScavengeAbandonedVmsAsync(hcsctl, resource.VmId, logger, stopping).ConfigureAwait(false);
+            await HcsVmOrchestrator.ScavengeAbandonedExposuresAsync(hcsctl, resource.VmId, logger, stopping).ConfigureAwait(false);
 
             // Entered ahead of the compute system so the reverse-order drain stops the pump only
             // after the VM is gone; the guest's shutdown output still reaches the logs. The pump
@@ -534,6 +648,18 @@ internal sealed class HcsVmInstance(
                 // flight. A VM with no environment skips this entirely — no agent required.
                 await DeliverEnvironmentAsync(hcsctl, stopping).ConfigureAwait(false);
                 ThrowIfExitedMidBoot(boot);
+
+                // Bind mounts, after the guest is demonstrably up and before the forward pump. The
+                // guest reaches the host share at the network's gateway; each expose+mount is
+                // registered in the ledger, so a failure fails the boot and unwinds cleanly.
+                if (resource.Mounts.Count > 0 && resource.NetworkName is { } mountNetwork)
+                {
+                    string gateway = await GuestReferences.ResolveGatewayAsync(
+                        resource.Name, mountNetwork, hcsctl.ListNetworksAsync,
+                        (id, ct) => hcsctl.InspectNetworkAsync(id, ct), stopping).ConfigureAwait(false);
+                    await GuestMounts.MountAllAsync(resource, hcsctl, boot.Ledger, gateway, logger, stopping).ConfigureAwait(false);
+                    ThrowIfExitedMidBoot(boot);
+                }
 
                 // Best-effort: a VM with no Connect (SSH) command has nothing to forward, and one
                 // whose image lacks hcsguest (or whose forward fails to start) keeps the leased

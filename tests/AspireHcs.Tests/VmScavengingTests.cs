@@ -89,4 +89,54 @@ public class VmScavengingTests
             pidAlive: true);
         Assert.Empty(stale);
     }
+
+    // Host file exposures outlive their VM's compute system, so they are scavenged by the same
+    // owner-pid rule, off `files ls` instead of `vm ls`. One `files unexpose --vmid` removes all
+    // of a VM's, so a VM with several exposures must yield its id exactly once.
+    private static HcsCtlFilesListDocument Exposures(params HcsCtlFilesExposureRow[] rows)
+        => new() { Ok = true, Exposures = rows };
+
+    private static HcsCtlFilesExposureRow Exposure(string vmId, string name, params (string Key, string Value)[] labels)
+        => new() { VmId = vmId, Name = name, Source = @"C:\src\" + name, Share = "hcsctl-files", Labels = labels.ToDictionary(l => l.Key, l => l.Value) };
+
+    private static string[] StaleExposures(HcsCtlFilesListDocument listing, bool pidAlive)
+        => [.. HcsVmOrchestrator.StaleExposureVmIds(listing, OwnVmId, _ => pidAlive)];
+
+    [Fact]
+    public void Exposures_of_a_dead_pid_are_stale_and_the_vm_is_named_once()
+    {
+        string[] stale = StaleExposures(Exposures(
+            Exposure(OtherVmId, "mount0", (HcsVmOrchestrator.OwnerPidLabel, "1234")),
+            Exposure(OtherVmId, "mount1", (HcsVmOrchestrator.OwnerPidLabel, "1234"))), pidAlive: false);
+
+        Assert.Equal([OtherVmId], stale);
+    }
+
+    [Fact]
+    public void Exposures_of_a_live_pid_are_kept()
+    {
+        string[] stale = StaleExposures(Exposures(
+            Exposure(OtherVmId, "mount0", (HcsVmOrchestrator.OwnerPidLabel, "1234"))), pidAlive: true);
+
+        Assert.Empty(stale);
+    }
+
+    [Fact]
+    public void Our_own_vms_exposures_are_never_stale()
+    {
+        string[] stale = StaleExposures(Exposures(
+            Exposure(OwnVmId, "mount0", (HcsVmOrchestrator.OwnerPidLabel, "1234"))), pidAlive: false);
+
+        Assert.Empty(stale);
+    }
+
+    [Fact]
+    public void Exposures_without_our_label_are_left_alone()
+    {
+        string[] stale = StaleExposures(Exposures(
+            Exposure(OtherVmId, "mount0"),
+            Exposure(OtherVmId, "mount1", ("owner", "1234"))), pidAlive: false);
+
+        Assert.Empty(stale);
+    }
 }

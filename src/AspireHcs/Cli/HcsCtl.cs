@@ -26,7 +26,11 @@ internal sealed class HcsCtl(string executablePath, string? storePath = null)
     /// The verb groups that reject <c>--store</c>; every other group accepts it, and passing it
     /// to one of these is exit 64. Pinned by <c>HcsCtlStoreTests</c>.
     /// </summary>
-    private static readonly string[] GroupsWithoutStore = ["network", "guest"];
+    /// <remarks>
+    /// <c>files</c> is host-side share administration keyed off the share root, not an image
+    /// store: hcsctl declares no <c>--store</c> flag on the group, so passing one is exit 64 too.
+    /// </remarks>
+    private static readonly string[] GroupsWithoutStore = ["network", "guest", "files"];
 
     /// <summary>
     /// The one verb inside a store-accepting group that rejects <c>--store</c>: <c>vm stop</c>

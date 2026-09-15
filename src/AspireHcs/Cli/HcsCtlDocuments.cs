@@ -776,6 +776,257 @@ internal sealed record HcsCtlStreamRecord
         && string.Equals(Event, "started", StringComparison.Ordinal);
 }
 
+/// <summary>
+/// <c>hcsctl files inspect</c> — whether the host is prepared for VM file sharing, and which HCN
+/// networks the SMB firewall rule admits. Unelevated; "not prepared" is a normal answer, so this
+/// exits 0 either way.
+/// </summary>
+internal sealed record HcsCtlFilesInspectDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("command")]
+    public string? Command { get; init; }
+
+    /// <summary>True only when every element (both shares, the user, the credential, the rule) is present.</summary>
+    [JsonPropertyName("prepared")]
+    public bool Prepared { get; init; }
+
+    /// <summary>The share root, from the state file when one exists, else the inspected default.</summary>
+    [JsonPropertyName("root")]
+    public string? Root { get; init; }
+
+    [JsonPropertyName("shares")]
+    public HcsCtlFilesShares? Shares { get; init; }
+
+    [JsonPropertyName("user")]
+    public HcsCtlFilesPresence? User { get; init; }
+
+    [JsonPropertyName("credential")]
+    public HcsCtlFilesCredential? Credential { get; init; }
+
+    [JsonPropertyName("firewall")]
+    public HcsCtlFilesFirewall? Firewall { get; init; }
+
+    /// <summary>The HCN networks the firewall rule's interface aliases resolve to. Sorted by hcsctl.</summary>
+    [JsonPropertyName("networks")]
+    public IReadOnlyList<string> Networks { get => field ?? []; init; } = [];
+
+    /// <summary>How many per-VM exposures exist under the root right now.</summary>
+    [JsonPropertyName("exposures")]
+    public int Exposures { get; init; }
+
+    /// <summary>What is missing, when <see cref="Prepared"/> is false: e.g. <c>share hcsctl-files</c>, <c>credential</c>.</summary>
+    [JsonPropertyName("missing")]
+    public IReadOnlyList<string> Missing { get => field ?? []; init; } = [];
+}
+
+/// <summary>The two shares over the one root: read-write and read-only.</summary>
+internal sealed record HcsCtlFilesShares
+{
+    [JsonPropertyName("readWrite")]
+    public HcsCtlFilesPresence? ReadWrite { get; init; }
+
+    [JsonPropertyName("readOnly")]
+    public HcsCtlFilesPresence? ReadOnly { get; init; }
+}
+
+/// <summary>A named element and whether it exists — used for shares and the share user.</summary>
+internal sealed record HcsCtlFilesPresence
+{
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    [JsonPropertyName("present")]
+    public bool Present { get; init; }
+}
+
+/// <summary>The Credential Manager entry holding the share user's password.</summary>
+internal sealed record HcsCtlFilesCredential
+{
+    [JsonPropertyName("target")]
+    public string? Target { get; init; }
+
+    [JsonPropertyName("present")]
+    public bool Present { get; init; }
+}
+
+/// <summary>The inbound TCP 445 rule and the interface aliases it is bound to.</summary>
+internal sealed record HcsCtlFilesFirewall
+{
+    [JsonPropertyName("rule")]
+    public string? Rule { get; init; }
+
+    [JsonPropertyName("present")]
+    public bool Present { get; init; }
+
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; init; }
+
+    [JsonPropertyName("interfaces")]
+    public IReadOnlyList<string> Interfaces { get => field ?? []; init; } = [];
+}
+
+/// <summary>
+/// <c>hcsctl files expose</c> — one host directory made reachable to a VM as a junction under the
+/// share root. <see cref="RelativePath"/> and <see cref="Share"/> are what the guest mount's UNC
+/// is built from.
+/// </summary>
+internal sealed record HcsCtlFilesExposeDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("command")]
+    public string? Command { get; init; }
+
+    [JsonPropertyName("vmId")]
+    public string? VmId { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    [JsonPropertyName("source")]
+    public string? Source { get; init; }
+
+    /// <summary>The NTFS junction hcsctl created, <c>&lt;root&gt;\&lt;vmId&gt;\&lt;name&gt;</c>.</summary>
+    [JsonPropertyName("junction")]
+    public string? Junction { get; init; }
+
+    /// <summary>The share-relative path, <c>&lt;vmId&gt;\&lt;name&gt;</c>. The tail of the guest's UNC.</summary>
+    [JsonPropertyName("relativePath")]
+    public string? RelativePath { get; init; }
+
+    /// <summary>The share this exposure lives under: <c>hcsctl-files</c> (rw) or <c>hcsctl-files-ro</c> (ro).</summary>
+    [JsonPropertyName("share")]
+    public string? Share { get; init; }
+
+    [JsonPropertyName("readOnly")]
+    public bool ReadOnly { get; init; }
+
+    /// <summary>Whether hcsctl added the share user's ACE to the source (false if it was already granted).</summary>
+    [JsonPropertyName("aceAdded")]
+    public bool AceAdded { get; init; }
+}
+
+/// <summary><c>hcsctl files unexpose</c> — the exposures removed and the source ACEs revoked.</summary>
+internal sealed record HcsCtlFilesUnexposeDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("command")]
+    public string? Command { get; init; }
+
+    [JsonPropertyName("vmId")]
+    public string? VmId { get; init; }
+
+    /// <summary>Names of the exposures removed. Empty when the VM had none (a no-op success).</summary>
+    [JsonPropertyName("removed")]
+    public IReadOnlyList<string> Removed { get => field ?? []; init; } = [];
+
+    /// <summary>Source directories whose share-user ACE was revoked because nothing else referenced them.</summary>
+    [JsonPropertyName("aceRevoked")]
+    public IReadOnlyList<string> AceRevoked { get => field ?? []; init; } = [];
+}
+
+/// <summary><c>hcsctl files ls</c> — every recorded exposure under the root, for scavenging.</summary>
+internal sealed record HcsCtlFilesListDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("command")]
+    public string? Command { get; init; }
+
+    [JsonPropertyName("root")]
+    public string? Root { get; init; }
+
+    [JsonPropertyName("exposures")]
+    public IReadOnlyList<HcsCtlFilesExposureRow> Exposures { get => field ?? []; init; } = [];
+}
+
+/// <summary>One row of <c>files ls</c>, carrying the owner labels the exposing run stamped.</summary>
+internal sealed record HcsCtlFilesExposureRow
+{
+    private static readonly Dictionary<string, string> EmptyLabels = [];
+
+    [JsonPropertyName("vmId")]
+    public string? VmId { get; init; }
+
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    [JsonPropertyName("source")]
+    public string? Source { get; init; }
+
+    [JsonPropertyName("share")]
+    public string? Share { get; init; }
+
+    [JsonPropertyName("readOnly")]
+    public bool ReadOnly { get; init; }
+
+    /// <summary>Opaque key/value pairs the exposing AppHost stamped; the owner-pid label lives here.</summary>
+    [JsonPropertyName("labels")]
+    public IReadOnlyDictionary<string, string> Labels { get => field ?? EmptyLabels; init; } = EmptyLabels;
+}
+
+/// <summary>
+/// <c>hcsctl guest mount</c> — one host SMB share attached inside a VM guest, over the guest's own
+/// SMB client. <see cref="Applied"/> is the mechanism the agent chose by its OS (<c>cifs</c> on
+/// Linux, a share connection plus a directory symlink on Windows).
+/// </summary>
+internal sealed record HcsCtlGuestMountDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("command")]
+    public string? Command { get; init; }
+
+    [JsonPropertyName("vmId")]
+    public string? VmId { get; init; }
+
+    [JsonPropertyName("unc")]
+    public string? Unc { get; init; }
+
+    [JsonPropertyName("path")]
+    public string? Path { get; init; }
+
+    [JsonPropertyName("readOnly")]
+    public bool ReadOnly { get; init; }
+
+    /// <summary>The agent's mechanism: <c>cifs</c> or <c>symlink</c>.</summary>
+    [JsonPropertyName("applied")]
+    public string? Applied { get; init; }
+
+    [JsonPropertyName("elapsedMs")]
+    public long ElapsedMs { get; init; }
+}
+
+/// <summary><c>hcsctl guest unmount</c> — the mount at a guest path detached.</summary>
+internal sealed record HcsCtlGuestUnmountDocument
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; init; }
+
+    [JsonPropertyName("command")]
+    public string? Command { get; init; }
+
+    [JsonPropertyName("vmId")]
+    public string? VmId { get; init; }
+
+    [JsonPropertyName("path")]
+    public string? Path { get; init; }
+
+    [JsonPropertyName("applied")]
+    public string? Applied { get; init; }
+
+    [JsonPropertyName("elapsedMs")]
+    public long ElapsedMs { get; init; }
+}
+
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = false)]
 [JsonSerializable(typeof(HcsCtlStatsDocument))]
 [JsonSerializable(typeof(HcsCtlProcessListDocument))]
@@ -796,4 +1047,10 @@ internal sealed record HcsCtlStreamRecord
 [JsonSerializable(typeof(HcsCtlVmStartDocument))]
 [JsonSerializable(typeof(HcsCtlVmAddressDocument))]
 [JsonSerializable(typeof(HcsCtlVmListDocument))]
+[JsonSerializable(typeof(HcsCtlFilesInspectDocument))]
+[JsonSerializable(typeof(HcsCtlFilesExposeDocument))]
+[JsonSerializable(typeof(HcsCtlFilesUnexposeDocument))]
+[JsonSerializable(typeof(HcsCtlFilesListDocument))]
+[JsonSerializable(typeof(HcsCtlGuestMountDocument))]
+[JsonSerializable(typeof(HcsCtlGuestUnmountDocument))]
 internal sealed partial class HcsCtlJsonContext : JsonSerializerContext;

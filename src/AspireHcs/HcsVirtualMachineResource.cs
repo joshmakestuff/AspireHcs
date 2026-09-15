@@ -2,6 +2,20 @@
 namespace Aspire.Hosting.ApplicationModel;
 
 /// <summary>
+/// One host directory made reachable to a VM guest as a bind mount. Unlike the container's mount
+/// — carried over VSMB, fixed in the compute-system document at create — a VM mount is carried
+/// over plain SMB and applied after the guest boots: the host exposes the directory under a share
+/// (<c>files expose</c>) and the guest agent mounts it (<c>guest mount</c>).
+/// </summary>
+/// <param name="Source">Host directory. Drive-letter absolute; must exist when the VM boots.</param>
+/// <param name="Target">
+/// Where it appears in the guest — an absolute guest path. A Linux guest takes <c>/mnt/data</c>;
+/// a Windows guest takes <c>D:\data</c>.
+/// </param>
+/// <param name="IsReadOnly">When true, the guest mounts through the read-only share.</param>
+internal readonly record struct HcsVmMount(string Source, string Target, bool IsReadOnly);
+
+/// <summary>
 /// A Hyper-V virtual machine, driven through the <c>hcsctl</c> CLI. The VM is ephemeral: created
 /// when the AppHost starts and torn down when it exits.
 /// </summary>
@@ -67,6 +81,23 @@ public sealed class HcsVirtualMachineResource([ResourceName] string name)
 
     /// <summary>Access VLAN id for the NIC's switch port; null means untagged.</summary>
     internal int? VlanId { get; set; }
+
+    /// <summary>
+    /// Host directories mapped into the guest over SMB, in <c>WithBindMount</c> order. Applied
+    /// after boot, not at create; each needs a NIC to reach the host share, so mounts require
+    /// <see cref="WithNetwork"/> and are unsupported on an agentless VM.
+    /// </summary>
+    internal List<HcsVmMount> Mounts { get; } = [];
+
+    /// <summary>
+    /// The <c>files expose</c> name — and the last element of the share-relative path — for the
+    /// mount at <paramref name="index"/> in <see cref="Mounts"/>. Stable across the expose and the
+    /// guest mount of one boot, and a valid hcsctl id (no separators, no reserved name). The
+    /// guest path the developer chose is the mount point; the share sub-path need only be unique
+    /// per VM, so the index is enough and cannot collide with another mount's target basename.
+    /// </summary>
+    internal static string ExposureName(int index)
+        => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"mount{index}");
 
     /// <summary>
     /// The guest's fixed in-guest address — the agentless switch. When set, the boot never asks

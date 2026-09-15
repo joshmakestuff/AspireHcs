@@ -70,6 +70,39 @@ network a Windows container host conventionally has, out of reach of Default Swi
 A resource that never calls `WithNetwork()` gets no NIC, and declaring endpoints on it is
 refused at start.
 
+## Bind mounts
+
+`WithBindMount(source, target, isReadOnly)` maps a host directory into a guest, on either resource
+kind. A relative `source` resolves against the AppHost directory, as Aspire's Docker path does.
+
+```csharp
+var vm = builder.AddHcsVm("appliance")
+    .WithVhdx(@"d:\images\rocky.vhdx")
+    .WithNetwork()
+    .WithBindMount(@".\data", "/mnt/data", isReadOnly: true);
+```
+
+The two kinds carry the mount differently. A **container** mount is VSMB, fixed in the compute
+system at create, both paths drive-letter absolute. A **VM** mount is plain SMB, applied after the
+guest boots: the host exposes the directory under a share and the `hcsguest` agent mounts it. So a
+VM mount:
+
+- needs `WithNetwork()` and a running agent — it is refused on an agentless VM (`WithGuestAddress`);
+- takes an absolute **guest** path as the target — `/mnt/data` for a Linux guest, `D:\data` for a
+  Windows guest;
+- requires the host prepared once, elevated, before any run:
+
+  ```
+  hcsctl files prepare --network <name>   # elevated, once per host
+  ```
+
+  An unprepared host, or a VM whose network the share's firewall rule does not admit, fails start
+  naming that exact command. Exposing and mounting per run are **not** elevated.
+
+Read-only is host-enforced (a separate read-only share), not trusted from the guest. On a Windows
+guest the mount is visible to the agent and what AspireHcs drives through it, not to an interactive
+RDP session. Exposures are torn down with the VM and, if a run crashes, scavenged by the next one.
+
 ## Consuming other resources: `WithReference`
 
 HCS resources are consumers, not only servers:
@@ -184,6 +217,7 @@ Virtual machines:
 - The guest image must load the Hyper-V integration drivers (`hv_vmbus`, `hv_netvsc`, `hv_sock` on Linux; in-box on Windows).
 - The guest image must configure its NIC for DHCP when using `WithNetwork()`; the agent reports the leased address — the default for stock Linux and Windows images. (Containers do **not** work this way: their address is assigned statically and known before the container starts.)
 - Concurrent AppHosts on one host are supported: each run tags its HCN endpoints with its process id, and leftover endpoints from crashed runs are scavenged only once their owning process is gone. All VMs share the Default Switch's DHCP pool.
+- `WithBindMount(...)` additionally needs the host prepared once, elevated (`hcsctl files prepare --network <name>`), the guest's SMB client (Linux `cifs`; Windows `LanmanWorkstation`), and the VM's network admitted by the share's firewall rule. Start names the exact command when any of these is missing. Bind mounts are refused on an agentless VM.
 
 Containers:
 
