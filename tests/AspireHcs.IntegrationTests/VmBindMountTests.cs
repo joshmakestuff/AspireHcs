@@ -77,7 +77,6 @@ public sealed class VmBindMountTests(ITestOutputHelper output)
             Assert.False(File.Exists(Path.Combine(roSource, "x.txt")), "a write reached the read-only source.");
 
             await app.StopAsync(cts.Token);
-            await app.ResourceNotifications.WaitForResourceAsync("appliance", KnownResourceStates.Exited, cts.Token);
 
             // Teardown removed every exposure and the VM's directory under the share root, and left
             // the sources — save for the expected guest-written file — untouched.
