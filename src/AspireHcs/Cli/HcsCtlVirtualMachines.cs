@@ -31,7 +31,7 @@ internal static class HcsCtlVirtualMachines
         return hcsctl.InvokeAsync(BuildCreateArguments(options), HcsCtlJsonContext.Default.HcsCtlVmCreateDocument, progress, cancellationToken);
     }
 
-    /// <summary>The <c>vm create</c> argv for <paramref name="options"/>. Pure; pinned by tests.</summary>
+    /// <summary>Builds the <c>vm create</c> arguments for <paramref name="options"/>.</summary>
     internal static List<string> BuildCreateArguments(HcsCtlVmCreateOptions options)
     {
         List<string> arguments =

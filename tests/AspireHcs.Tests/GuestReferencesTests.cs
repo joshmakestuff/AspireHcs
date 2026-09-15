@@ -155,8 +155,7 @@ public class GuestReferencesTests
         Assert.Equal("62315", rewritten["CACHE_PORT"]);
     }
 
-    // The #67-shaped pin: literals survive whatever they spell, even alongside a real reference
-    // being rewritten in the same environment.
+    // Regression for #67: rewriting a reference must leave literal values unchanged.
     [Fact]
     public void Literal_values_pass_through_untouched_whatever_they_spell()
     {
@@ -398,8 +397,7 @@ public class GuestReferencesTests
         Assert.Equal("http://172.18.176.1:6488/;http://172.18.176.1:66063/", result["API"]);
     }
 
-    // The honest failure for a networkless consumer with host references: the guest has no NIC,
-    // so no gateway exists to carry the relayed traffic.
+    // A networkless guest cannot reach the relay through a gateway.
     [Fact]
     public async Task A_resource_without_a_network_is_refused_naming_the_ports()
     {

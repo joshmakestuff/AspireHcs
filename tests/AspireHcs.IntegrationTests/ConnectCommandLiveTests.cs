@@ -148,8 +148,7 @@ public sealed class ConnectCommandLiveTests(ITestOutputHelper output)
             ResourceEvent running = await app.ResourceNotifications.WaitForResourceAsync(
                 "appliance", e => e.Snapshot.State?.Text == KnownResourceStates.Running, cts.Token);
 
-            // Running arrives before the DHCP lease surfaces. Wait for the allocation the same
-            // way the command's availability gate reads it.
+            // Read the allocation through the same lookup used by command availability.
             EndpointAnnotation endpoint = vm.Annotations.OfType<EndpointAnnotation>().Single(e => e.Name == "ssh");
             DateTime deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
             while (endpoint.AllocatedEndpoint is null && DateTime.UtcNow < deadline)

@@ -250,8 +250,7 @@ internal static class ConnectCommands
         => ConnectAvailability.CurrentState(services, resourceName);
 
     /// <summary>
-    /// Enabled only when the VM is Running and the endpoint has an address. The guest reaches
-    /// Running before its DHCP lease surfaces.
+    /// Enabled only when the VM is Running and the endpoint has an address.
     /// </summary>
     private static ResourceCommandState Availability(
         HcsVirtualMachineResource resource, string endpointName, UpdateCommandStateContext context)

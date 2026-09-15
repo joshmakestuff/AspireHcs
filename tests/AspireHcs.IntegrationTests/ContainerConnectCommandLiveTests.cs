@@ -54,9 +54,7 @@ public sealed class ContainerConnectCommandLiveTests(ITestOutputHelper output)
 
         ProcessStartInfo probe = new(built.FileName)
         {
-            // Redirected: a console window would carry the answer out of the test's reach. This
-            // is exactly what trips hcsctl's --tty guard (it checks its OWN stdin/stdout), which
-            // is the point: a real console session is the manual check noted above.
+            // Redirection captures the error and deliberately triggers hcsctl's --tty guard.
             UseShellExecute = false,
             RedirectStandardError = true,
             RedirectStandardOutput = true,

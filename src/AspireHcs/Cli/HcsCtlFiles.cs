@@ -57,7 +57,7 @@ internal static class HcsCtlFiles
             HcsCtlJsonContext.Default.HcsCtlFilesExposeDocument, progress, cancellationToken);
     }
 
-    /// <summary>The <c>files expose</c> argv. Pure; pinned by tests.</summary>
+    /// <summary>Builds the <c>files expose</c> arguments.</summary>
     internal static List<string> BuildExposeArguments(
         string vmId, string name, string source, bool readOnly,
         IReadOnlyDictionary<string, string>? labels, string? root)

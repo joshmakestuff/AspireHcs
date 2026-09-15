@@ -10,10 +10,7 @@ using Xunit.Abstractions;
 
 namespace AspireHcs.IntegrationTests;
 
-// The Windows Server 2025 image is the suite's positive fixture: a guest that serves something.
-// The Linux image can only prove the negative half (refusal withholds readiness). These tests
-// prove the other half live: the health check goes Healthy against a real guest listener,
-// readiness fires because of it, and the EMS serial console streams through the product pump.
+// Uses Windows Server 2025 to check a live listener, resource readiness, and EMS console logs.
 [SupportedOSPlatform("windows10.0.17763")]
 public sealed class WindowsGuestFixtureTests(ITestOutputHelper output)
 {

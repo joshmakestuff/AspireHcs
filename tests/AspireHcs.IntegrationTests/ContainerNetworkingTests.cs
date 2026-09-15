@@ -152,10 +152,7 @@ public sealed class ContainerNetworkingTests(ITestOutputHelper output)
     // Endpoints without a network can never resolve. Caught before anything is created, so no
     // compute system is left behind.
     //
-    // The network is stripped explicitly: the sample's worker calls WithNetwork(), and with it
-    // in place the no-network guard cannot fire — this test then passed only by riding the
-    // boot's reaction to its fast workload, not the guard it names (found 2026-08-30 when that
-    // reaction changed).
+    // Remove the sample's WithNetwork setting so this exercises the no-network guard.
     [SkippableFact]
     public async Task An_endpoint_without_a_network_fails_before_anything_is_created()
     {

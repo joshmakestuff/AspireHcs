@@ -7,9 +7,7 @@ namespace AspireHcs.Hosting;
 /// <summary>
 /// Reports healthy once an HTTPS GET to a resource's endpoint answers with a 2xx/3xx status.
 /// With <paramref name="acceptAnyServerCertificate"/> the TLS handshake accepts any certificate
-/// — the check then proves the service answers, not the cert's identity. That is the point:
-/// Aspire's built-in HTTPS health check validates certificates, which a self-signed appliance
-/// can never pass.
+/// without validating its identity, allowing checks against certificates the host does not trust.
 /// </summary>
 /// <remarks>
 /// The endpoint is looked up per check, and the URI built per call: the address can change

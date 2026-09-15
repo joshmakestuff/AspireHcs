@@ -202,9 +202,7 @@ internal static class HcsContainerOrchestrator
     }
 
     /// <summary>
-    /// Removes containers left behind by dead AppHost processes. They outlive their owner —
-    /// the compute system is host-global and hcsctl's state.json is on disk — so nothing reclaims
-    /// them but this.
+    /// Removes containers left behind by exited AppHost processes.
     /// </summary>
     /// <remarks>
     /// Deletion requires <em>proof of abandonment</em>: an id this integration wrote, whose
@@ -249,7 +247,7 @@ internal static class HcsContainerOrchestrator
     }
 
     /// <summary>
-    /// Decides which listed containers are abandoned leftovers. Pure. Anything not written by
+    /// Selects abandoned containers. Anything not written by
     /// this integration, owned by a live process, or belonging to this run is left alone.
     /// </summary>
     internal static IEnumerable<string> SelectScavengeable(
@@ -264,8 +262,7 @@ internal static class HcsContainerOrchestrator
                 continue;
             }
 
-            // An id this integration did not write belongs to another tool or a person at a shell.
-            // The prefix is not a licence to delete; the pid is.
+            // Require a complete integration id, not just a matching prefix.
             if (HcsContainerResource.OwnerProcessId(id) is not { } pid)
             {
                 continue;

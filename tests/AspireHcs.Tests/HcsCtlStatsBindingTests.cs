@@ -185,10 +185,7 @@ public class HcsCtlStatsBindingTests
         Assert.Equal(TimeSpan.Zero, document.Processes.Single(p => p.ProcessId == 588).CpuTime);
     }
 
-    // HCS reports no parent process id, so the list is flat and cannot be made a tree. If a
-    // ParentProcessId appears on the wire, this test is where to revisit that. Restored after
-    // #95 deleted it: it proves an absence, not behavior, but it is the only enforceable home
-    // for the flat-rendering decision (owner's call, 2026-08-30).
+    // HCS reports no parent process id; the dashboard renders a flat process list.
     [Fact]
     public void The_process_shape_carries_no_parent_pid()
     {

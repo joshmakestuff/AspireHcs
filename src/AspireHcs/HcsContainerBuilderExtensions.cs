@@ -14,8 +14,7 @@ public static class HcsContainerBuilderExtensions
     /// Adds a Hyper-V-isolated Windows container as an Aspire resource, run through
     /// <c>hcsctl</c>. Requires Windows 10 1809+ with the Hyper-V feature and membership in the
     /// Hyper-V Administrators group; the image must already be imported into an hcsctl store,
-    /// which is a one-time elevated step. Excluded from publish manifests: a local container
-    /// run this way has no deployment story.
+    /// which is a one-time elevated step. This resource is excluded from publish manifests.
     /// </summary>
     /// <remarks>
     /// There is no isolation option. Hyper-V isolation is the only mode AspireHcs supports:
@@ -29,13 +28,10 @@ public static class HcsContainerBuilderExtensions
 
         if (builder.ExecutionContext.IsRunMode)
         {
-            // The package contract: an unsupported host fails at model-build time.
             HcsPlatform.ThrowIfUnsupported();
         }
 
-        // One relay per AppHost session, shared by every HCS consumer — the multiplexing shape.
-        // Registered here so the instance can resolve it; it starts nothing until a reference
-        // actually needs forwarding.
+        // Shared by all HCS resources; starts only when a reference needs forwarding.
         builder.Services.TryAddSingleton<DockerRelay>();
 
         HcsContainerResource resource = new(name);
@@ -88,7 +84,7 @@ public static class HcsContainerBuilderExtensions
 
     /// <summary>
     /// Names the hcsctl store holding the image. Defaults to <c>ASPIREHCS_STORE</c> when set,
-    /// otherwise hcsctl's per-user store — which is rarely where a prepared image lives.
+    /// otherwise hcsctl's per-user store.
     /// </summary>
     public static IResourceBuilder<HcsContainerResource> WithStore(
         this IResourceBuilder<HcsContainerResource> builder, string storePath)
@@ -175,8 +171,7 @@ public static class HcsContainerBuilderExtensions
     }
 
     /// <summary>
-    /// Sets the guest's C: size. Without this the guest gets hcsctl's default of <b>20 GB</b>,
-    /// which anything that unpacks, builds or caches inside the container can fill.
+    /// Sets the guest's C: size. Defaults to hcsctl's <b>20 GB</b>.
     /// </summary>
     /// <remarks>
     /// The guest filesystem exposes slightly less than the requested size.
@@ -225,8 +220,7 @@ public static class HcsContainerBuilderExtensions
     /// the same pool that leases the VMs theirs.
     /// </para>
     /// <para>
-    /// The network must already exist: hcsctl cannot create one
-    /// (<see href="https://github.com/joshmakestuff/hcsctl/issues/15">hcsctl#15</see>).
+    /// The network must already exist; this method does not create it.
     /// </para>
     /// </remarks>
     public static IResourceBuilder<HcsContainerResource> WithNetwork(

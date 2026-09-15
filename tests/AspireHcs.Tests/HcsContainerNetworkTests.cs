@@ -31,9 +31,7 @@ public class HcsContainerNetworkTests
         Assert.Equal(HcsNetwork.DefaultSwitchName, builder.AddHcsVm("vm").WithNetwork().Resource.NetworkName);
     }
 
-    // hcsctl cannot create a network (https://github.com/joshmakestuff/hcsctl/issues/15), so
-    // this names an existing one. `nat` stays expressible: a container placed there cannot see
-    // the Default Switch residents.
+    // WithNetwork names an existing network without creating one.
     [Fact]
     public void A_named_network_is_honoured()
     {

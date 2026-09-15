@@ -1,7 +1,7 @@
 namespace AspireHcs.Cli;
 
 /// <summary>
-/// The <c>network</c> verbs, as methods. The group is read-only and unelevated, and it rejects
+/// Read-only, unelevated <c>network</c> operations. The CLI group rejects
 /// <c>--store</c>; <see cref="HcsCtl"/> omits it for this group.
 /// </summary>
 internal static class HcsCtlNetworks

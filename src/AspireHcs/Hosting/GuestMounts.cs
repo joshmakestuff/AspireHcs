@@ -123,7 +123,6 @@ internal static class GuestMounts
     /// <summary>
     /// The UNC a guest mounts: <c>\\&lt;gateway&gt;\&lt;share&gt;\&lt;relativePath&gt;</c>. The
     /// relative path already carries the <c>&lt;vmId&gt;\&lt;name&gt;</c> tail hcsctl reported.
-    /// Pure; pinned by tests.
     /// </summary>
     public static string BuildUnc(string gateway, string share, string relativePath)
         => $@"\\{gateway}\{share}\{relativePath}";

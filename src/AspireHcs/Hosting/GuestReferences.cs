@@ -262,11 +262,8 @@ internal static partial class GuestReferences
     }
 
     /// <summary>
-    /// The whole redirect, in the order that keeps injected values honest: find the loopback
-    /// targets, stand a relay forward up for each, and only then rewrite — so a value naming
-    /// <c>&lt;gateway&gt;:&lt;relay port&gt;</c> never reaches a guest before something answers
-    /// there. An environment that references nothing on the host's loopback passes through
-    /// untouched, and Docker is never required for it.
+    /// Starts relay forwards before rewriting loopback references to their published ports.
+    /// Environments without loopback references pass through without starting Docker.
     /// </summary>
     /// <param name="readNetworks">Reads <c>hcsctl network ls</c>; injectable so the flow is testable.</param>
     /// <param name="inspectNetwork">Reads <c>hcsctl network inspect</c> for one network id.</param>

@@ -134,7 +134,7 @@ internal static class HcsCtlGuests
             HcsCtlJsonContext.Default.HcsCtlGuestMountDocument, progress, cancellationToken);
     }
 
-    /// <summary>The <c>guest mount</c> argv. Pure; pinned by tests.</summary>
+    /// <summary>Builds the <c>guest mount</c> arguments.</summary>
     internal static List<string> BuildMountArguments(
         string vmId, string unc, string path, string credentialTarget,
         bool readOnly, int uid, int gid, TimeSpan? timeout)

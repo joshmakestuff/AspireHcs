@@ -21,7 +21,7 @@ public class HcsContainerBuilderTests
         Assert.Equal(2, resource.ProcessorCount);
         Assert.StartsWith($"aspirehcs-{Environment.ProcessId}-worker-", resource.ContainerId);
 
-        // A locally-run container has no deployment story and must not land in a manifest.
+        // Local HCS resources are excluded from publish manifests.
         Assert.Contains(resource.Annotations, a => a is ManifestPublishingCallbackAnnotation);
     }
 
